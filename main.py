@@ -4,6 +4,7 @@ import random
 import logging
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
 from fastapi import FastAPI, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
@@ -19,6 +20,9 @@ JWT_SECRET     = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALGORITHM  = "HS256"
 JWT_EXPIRE_DAYS = 30
 SMS_CODE_TTL_MIN = 5
+
+BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
+GROUP_ID   = os.getenv("GROUP_ID", "")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -98,6 +102,42 @@ class ResendCodeRequest(BaseModel):
         return normalize_phone(v)
 
 
+class OrderRequest(BaseModel):
+    first_name: str
+    last_name: str = ""
+    phone: str
+    branch: str = ""
+    city: str = ""
+    address: str
+    location: str = ""
+    service: str = ""
+    service_type: str = ""
+    pickup_date: str = ""
+    pickup_time: str = ""
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v):
+        v = normalize_phone(v)
+        if not PHONE_RE.match(v):
+            raise ValueError("Неверный формат номера. Используйте +998XXXXXXXXX")
+        return v
+
+    @field_validator("first_name")
+    @classmethod
+    def validate_name(cls, v):
+        if not v.strip():
+            raise ValueError("Укажите имя")
+        return v.strip()
+
+    @field_validator("address")
+    @classmethod
+    def validate_address(cls, v):
+        if not v.strip():
+            raise ValueError("Укажите адрес")
+        return v.strip()
+
+
 # ══════════════════════════════════════
 #  SMS (заглушка — подключить Eskiz позже)
 # ══════════════════════════════════════
@@ -160,7 +200,7 @@ async def register(req: RegisterRequest):
     if existing and existing["is_verified"]:
         raise HTTPException(status_code=400, detail="Этот номер уже зарегистрирован")
 
-    password_hash = pwd_context.hash(req.password)
+    password_hash = pwd_context.hash(req.password[:72])
     await db.create_user(req.phone, password_hash, req.first_name)
 
     code = generate_code()
@@ -209,7 +249,7 @@ async def resend_code(req: ResendCodeRequest):
 @app.post("/api/login")
 async def login(req: LoginRequest):
     user = await db.get_user_by_phone(req.phone)
-    if not user or not pwd_context.verify(req.password, user["password_hash"]):
+    if not user or not pwd_context.verify(req.password[:72], user["password_hash"]):
         raise HTTPException(status_code=401, detail="Неверный номер или пароль")
 
     if not user["is_verified"]:
@@ -241,3 +281,87 @@ async def me(user = Depends(get_current_user)):
 async def my_orders(user = Depends(get_current_user)):
     orders = await db.get_orders_by_phone(user["phone"])
     return {"orders": [dict(o) for o in orders]}
+
+
+# ══════════════════════════════════════
+#  УВЕДОМЛЕНИЕ TELEGRAM-ГРУППЫ О НОВОЙ ЗАЯВКЕ С САЙТА
+# ══════════════════════════════════════
+def md_escape(text):
+    if not text:
+        return ""
+    text = str(text)
+    for ch in ['_', '*', '[', ']', '`']:
+        text = text.replace(ch, f"\\{ch}")
+    return text
+
+
+async def notify_group_new_order(order_num: str, data: "OrderRequest"):
+    if not BOT_TOKEN or not GROUP_ID:
+        logging.warning("BOT_TOKEN/GROUP_ID not set — skipping group notification")
+        return
+
+    full_name = f"{data.first_name} {data.last_name}".strip()
+    text = (
+        f"🌐 Новая заявка {order_num} (сайт)\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"👤 {full_name}\n"
+        f"📞 {data.phone}\n"
+        f"🏢 {data.branch}\n"
+        f"📍 {data.city}\n"
+        f"🏠 {data.address}\n"
+        f"🗺 {data.location or '—'}\n"
+        f"🧺 {data.service}\n"
+        f"⚙️ {data.service_type}\n"
+        f"📅 {data.pickup_date}\n"
+        f"🕐 {data.pickup_time}\n"
+        f"━━━━━━━━━━━━━━━"
+    )
+
+    tel_phone = (data.phone or "").replace("+", "%2B")
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Принять заказ", "callback_data": f"accept_{order_num}_0"},
+                {"text": "📞 Позвонить", "url": f"tel:{tel_phone}"},
+            ],
+            [
+                {"text": "🚗 Назначить водителя", "callback_data": f"driver_{order_num}_0"},
+                {"text": "❌ Отклонить", "callback_data": f"reject_{order_num}_0"},
+            ],
+        ]
+    }
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    payload = {"chat_id": GROUP_ID, "text": text, "reply_markup": keyboard}
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logging.warning(f"Telegram notify failed: {resp.status} {body}")
+    except Exception as e:
+        logging.warning(f"Telegram notify error: {e}")
+
+
+@app.post("/api/orders")
+async def create_order(order: OrderRequest):
+    order_num = await db.get_next_order_num()
+    await db.save_site_order({
+        "order_num":    order_num,
+        "first_name":   order.first_name,
+        "last_name":    order.last_name,
+        "phone":        order.phone,
+        "branch":       order.branch,
+        "city":         order.city,
+        "address":      order.address,
+        "location":     order.location,
+        "service":      order.service,
+        "pickup_date":  order.pickup_date,
+        "pickup_time":  order.pickup_time,
+        "note":         f"Тип услуги: {order.service_type}" if order.service_type else "",
+    })
+
+    await notify_group_new_order(order_num, order)
+
+    return {"ok": True, "order_num": order_num}

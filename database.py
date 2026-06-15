@@ -49,6 +49,9 @@ async def create_tables():
 
         CREATE INDEX IF NOT EXISTS idx_users_phone     ON users(phone);
         CREATE INDEX IF NOT EXISTS idx_sms_codes_phone ON sms_codes(phone);
+
+        -- Заявки с сайта не имеют Telegram ID — снимаем NOT NULL, если ещё установлен
+        ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL;
         """)
     logging.info("✅ API: Tables created/verified")
 
@@ -159,3 +162,66 @@ async def get_orders_by_tg_id(tg_id: int):
             ORDER BY created_at DESC
             LIMIT 50
         """, tg_id)
+
+
+# ══════════════════════════════════════
+#  СОЗДАНИЕ ЗАЯВКИ С САЙТА
+# ══════════════════════════════════════
+async def get_next_order_num(prefix: str = "ARTEZ") -> str:
+    """Возвращает следующий номер заказа на основе данных в БД (общий с ботом счётчик)"""
+    if not pool:
+        return f"{prefix}-1001"
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT order_num FROM orders
+            WHERE order_num LIKE $1
+            ORDER BY id DESC
+            LIMIT 1
+        """, f"{prefix}-%")
+        if row and row["order_num"]:
+            try:
+                last_num = int(row["order_num"].split("-")[-1])
+            except (ValueError, IndexError):
+                last_num = 1000
+        else:
+            last_num = 1000
+        return f"{prefix}-{last_num + 1}"
+
+
+async def save_site_order(data: dict) -> str:
+    """Сохраняет заявку, оформленную на сайте (source='site'), без обязательного Telegram ID"""
+    if not pool:
+        return data.get("order_num", "")
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO orders (
+                order_num, source,
+                client_tg_id, client_first_name, client_last_name, client_phone,
+                branch, city, address, location, service, pickup_date, pickup_time, note,
+                status
+            ) VALUES (
+                $1, 'site',
+                NULL, $2, $3, $4,
+                $5, $6, $7, $8, $9, $10, $11, $12,
+                'new'
+            )
+            ON CONFLICT (order_num) DO NOTHING
+        """,
+            data.get("order_num"),
+            data.get("first_name"),
+            data.get("last_name", ""),
+            data.get("phone"),
+            data.get("branch"),
+            data.get("city"),
+            data.get("address"),
+            data.get("location"),
+            data.get("service"),
+            data.get("pickup_date"),
+            data.get("pickup_time"),
+            data.get("note"),
+        )
+        await conn.execute("""
+            INSERT INTO order_status_history (order_num, new_status, note)
+            VALUES ($1, 'new', 'Заявка создана через сайт')
+        """, data.get("order_num"))
+    return data.get("order_num", "")
