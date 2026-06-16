@@ -242,3 +242,31 @@ async def get_all_prices() -> dict:
     for r in rows:
         result.setdefault(r["service_key"], {})[r["type_key"]] = r["price"]
     return result
+
+
+async def set_price(service_key: str, type_key: str, price: int) -> bool:
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO prices (service_key, type_key, price, updated_at)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (service_key, type_key) DO UPDATE SET
+                price = EXCLUDED.price,
+                updated_at = NOW()
+        """, service_key, type_key, price)
+    return True
+
+
+async def get_admin_orders(status: str = None, limit: int = 50):
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        if status:
+            return await conn.fetch(
+                "SELECT * FROM orders WHERE status=$1 ORDER BY created_at DESC LIMIT $2",
+                status, limit
+            )
+        return await conn.fetch(
+            "SELECT * FROM orders ORDER BY created_at DESC LIMIT $1", limit
+        )

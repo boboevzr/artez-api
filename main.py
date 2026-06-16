@@ -20,6 +20,7 @@ JWT_SECRET     = os.getenv("JWT_SECRET", "dev-secret-change-me")
 JWT_ALGORITHM  = "HS256"
 JWT_EXPIRE_DAYS = 30
 SMS_CODE_TTL_MIN = 5
+ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
 
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 GROUP_ID   = os.getenv("GROUP_ID", "")
@@ -358,6 +359,68 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
                     logging.warning(f"Telegram notify failed: {resp.status} {body}")
     except Exception as e:
         logging.warning(f"Telegram notify error: {e}")
+
+
+# ══════════════════════════════════════
+#  ADMIN
+# ══════════════════════════════════════
+class AdminLoginRequest(BaseModel):
+    password: str
+
+class SetPriceRequest(BaseModel):
+    service_key: str
+    type_key: str
+    price: int
+
+ADMIN_TOKEN_PREFIX = "admin:"
+
+def create_admin_token() -> str:
+    payload = {
+        "sub": "admin",
+        "exp": datetime.now(timezone.utc) + timedelta(days=1),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+async def get_admin(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("sub") != "admin":
+            raise HTTPException(status_code=403, detail="Нет доступа")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    return True
+
+@app.post("/api/admin/login")
+async def admin_login(req: AdminLoginRequest):
+    if not ADMIN_PASS or req.password != ADMIN_PASS:
+        raise HTTPException(status_code=401, detail="Неверный пароль")
+    return {"ok": True, "token": create_admin_token()}
+
+@app.get("/api/admin/prices")
+async def admin_get_prices(_=Depends(get_admin)):
+    prices = await db.get_all_prices()
+    return {"ok": True, "prices": prices}
+
+@app.put("/api/admin/prices")
+async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
+    SERVICE_KEYS = ["carpet","carpet_home","sofa","mattress","curtains"]
+    TYPE_KEYS    = ["standard","express"]
+    if req.service_key not in SERVICE_KEYS:
+        raise HTTPException(status_code=400, detail=f"Неверная услуга: {req.service_key}")
+    if req.type_key not in TYPE_KEYS:
+        raise HTTPException(status_code=400, detail=f"Неверный тип: {req.type_key}")
+    if req.price <= 0:
+        raise HTTPException(status_code=400, detail="Цена должна быть > 0")
+    await db.set_price(req.service_key, req.type_key, req.price)
+    return {"ok": True}
+
+@app.get("/api/admin/orders")
+async def admin_get_orders(_=Depends(get_admin), status: str = None, limit: int = 50):
+    prices = await db.get_admin_orders(status=status, limit=limit)
+    return {"ok": True, "orders": [dict(o) for o in prices]}
 
 
 @app.post("/api/orders")
