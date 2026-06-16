@@ -194,6 +194,22 @@ async def health():
     return {"ok": True}
 
 
+@app.get("/api/prices")
+async def get_prices():
+    """Возвращает актуальные цены из БД для калькулятора и прайс-листа на сайте"""
+    prices = await db.get_all_prices()
+    if not prices:
+        # Дефолты на случай пустой таблицы
+        prices = {
+            "carpet":      {"standard": 13000, "express": 18000},
+            "carpet_home": {"standard": 15000, "express": 20000},
+            "sofa":        {"standard": 100000, "express": 150000},
+            "mattress":    {"standard": 30000, "express": 40000},
+            "curtains":    {"standard": 5000,  "express": 8000},
+        }
+    return {"ok": True, "prices": prices}
+
+
 @app.post("/api/register")
 async def register(req: RegisterRequest):
     existing = await db.get_user_by_phone(req.phone)

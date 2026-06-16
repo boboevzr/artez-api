@@ -225,3 +225,20 @@ async def save_site_order(data: dict) -> str:
             VALUES ($1, 'new', 'Заявка создана через сайт')
         """, data.get("order_num"))
     return data.get("order_num", "")
+
+
+# ══════════════════════════════════════
+#  ЦЕНЫ (общая таблица с ботом)
+# ══════════════════════════════════════
+async def get_all_prices() -> dict:
+    """Возвращает все цены из таблицы prices: {service_key: {type_key: price}}"""
+    if not pool:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT service_key, type_key, price FROM prices ORDER BY service_key, type_key"
+        )
+    result = {}
+    for r in rows:
+        result.setdefault(r["service_key"], {})[r["type_key"]] = r["price"]
+    return result
