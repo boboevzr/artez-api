@@ -202,13 +202,15 @@ async def get_prices():
     if not prices:
         # Дефолты на случай пустой таблицы
         prices = {
-            "carpet":      {"standard": 13000, "express": 18000},
-            "carpet_home": {"standard": 15000, "express": 20000},
-            "sofa":        {"standard": 100000, "express": 150000},
-            "mattress":    {"standard": 30000, "express": 40000},
-            "curtains":    {"standard": 5000,  "express": 8000},
+            "carpet":      {"standard": {"price": 13000, "unit_key": "m2", "min_order": 10}, "express": {"price": 18000, "unit_key": "m2", "min_order": 10}},
+            "carpet_home": {"standard": {"price": 15000, "unit_key": "m2", "min_order": 10}, "express": {"price": 20000, "unit_key": "m2", "min_order": 10}},
+            "sofa":        {"standard": {"price": 100000, "unit_key": "m2", "min_order": None}, "express": {"price": 150000, "unit_key": "m2", "min_order": None}},
+            "mattress":    {"standard": {"price": 30000, "unit_key": "m2", "min_order": None}, "express": {"price": 40000, "unit_key": "m2", "min_order": None}},
+            "curtains":    {"standard": {"price": 5000,  "unit_key": "m2", "min_order": None}, "express": {"price": 8000,  "unit_key": "m2", "min_order": None}},
         }
-    return {"ok": True, "prices": prices}
+    units = await db.get_all_units()
+    units_dict = {u["key"]: dict(u) for u in units}
+    return {"ok": True, "prices": prices, "units": units_dict}
 
 
 @app.post("/api/register")
@@ -371,6 +373,15 @@ class SetPriceRequest(BaseModel):
     service_key: str
     type_key: str
     price: int
+    unit_key: str = None
+    min_order: float = None
+
+class UnitRequest(BaseModel):
+    key: str
+    name_ru: str
+    name_uz: str
+    symbol_ru: str
+    symbol_uz: str
 
 ADMIN_TOKEN_PREFIX = "admin:"
 
@@ -414,7 +425,35 @@ async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
         raise HTTPException(status_code=400, detail=f"Неверный тип: {req.type_key}")
     if req.price <= 0:
         raise HTTPException(status_code=400, detail="Цена должна быть > 0")
-    await db.set_price(req.service_key, req.type_key, req.price)
+    if req.min_order is not None and req.min_order <= 0:
+        raise HTTPException(status_code=400, detail="Минимальный заказ должен быть > 0")
+    await db.set_price(req.service_key, req.type_key, req.price, unit_key=req.unit_key, min_order=req.min_order)
+    return {"ok": True}
+
+@app.get("/api/units")
+async def get_units_public():
+    """Публичный эндпоинт — список единиц измерения для сайта"""
+    units = await db.get_all_units()
+    return {"ok": True, "units": [dict(u) for u in units]}
+
+@app.get("/api/admin/units")
+async def admin_get_units(_=Depends(get_admin)):
+    units = await db.get_all_units()
+    return {"ok": True, "units": [dict(u) for u in units]}
+
+@app.put("/api/admin/units")
+async def admin_set_unit(req: UnitRequest, _=Depends(get_admin)):
+    if not req.key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключ единицы измерения")
+    await db.add_unit(req.key.strip(), req.name_ru.strip(), req.name_uz.strip(),
+                       req.symbol_ru.strip(), req.symbol_uz.strip())
+    return {"ok": True}
+
+@app.delete("/api/admin/units/{key}")
+async def admin_delete_unit(key: str, _=Depends(get_admin)):
+    ok = await db.delete_unit(key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Единица измерения не найдена")
     return {"ok": True}
 
 @app.get("/api/admin/orders")
