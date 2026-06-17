@@ -116,6 +116,7 @@ class OrderRequest(BaseModel):
     service_type: str = ""
     pickup_date: str = ""
     pickup_time: str = ""
+    is_quick: bool = False
 
     @field_validator("phone")
     @classmethod
@@ -321,21 +322,31 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
         return
 
     full_name = f"{data.first_name} {data.last_name}".strip()
-    text = (
-        f"🌐 Новая заявка {order_num} (сайт)\n"
-        f"━━━━━━━━━━\n"
-        f"👤 {full_name}\n"
-        f"📞 {data.phone}\n"
-        f"🏢 {data.branch}\n"
-        f"📍 {data.city}\n"
-        f"🏠 {data.address}\n"
-        f"🗺 {data.location or '—'}\n"
-        f"🧺 {data.service}\n"
-        f"⚙️ {data.service_type}\n"
-        f"📅 {data.pickup_date}\n"
-        f"🕐 {data.pickup_time}\n"
-        f"━━━━━━━━━━"
-    )
+
+    if data.is_quick:
+        text = (
+            f"⚡ Быстрая заявка {order_num} (сайт)\n"
+            f"━━━━━━━━━━\n"
+            f"👤 {full_name}\n"
+            f"📞 {data.phone}\n"
+            f"━━━━━━━━━━"
+        )
+    else:
+        text = (
+            f"🌐 Новая заявка {order_num} (сайт)\n"
+            f"━━━━━━━━━━\n"
+            f"👤 {full_name}\n"
+            f"📞 {data.phone}\n"
+            f"🏢 {data.branch}\n"
+            f"📍 {data.city}\n"
+            f"🏠 {data.address}\n"
+            f"🗺 {data.location or '—'}\n"
+            f"🧺 {data.service}\n"
+            f"⚙️ {data.service_type}\n"
+            f"📅 {data.pickup_date}\n"
+            f"🕐 {data.pickup_time}\n"
+            f"━━━━━━━━━━"
+        )
 
     keyboard = {
         "inline_keyboard": [
