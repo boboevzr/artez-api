@@ -91,6 +91,10 @@ async def create_tables():
         );
         ALTER TABLE prices ADD COLUMN IF NOT EXISTS unit_key VARCHAR(20) DEFAULT 'm2';
         ALTER TABLE prices ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL;
+
+        -- Профиль пользователя: адрес и авто
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(200) DEFAULT NULL;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20) DEFAULT NULL;
         """)
 
         # Дефолтные единицы измерения (если таблица пуста)
@@ -175,6 +179,14 @@ async def update_user_password(user_id: int, password_hash: str):
         """, user_id, password_hash)
 
 
+async def update_user_profile(user_id: int, first_name: str, address: str = None, car_plate: str = None):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET first_name=$2, address=$3, car_plate=$4, updated_at=NOW() WHERE id=$1
+        """, user_id, first_name, address, car_plate)
+
+
 # ══════════════════════════════════════
 #  SMS-КОДЫ
 # ══════════════════════════════════════
@@ -256,6 +268,17 @@ async def get_orders_by_phone(phone: str):
             ORDER BY created_at DESC
             LIMIT 50
         """, phone)
+
+
+async def cancel_order_by_phone(order_num: str, phone: str) -> bool:
+    """Отменяет заказ со статусом 'new', принадлежащий этому номеру."""
+    if not pool: return False
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE orders SET status='cancelled'
+            WHERE order_num=$1 AND client_phone=$2 AND status='new'
+        """, order_num, phone)
+        return result != "UPDATE 0"
 
 
 async def get_orders_by_tg_id(tg_id: int):

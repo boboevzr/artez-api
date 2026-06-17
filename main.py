@@ -225,6 +225,16 @@ def generate_code() -> str:
     return f"{secrets.randbelow(1000000):06d}"
 
 
+def sms_text(code: str, purpose: str = "register") -> str:
+    """Формирует текст SMS по требованиям Eskiz (Пункт 2): цель + название ресурса."""
+    if purpose == "reset":
+        return f"Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}"
+    if purpose == "login":
+        return f"Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}"
+    # register (default)
+    return f"Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}"
+
+
 # ══════════════════════════════════════
 #  JWT
 # ══════════════════════════════════════
@@ -293,7 +303,7 @@ async def register(req: RegisterRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, "register", expires_at)
-    await send_sms(req.phone, f"ARTEZ (чистка ковров и мебели): код подтверждения — {code}")
+    await send_sms(req.phone, sms_text(code, "register"))
 
     return {"ok": True, "message": "Код подтверждения отправлен", "phone": req.phone}
 
@@ -315,6 +325,8 @@ async def verify(req: VerifyRequest):
             "id": user["id"],
             "phone": user["phone"],
             "first_name": user["first_name"],
+            "address": user["address"],
+            "car_plate": user["car_plate"],
         }
     }
 
@@ -332,7 +344,7 @@ async def resend_code(req: ResendCodeRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, req.purpose, expires_at)
-    await send_sms(req.phone, f"ARTEZ (чистка ковров и мебели): код подтверждения — {code}")
+    await send_sms(req.phone, sms_text(code, req.purpose))
 
     return {"ok": True, "message": "Код отправлен повторно"}
 
@@ -354,6 +366,8 @@ async def login(req: LoginRequest):
             "id": user["id"],
             "phone": user["phone"],
             "first_name": user["first_name"],
+            "address": user["address"],
+            "car_plate": user["car_plate"],
         }
     }
 
@@ -365,11 +379,15 @@ async def me(user = Depends(get_current_user)):
         "phone": user["phone"],
         "first_name": user["first_name"],
         "is_verified": user["is_verified"],
+        "address": user["address"],
+        "car_plate": user["car_plate"],
     }
 
 
 class UpdateProfileRequest(BaseModel):
     first_name: str
+    address: str | None = None
+    car_plate: str | None = None
 
     @field_validator("first_name")
     @classmethod
@@ -393,7 +411,7 @@ class UpdatePasswordRequest(BaseModel):
 
 @app.patch("/api/me")
 async def update_profile(req: UpdateProfileRequest, user = Depends(get_current_user)):
-    await db.update_user_name(user["id"], req.first_name)
+    await db.update_user_profile(user["id"], req.first_name, req.address, req.car_plate)
     return {"ok": True, "first_name": req.first_name}
 
 
@@ -410,6 +428,14 @@ async def update_password(req: UpdatePasswordRequest, user = Depends(get_current
 async def my_orders(user = Depends(get_current_user)):
     orders = await db.get_orders_by_phone(user["phone"])
     return {"orders": [dict(o) for o in orders]}
+
+
+@app.post("/api/orders/{order_num}/cancel")
+async def cancel_order(order_num: str, user = Depends(get_current_user)):
+    ok = await db.cancel_order_by_phone(order_num, user["phone"])
+    if not ok:
+        raise HTTPException(status_code=400, detail="Заказ не найден или уже нельзя отменить")
+    return {"ok": True}
 
 
 # ══════════════════════════════════════
