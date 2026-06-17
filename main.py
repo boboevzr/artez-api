@@ -368,6 +368,44 @@ async def me(user = Depends(get_current_user)):
     }
 
 
+class UpdateProfileRequest(BaseModel):
+    first_name: str
+
+    @field_validator("first_name")
+    @classmethod
+    def validate_name(cls, v):
+        if not v.strip():
+            raise ValueError("Имя не может быть пустым")
+        return v.strip()
+
+
+class UpdatePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, v):
+        if len(v) < 6:
+            raise ValueError("Пароль должен быть не короче 6 символов")
+        return v
+
+
+@app.patch("/api/me")
+async def update_profile(req: UpdateProfileRequest, user = Depends(get_current_user)):
+    await db.update_user_name(user["id"], req.first_name)
+    return {"ok": True, "first_name": req.first_name}
+
+
+@app.patch("/api/me/password")
+async def update_password(req: UpdatePasswordRequest, user = Depends(get_current_user)):
+    if not pwd_context.verify(req.old_password[:72], user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Неверный текущий пароль")
+    new_hash = pwd_context.hash(req.new_password[:72])
+    await db.update_user_password(user["id"], new_hash)
+    return {"ok": True}
+
+
 @app.get("/api/orders")
 async def my_orders(user = Depends(get_current_user)):
     orders = await db.get_orders_by_phone(user["phone"])

@@ -159,6 +159,22 @@ async def link_user_tg_id(phone: str, tg_id: int):
         """, phone, tg_id)
 
 
+async def update_user_name(user_id: int, first_name: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET first_name=$2, updated_at=NOW() WHERE id=$1
+        """, user_id, first_name)
+
+
+async def update_user_password(user_id: int, password_hash: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET password_hash=$2, updated_at=NOW() WHERE id=$1
+        """, user_id, password_hash)
+
+
 # ══════════════════════════════════════
 #  SMS-КОДЫ
 # ══════════════════════════════════════
