@@ -281,9 +281,13 @@ async def cancel_order_by_phone(order_num: str, phone: str):
         row = await conn.fetchrow("""
             UPDATE orders SET status='cancelled'
             WHERE order_num=$1 AND client_phone=$2 AND status='new'
-            RETURNING order_num, client_name, client_phone, service, branch
+            RETURNING order_num, client_first_name, client_last_name, client_phone, service, branch
         """, order_num, phone)
-        return dict(row) if row else None
+        if not row:
+            return None
+        r = dict(row)
+        r['client_name'] = f"{r.pop('client_first_name') or ''} {r.pop('client_last_name') or ''}".strip()
+        return r
 
 
 async def get_orders_by_tg_id(tg_id: int):
