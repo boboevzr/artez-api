@@ -40,9 +40,9 @@ app = FastAPI(title="ARTEZ API")
 # CORS — разрешаем запросы с сайта (уточните домен в проде)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],   # на проде заменить на ["https://artez.uz"]
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
