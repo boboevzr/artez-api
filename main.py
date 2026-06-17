@@ -1,6 +1,6 @@
 import os
 import re
-import random
+import secrets
 import logging
 from datetime import datetime, timedelta, timezone
 
@@ -25,6 +25,12 @@ ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 GROUP_ID   = os.getenv("GROUP_ID", "")
 SHEETS_URL = os.getenv("SHEETS_URL", "https://script.google.com/macros/s/AKfycbyU5a3pMuTFme3dBNEgu46qzA1sN1Ekw-Q7p39F1Pg872lnnXZEFhJPjuc4TzZNHlpObQ/exec")
+
+# ── Eskiz SMS ──
+ESKIZ_EMAIL    = os.getenv("ESKIZ_EMAIL", "")
+ESKIZ_PASSWORD = os.getenv("ESKIZ_PASSWORD", "")
+ESKIZ_FROM     = os.getenv("ESKIZ_FROM", "4546")   # имя отправителя — 4546 для тестов
+_eskiz_token   = ""  # кэш токена в памяти
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -142,25 +148,81 @@ class OrderRequest(BaseModel):
 
 
 # ══════════════════════════════════════
-#  SMS (заглушка — подключить Eskiz позже)
+#  SMS — Eskiz.uz
 # ══════════════════════════════════════
+async def _eskiz_get_token() -> str:
+    """Получает/обновляет токен Eskiz. Кэш в памяти + персистентность в БД."""
+    global _eskiz_token
+    if not ESKIZ_EMAIL or not ESKIZ_PASSWORD:
+        return ""
+
+    # Загружаем из БД, если в памяти пусто
+    if not _eskiz_token:
+        _eskiz_token = await db.get_config("eskiz_token") or ""
+
+    async with aiohttp.ClientSession() as session:
+        # Пробуем обновить существующий токен
+        if _eskiz_token:
+            resp = await session.patch(
+                "https://notify.eskiz.uz/api/auth/refresh",
+                headers={"Authorization": f"Bearer {_eskiz_token}"},
+            )
+            if resp.status == 200:
+                data = await resp.json()
+                new_token = data.get("data", {}).get("token", _eskiz_token)
+                if new_token != _eskiz_token:
+                    _eskiz_token = new_token
+                    await db.set_config("eskiz_token", _eskiz_token)
+                return _eskiz_token
+
+        # Refresh не прошёл — логинимся заново
+        resp = await session.post(
+            "https://notify.eskiz.uz/api/auth/login",
+            data={"email": ESKIZ_EMAIL, "password": ESKIZ_PASSWORD},
+        )
+        if resp.status == 200:
+            data = await resp.json()
+            _eskiz_token = data.get("data", {}).get("token", "")
+            if _eskiz_token:
+                await db.set_config("eskiz_token", _eskiz_token)
+            logging.info("✅ Eskiz: токен получен")
+        else:
+            body = await resp.text()
+            logging.error(f"❌ Eskiz login failed: {resp.status} {body}")
+    return _eskiz_token
+
+
 async def send_sms(phone: str, message: str):
-    """
-    TODO: подключить реального провайдера (Eskiz.uz).
-    Пока код выводится в логи сервера для тестирования.
-    """
+    """Отправляет SMS через Eskiz.uz. Если ключи не заданы — пишет в лог."""
     logging.info(f"📲 [SMS->{phone}] {message}")
-    # Пример будущей интеграции с Eskiz:
-    # async with aiohttp.ClientSession() as session:
-    #     await session.post(
-    #         "https://notify.eskiz.uz/api/message/sms/send",
-    #         headers={"Authorization": f"Bearer {ESKIZ_TOKEN}"},
-    #         data={"mobile_phone": phone.lstrip("+"), "message": message, "from": "4546"}
-    #     )
+
+    if not ESKIZ_EMAIL or not ESKIZ_PASSWORD:
+        logging.warning("⚠️ ESKIZ_EMAIL/ESKIZ_PASSWORD не заданы — SMS не отправлен")
+        return
+
+    token = await _eskiz_get_token()
+    if not token:
+        logging.error("❌ Eskiz: не удалось получить токен")
+        return
+
+    mobile = phone.lstrip("+")  # Eskiz принимает без «+»
+
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(
+            "https://notify.eskiz.uz/api/message/sms/send",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"mobile_phone": mobile, "message": message, "from": ESKIZ_FROM},
+        )
+        if resp.status == 200:
+            data = await resp.json()
+            logging.info(f"✅ Eskiz SMS отправлен: {data}")
+        else:
+            body = await resp.text()
+            logging.error(f"❌ Eskiz SMS error: {resp.status} {body}")
 
 
 def generate_code() -> str:
-    return f"{random.randint(0, 9999):04d}"
+    return f"{secrets.randbelow(1000000):06d}"
 
 
 # ══════════════════════════════════════
@@ -221,11 +283,15 @@ async def register(req: RegisterRequest):
     if existing and existing["is_verified"]:
         raise HTTPException(status_code=400, detail="Этот номер уже зарегистрирован")
 
+    ok, err = await db.check_sms_rate_limit(req.phone, "register")
+    if not ok:
+        raise HTTPException(status_code=429, detail=err)
+
     password_hash = pwd_context.hash(req.password[:72])
     await db.create_user(req.phone, password_hash, req.first_name)
 
     code = generate_code()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=SMS_CODE_TTL_MIN)
+    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, "register", expires_at)
     await send_sms(req.phone, f"ARTEZ: код подтверждения — {code}")
 
@@ -259,8 +325,12 @@ async def resend_code(req: ResendCodeRequest):
     if not user:
         raise HTTPException(status_code=404, detail="Пользователь не найден")
 
+    ok, err = await db.check_sms_rate_limit(req.phone, req.purpose)
+    if not ok:
+        raise HTTPException(status_code=429, detail=err)
+
     code = generate_code()
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=SMS_CODE_TTL_MIN)
+    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, req.purpose, expires_at)
     await send_sms(req.phone, f"ARTEZ: код подтверждения — {code}")
 

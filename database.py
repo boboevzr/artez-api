@@ -50,6 +50,15 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_users_phone     ON users(phone);
         CREATE INDEX IF NOT EXISTS idx_sms_codes_phone ON sms_codes(phone);
 
+        -- ══════════════════════════════════════
+        --  СИСТЕМНЫЕ НАСТРОЙКИ (кэш токенов и т.п.)
+        -- ══════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS config (
+            key        VARCHAR(100) PRIMARY KEY,
+            value      TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW()
+        );
+
         -- Заявки с сайта не имеют Telegram ID — снимаем NOT NULL, если ещё установлен
         ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL;
 
@@ -180,6 +189,41 @@ async def check_sms_code(phone: str, code: str, purpose: str) -> bool:
             return False
         await conn.execute("UPDATE sms_codes SET used = TRUE WHERE id=$1", row["id"])
         return True
+
+
+async def check_sms_rate_limit(phone: str, purpose: str) -> tuple[bool, str]:
+    """Возвращает (ok, сообщение_об_ошибке). 60 сек между отправками, макс 5 за час."""
+    if not pool: return True, ""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                EXTRACT(EPOCH FROM (NOW() - MAX(created_at)))::INT AS seconds_since_last,
+                COUNT(*) AS count_hour
+            FROM sms_codes
+            WHERE phone=$1 AND purpose=$2 AND created_at > NOW() - INTERVAL '1 hour'
+        """, phone, purpose)
+        if row and row["count_hour"] and row["count_hour"] > 0:
+            secs = row["seconds_since_last"]
+            if secs is not None and secs < 60:
+                return False, f"Подождите {60 - secs} сек. перед повторной отправкой"
+            if row["count_hour"] >= 5:
+                return False, "Превышен лимит отправки кодов. Попробуйте через час"
+    return True, ""
+
+
+async def get_config(key: str) -> str | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT value FROM config WHERE key=$1", key)
+
+
+async def set_config(key: str, value: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO config (key, value, updated_at) VALUES ($1, $2, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, key, value)
 
 
 # ══════════════════════════════════════
