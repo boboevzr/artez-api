@@ -293,7 +293,7 @@ async def register(req: RegisterRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, "register", expires_at)
-    await send_sms(req.phone, f"ARTEZ: код подтверждения — {code}")
+    await send_sms(req.phone, f"ARTEZ (чистка ковров и мебели): код подтверждения — {code}")
 
     return {"ok": True, "message": "Код подтверждения отправлен", "phone": req.phone}
 
@@ -332,7 +332,7 @@ async def resend_code(req: ResendCodeRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, req.purpose, expires_at)
-    await send_sms(req.phone, f"ARTEZ: код подтверждения — {code}")
+    await send_sms(req.phone, f"ARTEZ (чистка ковров и мебели): код подтверждения — {code}")
 
     return {"ok": True, "message": "Код отправлен повторно"}
 
