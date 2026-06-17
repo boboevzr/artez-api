@@ -323,7 +323,7 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
     full_name = f"{data.first_name} {data.last_name}".strip()
     text = (
         f"🌐 Новая заявка {order_num} (сайт)\n"
-        f"━━━━━━━━━━━━━━━\n"
+        f"━━━━━━━━━━\n"
         f"👤 {full_name}\n"
         f"📞 {data.phone}\n"
         f"🏢 {data.branch}\n"
@@ -334,15 +334,13 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
         f"⚙️ {data.service_type}\n"
         f"📅 {data.pickup_date}\n"
         f"🕐 {data.pickup_time}\n"
-        f"━━━━━━━━━━━━━━━"
+        f"━━━━━━━━━━"
     )
 
-    tel_phone = (data.phone or "").replace("+", "%2B")
     keyboard = {
         "inline_keyboard": [
             [
                 {"text": "✅ Принять заказ", "callback_data": f"accept_{order_num}_0"},
-                {"text": "📞 Позвонить", "url": f"tel:{tel_phone}"},
             ],
             [
                 {"text": "🚗 Назначить водителя", "callback_data": f"driver_{order_num}_0"},
