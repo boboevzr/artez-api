@@ -2,6 +2,7 @@ import os
 import re
 import secrets
 import logging
+import asyncio
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
@@ -433,10 +434,31 @@ async def my_orders(user = Depends(get_current_user)):
 
 @app.post("/api/orders/{order_num}/cancel")
 async def cancel_order(order_num: str, user = Depends(get_current_user)):
-    ok = await db.cancel_order_by_phone(order_num, user["phone"])
-    if not ok:
+    order = await db.cancel_order_by_phone(order_num, user["phone"])
+    if not order:
         raise HTTPException(status_code=400, detail="Заказ не найден или уже нельзя отменить")
+    asyncio.create_task(notify_group_client_cancel(order))
     return {"ok": True}
+
+
+async def notify_group_client_cancel(order: dict):
+    if not BOT_TOKEN or not GROUP_ID:
+        return
+    text = (
+        f"🚫 Заявка {order['order_num']} отменена клиентом\n"
+        f"━━━━━━━━━━\n"
+        f"👤 {order.get('client_name') or '—'}\n"
+        f"📞 {order.get('client_phone') or '—'}\n"
+        f"🧺 {order.get('service') or '—'}\n"
+        f"🏢 {order.get('branch') or '—'}\n"
+        f"━━━━━━━━━━"
+    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(url, json={"chat_id": GROUP_ID, "text": text})
+    except Exception as e:
+        logging.warning(f"Cancel notify error: {e}")
 
 
 # ══════════════════════════════════════

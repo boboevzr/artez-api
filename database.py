@@ -273,15 +273,17 @@ async def get_orders_by_phone(phone: str):
         """, phone)
 
 
-async def cancel_order_by_phone(order_num: str, phone: str) -> bool:
-    """Отменяет заказ со статусом 'new', принадлежащий этому номеру."""
-    if not pool: return False
+async def cancel_order_by_phone(order_num: str, phone: str):
+    """Отменяет заказ со статусом 'new', принадлежащий этому номеру.
+    Возвращает dict с данными заказа или None если не найден/нельзя отменить."""
+    if not pool: return None
     async with pool.acquire() as conn:
-        result = await conn.execute("""
+        row = await conn.fetchrow("""
             UPDATE orders SET status='cancelled'
             WHERE order_num=$1 AND client_phone=$2 AND status='new'
+            RETURNING order_num, client_name, client_phone, service, branch
         """, order_num, phone)
-        return result != "UPDATE 0"
+        return dict(row) if row else None
 
 
 async def get_orders_by_tg_id(tg_id: int):
