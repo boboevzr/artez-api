@@ -24,6 +24,7 @@ ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
 
 BOT_TOKEN  = os.getenv("BOT_TOKEN", "")
 GROUP_ID   = os.getenv("GROUP_ID", "")
+SHEETS_URL = os.getenv("SHEETS_URL", "https://script.google.com/macros/s/AKfycbyU5a3pMuTFme3dBNEgu46qzA1sN1Ekw-Q7p39F1Pg872lnnXZEFhJPjuc4TzZNHlpObQ/exec")
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -364,6 +365,42 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
 
 
 # ══════════════════════════════════════
+#  GOOGLE-ТАБЛИЦА — ТА ЖЕ, КУДА ПИШЕТ БОТ
+# ══════════════════════════════════════
+async def send_to_sheets(data: dict):
+    if not SHEETS_URL:
+        logging.warning("SHEETS_URL not set — skipping sheets export")
+        return
+    try:
+        async with aiohttp.ClientSession() as session:
+            await session.post(SHEETS_URL, json=data, timeout=aiohttp.ClientTimeout(total=10))
+    except Exception as e:
+        logging.warning(f"Sheets error: {e}")
+
+
+async def notify_sheets_new_order(order_num: str, data: "OrderRequest"):
+    """Формирует строку для Google-таблицы в том же формате, что использует бот"""
+    full_name = f"{data.first_name} {data.last_name}".strip()
+    await send_to_sheets({
+        "name":         full_name,
+        "tg_id":        "",
+        "tg_username":  "",
+        "tg_name":      "",
+        "phone":        data.phone,
+        "branch":       data.branch,
+        "city":         data.city,
+        "address":      data.address,
+        "location":     data.location or "",
+        "service":      data.service,
+        "service_type": data.service_type,
+        "date":         data.pickup_date,
+        "time":         data.pickup_time,
+        "note":         f"Сайт ARTEZ {order_num}",
+        "status":       "Новый",
+    })
+
+
+# ══════════════════════════════════════
 #  ADMIN
 # ══════════════════════════════════════
 class AdminLoginRequest(BaseModel):
@@ -481,5 +518,6 @@ async def create_order(order: OrderRequest):
     })
 
     await notify_group_new_order(order_num, order)
+    await notify_sheets_new_order(order_num, order)
 
     return {"ok": True, "order_num": order_num}
