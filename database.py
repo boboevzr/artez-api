@@ -95,6 +95,9 @@ async def create_tables():
         -- Профиль пользователя: адрес и авто
         ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(200) DEFAULT NULL;
         ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20) DEFAULT NULL;
+
+        -- Сумма заказа для бонусной программы
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_price INT DEFAULT NULL;
         """)
 
         # Дефолтные единицы измерения (если таблица пуста)
@@ -262,7 +265,7 @@ async def get_orders_by_phone(phone: str):
     async with pool.acquire() as conn:
         return await conn.fetch("""
             SELECT order_num, service, branch, city, address, status,
-                   pickup_date, pickup_time, created_at
+                   pickup_date, pickup_time, total_price, created_at
             FROM orders
             WHERE client_phone = $1
             ORDER BY created_at DESC
@@ -328,12 +331,12 @@ async def save_site_order(data: dict) -> str:
                 order_num, source,
                 client_tg_id, client_first_name, client_last_name, client_phone,
                 branch, city, address, location, service, pickup_date, pickup_time, note,
-                status
+                total_price, status
             ) VALUES (
                 $1, 'site',
                 NULL, $2, $3, $4,
                 $5, $6, $7, $8, $9, $10, $11, $12,
-                'new'
+                $13, 'new'
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
@@ -349,6 +352,7 @@ async def save_site_order(data: dict) -> str:
             data.get("pickup_date"),
             data.get("pickup_time"),
             data.get("note"),
+            data.get("total_price"),
         )
         await conn.execute("""
             INSERT INTO order_status_history (order_num, new_status, note)

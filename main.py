@@ -123,6 +123,7 @@ class OrderRequest(BaseModel):
     pickup_date: str = ""
     pickup_time: str = ""
     is_quick: bool = False
+    total_price: int | None = None
 
     @field_validator("phone")
     @classmethod
@@ -642,6 +643,36 @@ async def admin_get_orders(_=Depends(get_admin), status: str = None, limit: int 
     return {"ok": True, "orders": [dict(o) for o in prices]}
 
 
+OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
+                  "pct1": 5, "pct2": 10, "pct3": 20}
+
+@app.get("/api/settings/osago")
+async def get_osago_settings():
+    import json
+    raw = await db.get_config("osago_tiers")
+    if raw:
+        try:
+            return {"ok": True, "tiers": json.loads(raw)}
+        except Exception:
+            pass
+    return {"ok": True, "tiers": OSAGO_DEFAULT}
+
+
+class OsagoSettings(BaseModel):
+    tier1: int
+    tier2: int
+    tier3: int
+    pct1: int
+    pct2: int
+    pct3: int
+
+@app.put("/api/admin/settings/osago")
+async def save_osago_settings(body: OsagoSettings, _=Depends(get_admin)):
+    import json
+    await db.set_config("osago_tiers", json.dumps(body.dict()))
+    return {"ok": True}
+
+
 @app.post("/api/orders")
 async def create_order(order: OrderRequest):
     order_num = await db.get_next_order_num()
@@ -658,6 +689,7 @@ async def create_order(order: OrderRequest):
         "pickup_date":  order.pickup_date,
         "pickup_time":  order.pickup_time,
         "note":         f"Тип услуги: {order.service_type}" if order.service_type else "",
+        "total_price":  order.total_price,
     })
 
     await notify_group_new_order(order_num, order)
