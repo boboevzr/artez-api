@@ -666,21 +666,21 @@ class ClientUpdateRequest(BaseModel):
 
 @app.get("/api/clients")
 async def clients_list(search: str = "", limit: int = 50, offset: int = 0,
-                       _=Depends(require_perm("clients"))):
+                       _=Depends(_get_admin_or_staff_clients)):
     rows = await db.get_crm_clients_list(search=search, limit=limit, offset=offset)
     counts = await db.get_crm_clients_count()
     return {"ok": True, "clients": rows, "counts": counts}
 
 
 @app.get("/api/clients/by-phone/{phone}")
-async def client_by_phone(phone: str, _=Depends(require_perm("clients"))):
+async def client_by_phone(phone: str, _=Depends(_get_admin_or_staff_clients)):
     phone = normalize_phone(phone)
     row = await db.get_crm_client_by_phone(phone)
     return {"ok": True, "client": row}
 
 
 @app.get("/api/clients/{client_id}")
-async def client_detail(client_id: int, _=Depends(require_perm("clients"))):
+async def client_detail(client_id: int, _=Depends(_get_admin_or_staff_clients)):
     row = await db.get_crm_client_by_id(client_id)
     if not row:
         raise HTTPException(status_code=404, detail="Клиент не найден")
@@ -689,7 +689,7 @@ async def client_detail(client_id: int, _=Depends(require_perm("clients"))):
 
 
 @app.post("/api/clients")
-async def client_create(req: ClientCreateRequest, _=Depends(require_perm("clients"))):
+async def client_create(req: ClientCreateRequest, _=Depends(_get_admin_or_staff_clients)):
     existing = await db.get_crm_client_by_phone(req.phone)
     if existing:
         raise HTTPException(status_code=409, detail={
@@ -710,7 +710,7 @@ async def client_create(req: ClientCreateRequest, _=Depends(require_perm("client
 
 @app.put("/api/clients/{client_id}")
 async def client_update(client_id: int, req: ClientUpdateRequest,
-                        _=Depends(_get_admin)):
+                        _=Depends(_get_admin_or_staff_clients)):
     updates = {k: v for k, v in req.dict().items() if v is not None}
     row = await db.update_crm_client(client_id, **updates)
     if not row:
@@ -731,7 +731,7 @@ async def client_delete(client_id: int, req: ClientDeleteRequest):
     return {"ok": True}
 
 @app.get("/api/clients/{client_id}/orders")
-async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
+async def client_orders(client_id: int, _=Depends(_get_admin_or_staff_clients)):
     row = await db.get_crm_client_by_id(client_id)
     if not row:
         raise HTTPException(status_code=404, detail="Клиент не найден")
