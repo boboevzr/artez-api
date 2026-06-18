@@ -606,6 +606,8 @@ class ClientCreateRequest(BaseModel):
     source: str = "staff"
     status: str = "new"
     note: str = ""
+    address: str = ""
+    short_address: str = ""
 
     @field_validator("phone")
     @classmethod
@@ -621,6 +623,8 @@ class ClientUpdateRequest(BaseModel):
     last_name: str | None = None
     status: str | None = None
     note: str | None = None
+    address: str | None = None
+    short_address: str | None = None
 
 
 @app.get("/api/clients")
@@ -656,8 +660,8 @@ async def client_create(req: ClientCreateRequest, _=Depends(require_perm("client
             "client": existing
         })
     row = await db.upsert_crm_client(
-        phone=req.phone, first_name=req.first_name,
-        last_name=req.last_name, source=req.source,
+        phone=req.phone, first_name=req.first_name, last_name=req.last_name,
+        source=req.source, address=req.address, short_address=req.short_address,
     )
     if req.phone2 or req.note or req.status != "new":
         row = await db.update_crm_client(

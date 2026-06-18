@@ -103,6 +103,7 @@ async def create_tables():
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS total_price   INT          DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
     ]
     async with pool.acquire() as c:
@@ -699,23 +700,27 @@ async def update_lead_status(lead_id: int, status: str):
 # ══════════════════════════════════════
 async def upsert_crm_client(phone: str, first_name: str = "", last_name: str = "",
                              tg_id: int = None, tg_username: str = None,
-                             source: str = "unknown") -> dict:
+                             source: str = "unknown", address: str = "",
+                             short_address: str = "") -> dict:
     """Создаёт или обновляет запись клиента. Статус не понижается."""
     if not pool or not phone:
         return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO crm_clients (phone, first_name, last_name, tg_id, tg_username, source)
-            VALUES ($1, $2, $3, $4, $5, $6)
+            INSERT INTO crm_clients (phone, first_name, last_name, tg_id, tg_username, source, address, short_address)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             ON CONFLICT (phone) DO UPDATE SET
-                first_name  = CASE WHEN $2 != '' THEN $2 ELSE crm_clients.first_name END,
-                last_name   = CASE WHEN $3 != '' THEN $3 ELSE crm_clients.last_name END,
-                tg_id       = COALESCE($4, crm_clients.tg_id),
-                tg_username = CASE WHEN $5 IS NOT NULL AND $5 != ''
-                                   THEN $5 ELSE crm_clients.tg_username END,
-                updated_at  = NOW()
+                first_name    = CASE WHEN $2 != '' THEN $2 ELSE crm_clients.first_name END,
+                last_name     = CASE WHEN $3 != '' THEN $3 ELSE crm_clients.last_name END,
+                tg_id         = COALESCE($4, crm_clients.tg_id),
+                tg_username   = CASE WHEN $5 IS NOT NULL AND $5 != ''
+                                     THEN $5 ELSE crm_clients.tg_username END,
+                address       = CASE WHEN $7 != '' THEN $7 ELSE crm_clients.address END,
+                short_address = CASE WHEN $8 != '' THEN $8 ELSE crm_clients.short_address END,
+                updated_at    = NOW()
             RETURNING *
-        """, phone, first_name or "", last_name or "", tg_id, tg_username, source)
+        """, phone, first_name or "", last_name or "", tg_id, tg_username, source,
+             address or "", short_address or "")
         return dict(row) if row else {}
 
 
@@ -764,6 +769,7 @@ async def get_crm_clients_list(search: str = "", limit: int = 50, offset: int = 
             rows = await conn.fetch("""
                 SELECT * FROM crm_clients
                 WHERE phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
+                   OR short_address ILIKE $1 OR address ILIKE $1
                 ORDER BY updated_at DESC LIMIT $2 OFFSET $3
             """, f"%{search}%", limit, offset)
         else:
@@ -777,7 +783,7 @@ async def get_crm_clients_list(search: str = "", limit: int = 50, offset: int = 
 async def update_crm_client(client_id: int, **kwargs) -> dict | None:
     if not pool or not kwargs:
         return None
-    allowed = {"first_name", "last_name", "phone2", "status", "note"}
+    allowed = {"first_name", "last_name", "phone2", "status", "note", "address", "short_address"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
