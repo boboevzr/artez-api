@@ -695,6 +695,47 @@ async def save_osago_settings(body: OsagoSettings, _=Depends(get_admin)):
     return {"ok": True}
 
 
+# ── Настройки сайта ──────────────────────────────────────────
+SITE_SETTINGS_DEFAULTS = {
+    "social_instagram":   "https://www.instagram.com/ziyoboboev/",
+    "social_tg_bot":      "https://t.me/artez_orders_bot",
+    "social_tg_group":    "https://t.me/artez_gilam_yuvish",
+    "contact_short":      "1221",
+    "contact_main":       "+998792221221",
+    "contact_zarafshan_1": "+998882001221",
+    "contact_zarafshan_2": "+998947380444",
+    "contact_navoi_1":    "+998997500020",
+    "contact_navoi_2":    "+998991124848",
+}
+
+@app.get("/api/settings/site")
+async def get_site_settings():
+    result = {}
+    for key, default in SITE_SETTINGS_DEFAULTS.items():
+        val = await db.get_config(key)
+        result[key] = val if val is not None else default
+    return {"ok": True, "settings": result}
+
+
+class SiteSettings(BaseModel):
+    social_instagram:    str | None = None
+    social_tg_bot:       str | None = None
+    social_tg_group:     str | None = None
+    contact_short:       str | None = None
+    contact_main:        str | None = None
+    contact_zarafshan_1: str | None = None
+    contact_zarafshan_2: str | None = None
+    contact_navoi_1:     str | None = None
+    contact_navoi_2:     str | None = None
+
+@app.put("/api/admin/settings/site")
+async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
+    data = {k: v for k, v in body.dict().items() if v is not None}
+    for key, val in data.items():
+        await db.set_config(key, val)
+    return {"ok": True}
+
+
 @app.post("/api/orders")
 async def create_order(order: OrderRequest):
     order_num = await db.get_next_order_num()
