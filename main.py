@@ -673,7 +673,7 @@ async def client_create(req: ClientCreateRequest, _=Depends(require_perm("client
 
 @app.put("/api/clients/{client_id}")
 async def client_update(client_id: int, req: ClientUpdateRequest,
-                        _=Depends(require_perm("clients"))):
+                        _=Depends(_get_admin)):
     updates = {k: v for k, v in req.dict().items() if v is not None}
     row = await db.update_crm_client(client_id, **updates)
     if not row:
