@@ -225,6 +225,23 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
         """)
 
+    # ── Шаг 4б: позиции услуг в заказах ─────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS order_items (
+            id              SERIAL PRIMARY KEY,
+            order_id        INTEGER NOT NULL,
+            service         VARCHAR(200) NOT NULL,
+            width_cm        NUMERIC(8,1),
+            length_cm       NUMERIC(8,1),
+            sqm             NUMERIC(8,3) NOT NULL,
+            price_per_sqm   NUMERIC(10,2) NOT NULL DEFAULT 0,
+            total_sum       NUMERIC(12,2) GENERATED ALWAYS AS (sqm * price_per_sqm) STORED,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id);
+        """)
+
     # ── Шаг 5: дефолтные единицы измерения ───────────────────────────────
     async with pool.acquire() as c:
         units_count = await c.fetchval("SELECT COUNT(*) FROM units")
@@ -1013,3 +1030,49 @@ async def delete_all_contacts() -> int:
             return int(res.split()[-1])
         except Exception:
             return 0
+
+
+# ══════════════════════════════════════
+#  ПОЗИЦИИ УСЛУГ В ЗАКАЗАХ
+# ══════════════════════════════════════
+async def get_order_items(order_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_items WHERE order_id=$1 ORDER BY id", order_id)
+        return [dict(r) for r in rows]
+
+async def create_order_item(order_id: int, service: str, sqm: float,
+                             price_per_sqm: float, width_cm: float = None,
+                             length_cm: float = None) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO order_items (order_id, service, width_cm, length_cm, sqm, price_per_sqm)
+            VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
+        """, order_id, service, width_cm, length_cm, sqm, price_per_sqm)
+        return dict(row) if row else {}
+
+async def update_order_item(item_id: int, **kwargs) -> dict:
+    if not pool: return {}
+    allowed = {"service", "width_cm", "length_cm", "sqm", "price_per_sqm"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields: return {}
+    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE order_items SET {set_parts} WHERE id=$1 RETURNING *",
+            item_id, *list(fields.values()))
+        return dict(row) if row else {}
+
+async def delete_order_item(item_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM order_items WHERE id=$1", item_id)
+        return res == "DELETE 1"
+
+async def get_order_by_id(order_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
+        return dict(row) if row else {}

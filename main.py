@@ -1323,6 +1323,60 @@ async def admin_get_orders(_=Depends(get_admin), status: str = None, limit: int 
     prices = await db.get_admin_orders(status=status, limit=limit)
     return {"ok": True, "orders": [dict(o) for o in prices]}
 
+@app.get("/api/admin/orders/{order_id}")
+async def admin_get_order(order_id: int, _=Depends(_get_admin)):
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    return {"ok": True, "order": order}
+
+@app.get("/api/admin/orders/{order_id}/items")
+async def admin_get_order_items(order_id: int, _=Depends(_get_admin)):
+    items = await db.get_order_items(order_id)
+    return {"ok": True, "items": items}
+
+class OrderItemRequest(BaseModel):
+    service: str
+    sqm: float | None = None
+    width_cm: float | None = None
+    length_cm: float | None = None
+    price_per_sqm: float = 0
+
+@app.post("/api/admin/orders/{order_id}/items")
+async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depends(_get_admin)):
+    sqm = req.sqm
+    if not sqm and req.width_cm and req.length_cm:
+        sqm = round(req.width_cm * req.length_cm / 10000, 3)
+    if not sqm or sqm <= 0:
+        raise HTTPException(status_code=400, detail="Укажите площадь или ширину и длину")
+    item = await db.create_order_item(
+        order_id=order_id, service=req.service, sqm=sqm,
+        price_per_sqm=req.price_per_sqm,
+        width_cm=req.width_cm, length_cm=req.length_cm)
+    return {"ok": True, "item": item}
+
+@app.put("/api/admin/orders/{order_id}/items/{item_id}")
+async def admin_update_order_item(order_id: int, item_id: int,
+                                   req: OrderItemRequest, _=Depends(_get_admin)):
+    sqm = req.sqm
+    if not sqm and req.width_cm and req.length_cm:
+        sqm = round(req.width_cm * req.length_cm / 10000, 3)
+    updates = {"service": req.service, "price_per_sqm": req.price_per_sqm}
+    if sqm: updates["sqm"] = sqm
+    if req.width_cm: updates["width_cm"] = req.width_cm
+    if req.length_cm: updates["length_cm"] = req.length_cm
+    item = await db.update_order_item(item_id, **updates)
+    if not item:
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+    return {"ok": True, "item": item}
+
+@app.delete("/api/admin/orders/{order_id}/items/{item_id}")
+async def admin_delete_order_item(order_id: int, item_id: int, _=Depends(_get_admin)):
+    ok = await db.delete_order_item(item_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+    return {"ok": True}
+
 
 OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
                   "pct1": 5, "pct2": 10, "pct3": 20}
