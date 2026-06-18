@@ -334,9 +334,10 @@ async def check_sms_rate_limit(phone: str, purpose: str) -> tuple[bool, str]:
         if row and row["count_hour"] and row["count_hour"] > 0:
             secs = row["seconds_since_last"]
             if secs is not None and secs < 60:
-                return False, f"Подождите {60 - secs} сек. перед повторной отправкой"
+                wait = 60 - secs
+                return False, f"Подождите {wait} сек. / {wait} soniya kuting"
             if row["count_hour"] >= 5:
-                return False, "Превышен лимит отправки кодов. Попробуйте через час"
+                return False, "Превышен лимит. Попробуйте через час / Limit oshdi. 1 soatdan keyin urinib ko'ring"
     return True, ""
 
 

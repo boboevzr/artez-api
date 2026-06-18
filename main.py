@@ -37,6 +37,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app = FastAPI(title="ARTEZ API")
 
+def bi(ru: str, uz: str) -> str:
+    """Двуязычное сообщение для ошибок, видимых пользователю."""
+    return f"{ru} / {uz}"
+
 # CORS — разрешаем запросы с сайта (уточните домен в проде)
 app.add_middleware(
     CORSMiddleware,
@@ -437,7 +441,7 @@ async def staff_change_password(staff_id: int, body: dict, me=Depends(get_curren
         raise HTTPException(status_code=403, detail="Нет доступа")
     new_pw = body.get("password", "")
     if len(new_pw) < 6:
-        raise HTTPException(status_code=400, detail="Минимум 6 символов")
+        raise HTTPException(status_code=400, detail=bi("Минимум 6 символов","Kamida 6 ta belgi"))
     await db.update_staff_password(staff_id, pwd_context.hash(new_pw[:72]))
     return {"ok": True}
 
@@ -700,7 +704,7 @@ async def get_prices():
 async def register(req: RegisterRequest):
     existing = await db.get_user_by_phone(req.phone)
     if existing and existing["is_verified"]:
-        raise HTTPException(status_code=400, detail="Этот номер уже зарегистрирован")
+        raise HTTPException(status_code=400, detail=bi("Этот номер уже зарегистрирован","Bu raqam allaqachon ro'yxatdan o'tgan"))
 
     ok, err = await db.check_sms_rate_limit(req.phone, "register")
     if not ok:
@@ -721,7 +725,7 @@ async def register(req: RegisterRequest):
 async def verify(req: VerifyRequest):
     ok = await db.check_sms_code(req.phone, req.code, "register")
     if not ok:
-        raise HTTPException(status_code=400, detail="Неверный или просроченный код")
+        raise HTTPException(status_code=400, detail=bi("Неверный или просроченный код","Noto'g'ri yoki muddati o'tgan kod"))
 
     await db.verify_user(req.phone)
     user = await db.get_user_by_phone(req.phone)
@@ -763,10 +767,10 @@ async def resend_code(req: ResendCodeRequest):
 async def login(req: LoginRequest):
     user = await db.get_user_by_phone(req.phone)
     if not user or not pwd_context.verify(req.password[:72], user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Неверный номер или пароль")
+        raise HTTPException(status_code=401, detail=bi("Неверный номер или пароль","Noto'g'ri telefon yoki parol"))
 
     if not user["is_verified"]:
-        raise HTTPException(status_code=403, detail="Номер не подтверждён. Запросите код заново")
+        raise HTTPException(status_code=403, detail=bi("Номер не подтверждён. Запросите код заново","Raqam tasdiqlanmagan. Kodni qayta so'rang"))
 
     token = create_token(user["id"], user["phone"])
     return {
