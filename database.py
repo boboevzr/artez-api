@@ -191,6 +191,11 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone);
         CREATE INDEX IF NOT EXISTS idx_contacts_name  ON contacts(first_name, last_name);
         """)
+        # Добавляем short_address если ещё нет (миграция)
+        await c.execute("""
+        ALTER TABLE contacts ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT '';
+        CREATE INDEX IF NOT EXISTS idx_contacts_short_addr ON contacts(short_address);
+        """)
 
     # ── Шаг 4: таблица leads ─────────────────────────────────────────────
     async with pool.acquire() as c:
@@ -816,7 +821,7 @@ async def search_contacts(q: str, limit: int = 10) -> list[dict]:
     q = q.strip()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id, first_name, last_name, middle_name, phone, phone2, address, source
+            SELECT id, first_name, last_name, middle_name, phone, phone2, address, short_address, source
             FROM contacts
             WHERE phone ILIKE $1
                OR phone2 ILIKE $1
@@ -824,6 +829,7 @@ async def search_contacts(q: str, limit: int = 10) -> list[dict]:
                OR last_name ILIKE $1
                OR (first_name || ' ' || last_name) ILIKE $1
                OR (last_name || ' ' || first_name) ILIKE $1
+               OR short_address ILIKE $1
             ORDER BY
                 CASE WHEN phone ILIKE $2 THEN 0
                      WHEN phone2 ILIKE $2 THEN 1
@@ -836,23 +842,25 @@ async def search_contacts(q: str, limit: int = 10) -> list[dict]:
 
 async def upsert_contact(phone: str, first_name: str = "", last_name: str = "",
                          middle_name: str = "", phone2: str = "",
-                         address: str = "", source: str = "ARTEZ") -> dict | None:
+                         address: str = "", short_address: str = "",
+                         source: str = "ARTEZ") -> dict | None:
     """Добавить или обновить контакт (ON CONFLICT по phone)."""
     if not pool or not phone:
         return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO contacts (phone, first_name, last_name, middle_name, phone2, address, source)
-            VALUES ($1,$2,$3,$4,$5,$6,$7)
+            INSERT INTO contacts (phone, first_name, last_name, middle_name, phone2, address, short_address, source)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
             ON CONFLICT (phone) DO UPDATE SET
-                first_name  = CASE WHEN $2 != '' THEN $2 ELSE contacts.first_name END,
-                last_name   = CASE WHEN $3 != '' THEN $3 ELSE contacts.last_name END,
-                middle_name = CASE WHEN $4 != '' THEN $4 ELSE contacts.middle_name END,
-                phone2      = CASE WHEN $5 != '' THEN $5 ELSE contacts.phone2 END,
-                address     = CASE WHEN $6 != '' THEN $6 ELSE contacts.address END,
-                updated_at  = NOW()
+                first_name    = CASE WHEN $2 != '' THEN $2 ELSE contacts.first_name END,
+                last_name     = CASE WHEN $3 != '' THEN $3 ELSE contacts.last_name END,
+                middle_name   = CASE WHEN $4 != '' THEN $4 ELSE contacts.middle_name END,
+                phone2        = CASE WHEN $5 != '' THEN $5 ELSE contacts.phone2 END,
+                address       = CASE WHEN $6 != '' THEN $6 ELSE contacts.address END,
+                short_address = CASE WHEN $7 != '' THEN $7 ELSE contacts.short_address END,
+                updated_at    = NOW()
             RETURNING *
-        """, phone, first_name, last_name, middle_name, phone2, address, source)
+        """, phone, first_name, last_name, middle_name, phone2, address, short_address, source)
         return dict(row) if row else None
 
 
@@ -870,17 +878,18 @@ async def bulk_insert_contacts(rows: list[dict]) -> dict:
             try:
                 res = await conn.fetchval("""
                     INSERT INTO contacts
-                        (phone, first_name, last_name, middle_name, phone2, address, source)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7)
+                        (phone, first_name, last_name, middle_name, phone2, address, short_address, source)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                     ON CONFLICT (phone) DO NOTHING
                     RETURNING id
                 """,
                     phone,
-                    str(r.get("first_name",  "") or "").strip(),
-                    str(r.get("last_name",   "") or "").strip(),
-                    str(r.get("middle_name", "") or "").strip(),
-                    str(r.get("phone2",      "") or "").strip(),
-                    str(r.get("address",     "") or "").strip(),
+                    str(r.get("first_name",    "") or "").strip(),
+                    str(r.get("last_name",     "") or "").strip(),
+                    str(r.get("middle_name",   "") or "").strip(),
+                    str(r.get("phone2",        "") or "").strip(),
+                    str(r.get("address",       "") or "").strip(),
+                    str(r.get("short_address", "") or "").strip(),
                     str(r.get("source", "Старая база")),
                 )
                 if res:
@@ -902,6 +911,7 @@ async def get_contacts_list(search: str = "", limit: int = 50, offset: int = 0) 
                 WHERE phone ILIKE $1 OR phone2 ILIKE $1
                    OR first_name ILIKE $1 OR last_name ILIKE $1
                    OR middle_name ILIKE $1 OR address ILIKE $1
+                   OR short_address ILIKE $1
                 ORDER BY id DESC LIMIT $2 OFFSET $3
             """, f"%{search}%", limit, offset)
         else:
@@ -919,6 +929,7 @@ async def get_contacts_total(search: str = "") -> int:
                 SELECT COUNT(*) FROM contacts
                 WHERE phone ILIKE $1 OR phone2 ILIKE $1
                    OR first_name ILIKE $1 OR last_name ILIKE $1
+                   OR short_address ILIKE $1
             """, f"%{search}%")
         return await conn.fetchval("SELECT COUNT(*) FROM contacts")
 
@@ -934,7 +945,7 @@ async def get_contacts_source_counts() -> dict:
 async def update_contact(contact_id: int, **kwargs) -> dict | None:
     if not pool:
         return None
-    allowed = {"first_name","last_name","middle_name","phone2","address","source"}
+    allowed = {"first_name","last_name","middle_name","phone2","address","short_address","source"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None
@@ -953,3 +964,16 @@ async def delete_contact(contact_id: int) -> bool:
     async with pool.acquire() as conn:
         res = await conn.execute("DELETE FROM contacts WHERE id=$1", contact_id)
         return res == "DELETE 1"
+
+
+async def delete_all_contacts() -> int:
+    """Удалить все записи из contacts. Возвращает количество удалённых."""
+    if not pool:
+        return 0
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM contacts")
+        # res == "DELETE 41234"
+        try:
+            return int(res.split()[-1])
+        except Exception:
+            return 0

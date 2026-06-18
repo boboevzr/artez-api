@@ -687,21 +687,23 @@ async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
 # ══════════════════════════════════════════════════════════════════════════════
 
 class ContactCreateRequest(BaseModel):
-    phone:       str
-    first_name:  str = ""
-    last_name:   str = ""
-    middle_name: str = ""
-    phone2:      str = ""
-    address:     str = ""
-    source:      str = "ARTEZ"
+    phone:         str
+    first_name:    str = ""
+    last_name:     str = ""
+    middle_name:   str = ""
+    phone2:        str = ""
+    address:       str = ""
+    short_address: str = ""
+    source:        str = "ARTEZ"
 
 class ContactUpdateRequest(BaseModel):
-    first_name:  str | None = None
-    last_name:   str | None = None
-    middle_name: str | None = None
-    phone2:      str | None = None
-    address:     str | None = None
-    source:      str | None = None
+    first_name:    str | None = None
+    last_name:     str | None = None
+    middle_name:   str | None = None
+    phone2:        str | None = None
+    address:       str | None = None
+    short_address: str | None = None
+    source:        str | None = None
 
 class ContactsBulkRequest(BaseModel):
     rows: list[dict]
@@ -724,7 +726,7 @@ async def contact_create(req: ContactCreateRequest, _=Depends(require_perm("clie
     contact = await db.upsert_contact(
         phone=req.phone, first_name=req.first_name, last_name=req.last_name,
         middle_name=req.middle_name, phone2=req.phone2,
-        address=req.address, source=req.source)
+        address=req.address, short_address=req.short_address, source=req.source)
     return {"ok": True, "contact": contact}
 
 @app.post("/api/contacts/bulk")
@@ -755,6 +757,18 @@ async def contact_delete(contact_id: int, _=Depends(require_perm("clients"))):
     if not ok:
         raise HTTPException(status_code=404, detail="Контакт не найден")
     return {"ok": True}
+
+
+class ContactsDeleteAllRequest(BaseModel):
+    password: str
+
+@app.delete("/api/contacts")
+async def contacts_delete_all(req: ContactsDeleteAllRequest, me=Depends(get_current_staff)):
+    """Удалить все контакты — только после подтверждения паролем текущего админа."""
+    if not pwd_context.verify(req.password[:72], me["password_hash"]):
+        raise HTTPException(status_code=403, detail="Неверный пароль")
+    deleted = await db.delete_all_contacts()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/prices")
