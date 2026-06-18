@@ -526,7 +526,15 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
         # Уведомление в Telegram — строим текст вручную, без Pydantic
         if BOT_TOKEN and GROUP_ID:
             full_name = req.first_name
-            loc_line = f"\n🗺 {location}" if location else ""
+            if location:
+                try:
+                    lat, lon = location.split(",", 1)
+                    yandex_url = f"https://yandex.uz/maps/?pt={lon.strip()},{lat.strip()}&z=16"
+                    loc_line = f"\n🗺 <a href=\"{yandex_url}\">Открыть в Яндекс Картах</a>"
+                except Exception:
+                    loc_line = f"\n🗺 {location}"
+            else:
+                loc_line = ""
             text = (
                 f"📱 Заявка от сотрудника {order_num}\n"
                 f"━━━━━━━━━━\n"
