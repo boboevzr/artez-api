@@ -1258,6 +1258,18 @@ async def admin_delete_lead(lead_id: int, req: LeadDeleteRequest):
         raise HTTPException(status_code=404, detail="Лид не найден")
     return {"ok": True}
 
+@app.post("/api/admin/leads")
+async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
+    lead_num = await db.get_next_lead_num()
+    lead = await db.create_lead({
+        "lead_num": lead_num, "client_name": req.client_name,
+        "client_phone": req.client_phone, "service": req.service,
+        "branch": req.branch, "city": req.city, "address": req.address,
+        "short_address": req.short_address, "note": req.note,
+        "assigned_to": req.assigned_to, "created_by": None,
+    })
+    return {"ok": True, "lead": lead}
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/admin/prices")
