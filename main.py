@@ -119,6 +119,7 @@ class OrderRequest(BaseModel):
     city: str = ""
     address: str
     location: str = ""
+    location_address: str = ""
     service: str = ""
     service_type: str = ""
     pickup_date: str = ""
@@ -800,6 +801,17 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
 
     full_name = f"{data.first_name} {data.last_name}".strip()
 
+    # Строим ссылку на Яндекс Карты, если есть координаты
+    location_url = None
+    loc_display = "—"
+    if data.location:
+        try:
+            lat_s, lon_s = data.location.split(",", 1)
+            location_url = f"https://yandex.uz/maps/?pt={lon_s.strip()},{lat_s.strip()}&z=16"
+        except Exception:
+            pass
+        loc_display = data.location_address if data.location_address else data.location
+
     if data.is_quick:
         text = (
             f"⚡ Быстрая заявка {order_num} (сайт)\n"
@@ -817,7 +829,7 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
             f"🏢 {data.branch}\n"
             f"📍 {data.city}\n"
             f"🏠 {data.address}\n"
-            f"🗺 {data.location or '—'}\n"
+            f"🗺 {loc_display}\n"
             f"🧺 {data.service}\n"
             f"⚙️ {data.service_type}\n"
             f"📅 {data.pickup_date}\n"
@@ -825,17 +837,17 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
             f"━━━━━━━━━━"
         )
 
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "✅ Принять заказ", "callback_data": f"accept_{order_num}_0"},
-            ],
-            [
-                {"text": "🚗 Назначить водителя", "callback_data": f"driver_{order_num}_0"},
-                {"text": "❌ Отклонить", "callback_data": f"reject_{order_num}_0"},
-            ],
-        ]
-    }
+    kb_rows = []
+    if location_url:
+        kb_rows.append([{"text": "🗺 Открыть на карте", "url": location_url}])
+    kb_rows.extend([
+        [{"text": "✅ Принять заказ", "callback_data": f"accept_{order_num}_0"}],
+        [
+            {"text": "🚗 Назначить водителя", "callback_data": f"driver_{order_num}_0"},
+            {"text": "❌ Отклонить", "callback_data": f"reject_{order_num}_0"},
+        ],
+    ])
+    keyboard = {"inline_keyboard": kb_rows}
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {"chat_id": GROUP_ID, "text": text, "reply_markup": keyboard}
