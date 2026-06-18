@@ -398,10 +398,11 @@ async def get_next_order_num(prefix: str = "ARTEZ") -> str:
         return f"{prefix}-{last_num + 1}"
 
 
-async def save_site_order(data: dict) -> str:
-    """Сохраняет заявку, оформленную на сайте (source='site'), без обязательного Telegram ID"""
+async def save_site_order(data: dict, source: str = "site") -> str:
+    """Сохраняет заявку без обязательного Telegram ID. source: 'site' | 'staff'"""
     if not pool:
         return data.get("order_num", "")
+    source_note = {"site": "Заявка создана через сайт", "staff": "Заявка создана сотрудником"}.get(source, "Заявка создана")
     async with pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO orders (
@@ -410,14 +411,15 @@ async def save_site_order(data: dict) -> str:
                 branch, city, address, location, service, pickup_date, pickup_time, note,
                 total_price, status
             ) VALUES (
-                $1, 'site',
-                NULL, $2, $3, $4,
-                $5, $6, $7, $8, $9, $10, $11, $12,
-                $13, 'new'
+                $1, $2,
+                NULL, $3, $4, $5,
+                $6, $7, $8, $9, $10, $11, $12, $13,
+                $14, 'new'
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
             data.get("order_num"),
+            source,
             data.get("first_name"),
             data.get("last_name", ""),
             data.get("phone"),
@@ -433,8 +435,8 @@ async def save_site_order(data: dict) -> str:
         )
         await conn.execute("""
             INSERT INTO order_status_history (order_num, new_status, note)
-            VALUES ($1, 'new', 'Заявка создана через сайт')
-        """, data.get("order_num"))
+            VALUES ($1, 'new', $2)
+        """, data.get("order_num"), source_note)
     return data.get("order_num", "")
 
 

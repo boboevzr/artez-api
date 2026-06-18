@@ -149,6 +149,15 @@ class OrderRequest(BaseModel):
         return v.strip()
 
 
+class StaffOrderRequest(BaseModel):
+    first_name: str
+    phone: str
+    service: str = ""
+    branch: str = ""
+    address: str = ""
+    note: str = ""
+
+
 # ══════════════════════════════════════
 #  SMS — Eskiz.uz
 # ══════════════════════════════════════
@@ -489,6 +498,38 @@ async def staff_own_orders(staff=Depends(get_current_staff)):
     result = [dict(r) for r in rows
               if dict(r).get("branch") == staff.get("branch")]
     return {"ok": True, "orders": result}
+
+@app.post("/api/staff/orders/create")
+async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm("orders"))):
+    order_num = await db.get_next_order_num()
+    staff_name = staff.get("first_name") or "сотрудник"
+    branch = req.branch or staff.get("branch") or ""
+    note_full = f"📱 Заявка от сотрудника: {staff_name}" + (f"\n{req.note}" if req.note else "")
+    await db.save_site_order({
+        "order_num":   order_num,
+        "first_name":  req.first_name,
+        "last_name":   "",
+        "phone":       req.phone,
+        "branch":      branch,
+        "city":        "",
+        "address":     req.address or "—",
+        "location":    "",
+        "service":     req.service,
+        "pickup_date": "",
+        "pickup_time": "",
+        "note":        note_full,
+        "total_price": None,
+    }, source="staff")
+    # Уведомление в группу Telegram
+    notify_order = OrderRequest.model_construct(
+        first_name=req.first_name, last_name="",
+        phone=req.phone, branch=branch, city="",
+        address=req.address or "—", location="",
+        service=req.service, service_type=f"Сотрудник: {staff_name}",
+        pickup_date="", pickup_time="", is_quick=False, total_price=None,
+    )
+    await notify_group_new_order(order_num, notify_order)
+    return {"ok": True, "order_num": order_num}
 
 
 @app.get("/api/prices")
