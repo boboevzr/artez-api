@@ -134,8 +134,9 @@ async def create_tables():
              LOOP EXECUTE format('ALTER TABLE staff DROP CONSTRAINT %I', r.conname);
              END LOOP;
            END $$""",
-        # Снять NOT NULL с role если был
-        "ALTER TABLE staff ALTER COLUMN role DROP NOT NULL",
+        # Снять NOT NULL с role и tg_id если был
+        "ALTER TABLE staff ALTER COLUMN role   DROP NOT NULL",
+        "ALTER TABLE staff ALTER COLUMN tg_id  DROP NOT NULL",
     ]
     async with pool.acquire() as c:
         for sql in staff_migrations:
