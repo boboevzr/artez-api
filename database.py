@@ -99,6 +99,56 @@ async def create_tables():
 
         -- Сумма заказа для бонусной программы
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_price INT DEFAULT NULL;
+
+        -- ══════════════════════════════════════
+        --  СОТРУДНИКИ
+        -- ══════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS staff (
+            id              SERIAL PRIMARY KEY,
+            first_name      VARCHAR(100) NOT NULL,
+            last_name       VARCHAR(100),
+            middle_name     VARCHAR(100),
+            phone           VARCHAR(20),
+            login           VARCHAR(50) UNIQUE NOT NULL,
+            password_hash   TEXT NOT NULL,
+            role            VARCHAR(30) NOT NULL DEFAULT 'callcenter'
+                            CHECK (role IN ('admin','manager','callcenter','driver','logistics')),
+            position        VARCHAR(100),
+            branch          VARCHAR(50),
+            tg_id           VARCHAR(50),
+            tg_username     VARCHAR(100),
+            salary_type     VARCHAR(20),
+            salary_rate     NUMERIC(10,2),
+            hire_date       DATE,
+            note            TEXT,
+            active          BOOLEAN DEFAULT TRUE,
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_staff_login ON staff(login);
+
+        -- ══════════════════════════════════════
+        --  ЛИДЫ (будущие заявки)
+        -- ══════════════════════════════════════
+        CREATE TABLE IF NOT EXISTS leads (
+            id              SERIAL PRIMARY KEY,
+            lead_num        VARCHAR(20) UNIQUE,
+            client_name     VARCHAR(200),
+            client_phone    VARCHAR(20) NOT NULL,
+            service         VARCHAR(100),
+            branch          VARCHAR(50),
+            city            VARCHAR(100),
+            address         TEXT,
+            note            TEXT,
+            status          VARCHAR(30) DEFAULT 'new'
+                            CHECK (status IN ('new','contacted','qualified','converted','lost')),
+            assigned_to     INTEGER REFERENCES staff(id),
+            created_by      INTEGER REFERENCES staff(id),
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_leads_phone  ON leads(client_phone);
+        CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
         """)
 
         # Дефолтные единицы измерения (если таблица пуста)
@@ -452,4 +502,115 @@ async def get_admin_orders(status: str = None, limit: int = 50):
             )
         return await conn.fetch(
             "SELECT * FROM orders ORDER BY created_at DESC LIMIT $1", limit
+        )
+
+
+# ══════════════════════════════════════
+#  СОТРУДНИКИ
+# ══════════════════════════════════════
+async def get_staff_by_login(login: str):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM staff WHERE login=$1 AND active=TRUE", login
+        )
+
+async def get_staff_by_id(staff_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM staff WHERE id=$1", staff_id)
+
+async def get_all_staff():
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM staff ORDER BY active DESC, first_name",
+        )
+
+async def create_staff(data: dict) -> int:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval("""
+            INSERT INTO staff (first_name, last_name, middle_name, phone, login, password_hash,
+                               role, position, branch, tg_id, tg_username,
+                               salary_type, salary_rate, hire_date, note)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            RETURNING id
+        """, data["first_name"], data.get("last_name"), data.get("middle_name"),
+            data.get("phone"), data["login"], data["password_hash"],
+            data.get("role","callcenter"), data.get("position"), data.get("branch"),
+            data.get("tg_id"), data.get("tg_username"),
+            data.get("salary_type"), data.get("salary_rate"),
+            data.get("hire_date"), data.get("note"))
+
+async def update_staff(staff_id: int, **kwargs):
+    if not pool or not kwargs: return
+    allowed = {"first_name","last_name","middle_name","phone","login","role","position",
+               "branch","tg_id","tg_username","salary_type","salary_rate","hire_date",
+               "note","active","is_active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if "is_active" in fields:
+        fields["active"] = fields.pop("is_active")
+    if not fields: return
+    sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    vals = list(fields.values())
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE staff SET {sets}, updated_at=NOW() WHERE id=$1",
+            staff_id, *vals
+        )
+
+async def update_staff_password(staff_id: int, password_hash: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE staff SET password_hash=$2, updated_at=NOW() WHERE id=$1",
+            staff_id, password_hash
+        )
+
+# ══════════════════════════════════════
+#  ЛИДЫ
+# ══════════════════════════════════════
+async def get_next_lead_num() -> str:
+    if not pool: return "LEAD-0001"
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM leads") or 0
+        return f"LEAD-{count + 1:04d}"
+
+async def create_lead(data: dict) -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO leads (lead_num, client_name, client_phone, service, branch,
+                               city, address, note, status, assigned_to, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+            RETURNING *
+        """, data["lead_num"], data.get("client_name"), data["client_phone"],
+            data.get("service"), data.get("branch"), data.get("city"),
+            data.get("address"), data.get("note"), data.get("status","new"),
+            data.get("assigned_to"), data.get("created_by"))
+        return dict(row)
+
+async def get_leads(status: str = None, branch: str = None,
+                    assigned_to: int = None, limit: int = 100):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        filters, args = ["1=1"], []
+        if status:
+            args.append(status);   filters.append(f"status=${len(args)}")
+        if branch:
+            args.append(branch);   filters.append(f"branch=${len(args)}")
+        if assigned_to:
+            args.append(assigned_to); filters.append(f"assigned_to=${len(args)}")
+        args.append(limit)
+        return await conn.fetch(
+            f"SELECT * FROM leads WHERE {' AND '.join(filters)} "
+            f"ORDER BY created_at DESC LIMIT ${len(args)}", *args
+        )
+
+async def update_lead_status(lead_id: int, status: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE leads SET status=$2, updated_at=NOW() WHERE id=$1", lead_id, status
         )

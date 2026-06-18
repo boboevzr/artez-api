@@ -247,10 +247,30 @@ def create_token(user_id: int, phone: str) -> str:
     payload = {
         "sub": str(user_id),
         "phone": phone,
+        "type": "client",
         "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
+def create_staff_token(staff_id: int, login: str, role: str) -> str:
+    payload = {
+        "sub": str(staff_id),
+        "login": login,
+        "role": role,
+        "type": "staff",
+        "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
+    }
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+
+
+# Разрешения по ролям
+ROLE_PERMISSIONS: dict[str, list[str]] = {
+    "admin":      ["leads", "orders", "clients", "status", "staff", "reports", "settings"],
+    "manager":    ["leads", "orders", "clients", "status", "reports"],
+    "callcenter": ["leads", "orders", "clients"],
+    "driver":     ["orders_own", "status_delivery"],
+    "logistics":  ["orders", "status"],
+}
 
 async def get_current_user(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -260,10 +280,44 @@ async def get_current_user(authorization: str = Header(None)):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен")
+    if payload.get("type") == "staff":
+        raise HTTPException(status_code=401, detail="Используйте клиентский токен")
     user = await db.get_user_by_id(int(payload["sub"]))
     if not user:
         raise HTTPException(status_code=401, detail="Пользователь не найден")
     return user
+
+
+async def get_current_staff(authorization: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    # Admin panel token — treat as super-admin staff
+    if payload.get("sub") == "admin":
+        return {"id": 0, "login": "admin", "role": "admin", "active": True,
+                "first_name": "Admin", "last_name": None, "phone": None,
+                "branch": None, "tg_username": None, "position": None}
+    if payload.get("type") != "staff":
+        raise HTTPException(status_code=401, detail="Требуется токен сотрудника")
+    staff = await db.get_staff_by_id(int(payload["sub"]))
+    if not staff or not staff["active"]:
+        raise HTTPException(status_code=401, detail="Сотрудник не найден или деактивирован")
+    return dict(staff)
+
+
+def require_perm(permission: str):
+    async def dep(staff=Depends(get_current_staff)):
+        if staff["role"] == "admin":  # admin has all permissions
+            return staff
+        perms = ROLE_PERMISSIONS.get(staff["role"], [])
+        if permission not in perms:
+            raise HTTPException(status_code=403, detail="Нет доступа")
+        return staff
+    return dep
 
 
 # ══════════════════════════════════════
@@ -272,6 +326,165 @@ async def get_current_user(authorization: str = Header(None)):
 @app.get("/api/health")
 async def health():
     return {"ok": True}
+
+
+# ══════════════════════════════════════
+#  СОТРУДНИКИ — авторизация и профиль
+# ══════════════════════════════════════
+class StaffLoginRequest(BaseModel):
+    login: str
+    password: str
+
+class StaffCreateRequest(BaseModel):
+    first_name: str
+    last_name: str | None = None
+    middle_name: str | None = None
+    phone: str | None = None
+    login: str
+    password: str
+    role: str = "callcenter"
+    position: str | None = None
+    branch: str | None = None
+    tg_id: str | None = None
+    tg_username: str | None = None
+    salary_type: str | None = None
+    salary_rate: float | None = None
+    hire_date: str | None = None
+    note: str | None = None
+
+def _staff_public(s: dict) -> dict:
+    return {
+        "id":         s["id"],
+        "first_name": s["first_name"],
+        "last_name":  s.get("last_name"),
+        "login":      s["login"],
+        "role":       s["role"],
+        "position":   s.get("position"),
+        "branch":     s.get("branch"),
+        "phone":      s.get("phone"),
+        "tg_username":s.get("tg_username"),
+        "active":     s["active"],
+        "permissions": ROLE_PERMISSIONS.get(s["role"], []),
+    }
+
+@app.post("/api/staff/login")
+async def staff_login(req: StaffLoginRequest):
+    staff = await db.get_staff_by_login(req.login)
+    if not staff or not pwd_context.verify(req.password[:72], staff["password_hash"]):
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+    token = create_staff_token(staff["id"], staff["login"], staff["role"])
+    return {"ok": True, "token": token, "staff": _staff_public(dict(staff))}
+
+@app.get("/api/staff/me")
+async def staff_me(staff=Depends(get_current_staff)):
+    return {"ok": True, "staff": _staff_public(staff)}
+
+@app.get("/api/staff/list")
+async def staff_list(_=Depends(require_perm("staff"))):
+    rows = await db.get_all_staff()
+    return {"ok": True, "staff": [_staff_public(dict(r)) for r in rows]}
+
+@app.post("/api/staff/create")
+async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))):
+    from datetime import date as date_type
+    hashed = pwd_context.hash(req.password[:72])
+    hire = None
+    if req.hire_date:
+        try: hire = date_type.fromisoformat(req.hire_date)
+        except ValueError: pass
+    sid = await db.create_staff({
+        "first_name": req.first_name, "last_name": req.last_name,
+        "middle_name": req.middle_name, "phone": req.phone,
+        "login": req.login, "password_hash": hashed,
+        "role": req.role, "position": req.position, "branch": req.branch,
+        "tg_id": req.tg_id, "tg_username": req.tg_username,
+        "salary_type": req.salary_type, "salary_rate": req.salary_rate,
+        "hire_date": hire, "note": req.note,
+    })
+    return {"ok": True, "id": sid}
+
+@app.patch("/api/staff/{staff_id}")
+async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"))):
+    allowed = {"first_name","last_name","phone","role","branch","position","is_active","note"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="Нет данных для обновления")
+    await db.update_staff(staff_id, **updates)
+    row = await db.get_staff_by_id(staff_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    return {"ok": True, "staff": _staff_public(dict(row))}
+
+@app.put("/api/staff/{staff_id}/password")
+async def staff_change_password(staff_id: int, body: dict, me=Depends(get_current_staff)):
+    if me["role"] != "admin" and me["id"] != staff_id:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    new_pw = body.get("password", "")
+    if len(new_pw) < 6:
+        raise HTTPException(status_code=400, detail="Минимум 6 символов")
+    await db.update_staff_password(staff_id, pwd_context.hash(new_pw[:72]))
+    return {"ok": True}
+
+
+# ══════════════════════════════════════
+#  ЛИДЫ
+# ══════════════════════════════════════
+class LeadCreateRequest(BaseModel):
+    client_name: str | None = None
+    client_phone: str
+    service: str | None = None
+    branch: str | None = None
+    city: str | None = None
+    address: str | None = None
+    note: str | None = None
+    assigned_to: int | None = None
+
+@app.post("/api/staff/leads")
+async def create_lead(req: LeadCreateRequest, staff=Depends(require_perm("leads"))):
+    lead_num = await db.get_next_lead_num()
+    lead = await db.create_lead({
+        "lead_num": lead_num, "client_name": req.client_name,
+        "client_phone": req.client_phone, "service": req.service,
+        "branch": req.branch, "city": req.city, "address": req.address,
+        "note": req.note, "assigned_to": req.assigned_to, "created_by": staff["id"],
+    })
+    return {"ok": True, "lead": lead}
+
+@app.get("/api/staff/leads")
+async def get_leads(status: str = None, branch: str = None,
+                    staff=Depends(require_perm("leads"))):
+    assigned = staff["id"] if staff["role"] == "driver" else None
+    rows = await db.get_leads(status=status, branch=branch, assigned_to=assigned)
+    return {"ok": True, "leads": [dict(r) for r in rows]}
+
+@app.patch("/api/staff/leads/{lead_id}/status")
+async def update_lead_status(lead_id: int, body: dict,
+                             _=Depends(require_perm("leads"))):
+    status = body.get("status")
+    if status not in ("new","contacted","qualified","converted","lost"):
+        raise HTTPException(status_code=400, detail="Неверный статус")
+    await db.update_lead_status(lead_id, status)
+    return {"ok": True}
+
+
+# ══════════════════════════════════════
+#  ЗАЯВКИ — для сотрудников
+# ══════════════════════════════════════
+@app.get("/api/staff/orders")
+async def staff_orders(status: str = None, branch: str = None,
+                       staff=Depends(require_perm("orders"))):
+    rows = await db.get_admin_orders(status=status, limit=200)
+    result = [dict(r) for r in rows]
+    if branch:
+        result = [o for o in result if o.get("branch") == branch]
+    return {"ok": True, "orders": result}
+
+@app.get("/api/staff/orders/own")
+async def staff_own_orders(staff=Depends(get_current_staff)):
+    rows = await db.get_admin_orders(limit=200)
+    result = [dict(r) for r in rows
+              if dict(r).get("branch") == staff.get("branch")]
+    return {"ok": True, "orders": result}
 
 
 @app.get("/api/prices")
