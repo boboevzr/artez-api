@@ -155,6 +155,7 @@ class StaffOrderRequest(BaseModel):
     service: str = ""
     branch: str = ""
     address: str = ""
+    location: str = ""
     note: str = ""
 
 
@@ -501,35 +502,55 @@ async def staff_own_orders(staff=Depends(get_current_staff)):
 
 @app.post("/api/staff/orders/create")
 async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm("orders"))):
-    order_num = await db.get_next_order_num()
-    staff_name = staff.get("first_name") or "сотрудник"
-    branch = req.branch or staff.get("branch") or ""
-    note_full = f"📱 Заявка от сотрудника: {staff_name}" + (f"\n{req.note}" if req.note else "")
-    await db.save_site_order({
-        "order_num":   order_num,
-        "first_name":  req.first_name,
-        "last_name":   "",
-        "phone":       req.phone,
-        "branch":      branch,
-        "city":        "",
-        "address":     req.address or "—",
-        "location":    "",
-        "service":     req.service,
-        "pickup_date": "",
-        "pickup_time": "",
-        "note":        note_full,
-        "total_price": None,
-    }, source="staff")
-    # Уведомление в группу Telegram
-    notify_order = OrderRequest.model_construct(
-        first_name=req.first_name, last_name="",
-        phone=req.phone, branch=branch, city="",
-        address=req.address or "—", location="",
-        service=req.service, service_type=f"Сотрудник: {staff_name}",
-        pickup_date="", pickup_time="", is_quick=False, total_price=None,
-    )
-    await notify_group_new_order(order_num, notify_order)
-    return {"ok": True, "order_num": order_num}
+    try:
+        order_num = await db.get_next_order_num()
+        staff_name = staff.get("first_name") or "сотрудник"
+        branch = req.branch or staff.get("branch") or ""
+        location = getattr(req, "location", "") or ""
+        note_full = f"📱 Заявка от сотрудника: {staff_name}" + (f"\n{req.note}" if req.note else "")
+        await db.save_site_order({
+            "order_num":   order_num,
+            "first_name":  req.first_name,
+            "last_name":   "",
+            "phone":       req.phone,
+            "branch":      branch,
+            "city":        "",
+            "address":     req.address or "",
+            "location":    location,
+            "service":     req.service,
+            "pickup_date": "",
+            "pickup_time": "",
+            "note":        note_full,
+            "total_price": None,
+        }, source="staff")
+        # Уведомление в Telegram — строим текст вручную, без Pydantic
+        if BOT_TOKEN and GROUP_ID:
+            full_name = req.first_name
+            loc_line = f"\n🗺 {location}" if location else ""
+            text = (
+                f"📱 Заявка от сотрудника {order_num}\n"
+                f"━━━━━━━━━━\n"
+                f"👤 {full_name}\n"
+                f"📞 {req.phone}\n"
+                f"🏢 {branch}\n"
+                f"🧺 {req.service or '—'}\n"
+                f"🏠 {req.address or '—'}{loc_line}\n"
+                f"👷 {staff_name}\n"
+                f"━━━━━━━━━━"
+            )
+            keyboard = {"inline_keyboard": [[
+                {"text": "✅ Принять", "callback_data": f"accept_{order_num}_0"},
+                {"text": "❌ Отклонить", "callback_data": f"reject_{order_num}_0"},
+            ]]}
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={"chat_id": GROUP_ID, "text": text, "reply_markup": keyboard, "parse_mode": "HTML"},
+                    timeout=aiohttp.ClientTimeout(total=8),
+                )
+        return {"ok": True, "order_num": order_num}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
 
 
 @app.get("/api/prices")
