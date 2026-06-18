@@ -109,6 +109,8 @@ async def create_tables():
 
     # ── Шаг 2: миграции staff (добавляем недостающие колонки) ────────────
     staff_migrations = [
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS phone         VARCHAR(20)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS last_name     VARCHAR(100)",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS login         VARCHAR(50)",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS password_hash TEXT",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS role          VARCHAR(30) DEFAULT 'callcenter'",
