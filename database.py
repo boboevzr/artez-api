@@ -968,6 +968,14 @@ async def update_contact(contact_id: int, **kwargs) -> dict | None:
         return dict(row) if row else None
 
 
+async def delete_crm_client(client_id: int) -> bool:
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM crm_clients WHERE id=$1", client_id)
+        return res == "DELETE 1"
+
+
 async def delete_contact(contact_id: int) -> bool:
     if not pool:
         return False

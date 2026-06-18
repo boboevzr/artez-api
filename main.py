@@ -681,6 +681,18 @@ async def client_update(client_id: int, req: ClientUpdateRequest,
     return {"ok": True, "client": row}
 
 
+class ClientDeleteRequest(BaseModel):
+    password: str
+
+@app.post("/api/clients/{client_id}/delete")
+async def client_delete(client_id: int, req: ClientDeleteRequest):
+    if not ADMIN_PASS or req.password != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль")
+    ok = await db.delete_crm_client(client_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    return {"ok": True}
+
 @app.get("/api/clients/{client_id}/orders")
 async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
     row = await db.get_crm_client_by_id(client_id)
@@ -693,6 +705,40 @@ async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
 # ══════════════════════════════════════════════════════════════════════════════
 # CONTACTS — справочник контактов
 # ══════════════════════════════════════════════════════════════════════════════
+
+async def _get_admin(authorization: str = Header(None)):
+    """Проверяет admin JWT (sub='admin'). Используется до определения get_admin ниже."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("sub") != "admin":
+            raise HTTPException(status_code=403, detail="Нет доступа")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    return True
+
+async def _get_admin_or_staff_clients(authorization: str = Header(None)):
+    """Принимает admin JWT или staff JWT с пермиссией clients (для поиска из staff.html)."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("sub") == "admin":
+            return True
+        # попытка как staff
+        login = payload.get("sub")
+        if login:
+            staff = await db.get_staff_by_login(login)
+            if staff:
+                perms = staff.get("permissions") or []
+                if "clients" in perms or "admin" in (staff.get("role") or ""):
+                    return True
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
 
 class ContactCreateRequest(BaseModel):
     phone:         str
@@ -717,20 +763,20 @@ class ContactsBulkRequest(BaseModel):
     rows: list[dict]
 
 @app.get("/api/contacts/search")
-async def contacts_search(q: str = "", limit: int = 10, _=Depends(require_perm("clients"))):
+async def contacts_search(q: str = "", limit: int = 10, _=Depends(_get_admin_or_staff_clients)):
     results = await db.search_contacts(q.strip(), limit=min(limit, 20))
     return {"ok": True, "contacts": results}
 
 @app.get("/api/contacts")
 async def contacts_list(search: str = "", limit: int = 50, offset: int = 0,
-                        _=Depends(require_perm("clients"))):
+                        _=Depends(_get_admin)):
     contacts = await db.get_contacts_list(search, limit=min(limit, 200), offset=offset)
     total    = await db.get_contacts_total(search)
     counts   = await db.get_contacts_source_counts()
     return {"ok": True, "contacts": contacts, "total": total, "counts": counts}
 
 @app.post("/api/contacts")
-async def contact_create(req: ContactCreateRequest, _=Depends(require_perm("clients"))):
+async def contact_create(req: ContactCreateRequest, _=Depends(_get_admin)):
     contact = await db.upsert_contact(
         phone=req.phone, first_name=req.first_name, last_name=req.last_name,
         middle_name=req.middle_name, phone2=req.phone2,
@@ -738,12 +784,12 @@ async def contact_create(req: ContactCreateRequest, _=Depends(require_perm("clie
     return {"ok": True, "contact": contact}
 
 @app.post("/api/contacts/bulk")
-async def contacts_bulk(req: ContactsBulkRequest, _=Depends(require_perm("clients"))):
+async def contacts_bulk(req: ContactsBulkRequest, _=Depends(_get_admin)):
     result = await db.bulk_insert_contacts(req.rows)
     return {"ok": True, **result}
 
 @app.get("/api/contacts/{contact_id}")
-async def contact_get(contact_id: int, _=Depends(require_perm("clients"))):
+async def contact_get(contact_id: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM contacts WHERE id=$1", contact_id)
     if not row:
@@ -752,7 +798,7 @@ async def contact_get(contact_id: int, _=Depends(require_perm("clients"))):
 
 @app.put("/api/contacts/{contact_id}")
 async def contact_update(contact_id: int, req: ContactUpdateRequest,
-                         _=Depends(require_perm("clients"))):
+                         _=Depends(_get_admin)):
     data = {k: v for k, v in req.dict().items() if v is not None}
     contact = await db.update_contact(contact_id, **data)
     if not contact:
@@ -760,7 +806,7 @@ async def contact_update(contact_id: int, req: ContactUpdateRequest,
     return {"ok": True, "contact": contact}
 
 @app.delete("/api/contacts/{contact_id}")
-async def contact_delete(contact_id: int, _=Depends(require_perm("clients"))):
+async def contact_delete(contact_id: int, _=Depends(_get_admin)):
     ok = await db.delete_contact(contact_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Контакт не найден")
