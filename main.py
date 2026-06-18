@@ -1201,6 +1201,65 @@ async def admin_login(req: AdminLoginRequest):
         raise HTTPException(status_code=401, detail="Неверный пароль")
     return {"ok": True, "token": create_admin_token()}
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ADMIN LEADS
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/admin/leads")
+async def admin_get_leads(status: str = None, branch: str = None,
+                          search: str = "", _=Depends(_get_admin)):
+    rows = await db.get_leads(status=status, branch=branch, limit=500)
+    leads = [dict(r) for r in rows]
+    if search:
+        q = search.lower()
+        leads = [l for l in leads if
+                 q in (l.get("client_name") or "").lower() or
+                 q in (l.get("client_phone") or "").lower() or
+                 q in (l.get("address") or "").lower() or
+                 q in (l.get("short_address") or "").lower()]
+    return {"ok": True, "leads": leads}
+
+class LeadUpdateRequest(BaseModel):
+    client_name:  str | None = None
+    client_phone: str | None = None
+    service:      str | None = None
+    branch:       str | None = None
+    city:         str | None = None
+    address:      str | None = None
+    short_address: str | None = None
+    note:         str | None = None
+    status:       str | None = None
+
+@app.put("/api/admin/leads/{lead_id}")
+async def admin_update_lead(lead_id: int, req: LeadUpdateRequest, _=Depends(_get_admin)):
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    row = await db.update_lead(lead_id, **updates)
+    if not row:
+        raise HTTPException(status_code=404, detail="Лид не найден")
+    return {"ok": True, "lead": row}
+
+@app.patch("/api/admin/leads/{lead_id}/status")
+async def admin_update_lead_status(lead_id: int, body: dict, _=Depends(_get_admin)):
+    status = body.get("status")
+    if status not in ("new","contacted","qualified","converted","lost"):
+        raise HTTPException(status_code=400, detail="Неверный статус")
+    await db.update_lead_status(lead_id, status)
+    return {"ok": True}
+
+class LeadDeleteRequest(BaseModel):
+    password: str
+
+@app.post("/api/admin/leads/{lead_id}/delete")
+async def admin_delete_lead(lead_id: int, req: LeadDeleteRequest):
+    if not ADMIN_PASS or req.password != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль")
+    ok = await db.delete_lead(lead_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Лид не найден")
+    return {"ok": True}
+
+# ══════════════════════════════════════════════════════════════════════════════
+
 @app.get("/api/admin/prices")
 async def admin_get_prices(_=Depends(get_admin)):
     prices = await db.get_all_prices()

@@ -694,6 +694,24 @@ async def update_lead_status(lead_id: int, status: str):
             "UPDATE leads SET status=$2, updated_at=NOW() WHERE id=$1", lead_id, status
         )
 
+async def update_lead(lead_id: int, **kwargs) -> dict | None:
+    if not pool: return None
+    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields: return None
+    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE leads SET {set_parts}, updated_at=NOW() WHERE id=$1 RETURNING *",
+            lead_id, *list(fields.values()))
+        return dict(row) if row else None
+
+async def delete_lead(lead_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM leads WHERE id=$1", lead_id)
+        return res == "DELETE 1"
+
 
 # ══════════════════════════════════════
 #  CRM КЛИЕНТЫ
