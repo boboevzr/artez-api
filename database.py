@@ -147,7 +147,32 @@ async def create_tables():
             except Exception:
                 pass  # колонка или индекс уже существует
 
-    # ── Шаг 3: таблица leads ─────────────────────────────────────────────
+    # ── Шаг 3: таблица crm_clients ───────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS crm_clients (
+            id            SERIAL PRIMARY KEY,
+            phone         VARCHAR(20) UNIQUE NOT NULL,
+            phone2        VARCHAR(20),
+            first_name    VARCHAR(100),
+            last_name     VARCHAR(100),
+            tg_id         BIGINT,
+            tg_username   VARCHAR(100),
+            source        VARCHAR(20) DEFAULT 'unknown',
+            status        VARCHAR(20) DEFAULT 'new',
+            note          TEXT,
+            orders_count  INT DEFAULT 0,
+            total_spent   NUMERIC(12,2) DEFAULT 0,
+            last_order_at TIMESTAMPTZ,
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            updated_at    TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_crm_clients_phone  ON crm_clients(phone);
+        CREATE INDEX IF NOT EXISTS idx_crm_clients_tg_id  ON crm_clients(tg_id);
+        CREATE INDEX IF NOT EXISTS idx_crm_clients_status ON crm_clients(status);
+        """)
+
+    # ── Шаг 4: таблица leads ─────────────────────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
         CREATE TABLE IF NOT EXISTS leads (
@@ -171,7 +196,7 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
         """)
 
-    # ── Шаг 4: дефолтные единицы измерения ───────────────────────────────
+    # ── Шаг 5: дефолтные единицы измерения ───────────────────────────────
     async with pool.acquire() as c:
         units_count = await c.fetchval("SELECT COUNT(*) FROM units")
         if units_count == 0:
@@ -637,3 +662,123 @@ async def update_lead_status(lead_id: int, status: str):
         await conn.execute(
             "UPDATE leads SET status=$2, updated_at=NOW() WHERE id=$1", lead_id, status
         )
+
+
+# ══════════════════════════════════════
+#  CRM КЛИЕНТЫ
+# ══════════════════════════════════════
+async def upsert_crm_client(phone: str, first_name: str = "", last_name: str = "",
+                             tg_id: int = None, tg_username: str = None,
+                             source: str = "unknown") -> dict:
+    """Создаёт или обновляет запись клиента. Статус не понижается."""
+    if not pool or not phone:
+        return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO crm_clients (phone, first_name, last_name, tg_id, tg_username, source)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (phone) DO UPDATE SET
+                first_name  = CASE WHEN $2 != '' THEN $2 ELSE crm_clients.first_name END,
+                last_name   = CASE WHEN $3 != '' THEN $3 ELSE crm_clients.last_name END,
+                tg_id       = COALESCE($4, crm_clients.tg_id),
+                tg_username = CASE WHEN $5 IS NOT NULL AND $5 != ''
+                                   THEN $5 ELSE crm_clients.tg_username END,
+                updated_at  = NOW()
+            RETURNING *
+        """, phone, first_name or "", last_name or "", tg_id, tg_username, source)
+        return dict(row) if row else {}
+
+
+async def refresh_crm_client_stats(phone: str):
+    """Пересчитывает orders_count и last_order_at из таблицы orders."""
+    if not pool or not phone:
+        return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE crm_clients SET
+                orders_count  = (SELECT COUNT(*) FROM orders WHERE client_phone = $1),
+                last_order_at = (SELECT MAX(created_at) FROM orders WHERE client_phone = $1),
+                status = CASE
+                    WHEN status NOT IN ('vip','inactive')
+                         AND (SELECT COUNT(*) FROM orders
+                              WHERE client_phone = $1 AND status = 'done') > 0
+                    THEN 'active'
+                    ELSE status
+                END,
+                updated_at = NOW()
+            WHERE phone = $1
+        """, phone)
+
+
+async def get_crm_client_by_phone(phone: str) -> dict | None:
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM crm_clients WHERE phone = $1", phone)
+        return dict(row) if row else None
+
+
+async def get_crm_client_by_id(client_id: int) -> dict | None:
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM crm_clients WHERE id = $1", client_id)
+        return dict(row) if row else None
+
+
+async def get_crm_clients_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch("""
+                SELECT * FROM crm_clients
+                WHERE phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
+                ORDER BY updated_at DESC LIMIT $2 OFFSET $3
+            """, f"%{search}%", limit, offset)
+        else:
+            rows = await conn.fetch("""
+                SELECT * FROM crm_clients
+                ORDER BY updated_at DESC LIMIT $1 OFFSET $2
+            """, limit, offset)
+        return [dict(r) for r in rows]
+
+
+async def update_crm_client(client_id: int, **kwargs) -> dict | None:
+    if not pool or not kwargs:
+        return None
+    allowed = {"first_name", "last_name", "phone2", "status", "note"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        return None
+    set_parts = ", ".join(f"{k} = ${i+2}" for i, k in enumerate(fields))
+    vals = [client_id] + list(fields.values())
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE crm_clients SET {set_parts}, updated_at=NOW() WHERE id=$1 RETURNING *",
+            *vals
+        )
+        return dict(row) if row else None
+
+
+async def get_crm_client_orders(phone: str, limit: int = 20) -> list[dict]:
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT order_num, source, service, status, created_at, total_price, branch, address
+            FROM orders WHERE client_phone = $1
+            ORDER BY created_at DESC LIMIT $2
+        """, phone, limit)
+        return [dict(r) for r in rows]
+
+
+async def get_crm_clients_count() -> dict:
+    """Возвращает кол-во клиентов по статусам."""
+    if not pool:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT status, COUNT(*) as cnt FROM crm_clients GROUP BY status"
+        )
+        return {r["status"]: r["cnt"] for r in rows}

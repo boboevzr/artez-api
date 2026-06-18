@@ -575,9 +575,107 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                           "parse_mode": "HTML", "disable_web_page_preview": True},
                     timeout=aiohttp.ClientTimeout(total=8),
                 )
+        # Авто-регистрация клиента в CRM
+        await db.upsert_crm_client(
+            phone=req.phone,
+            first_name=req.first_name,
+            source="staff",
+        )
+        await db.refresh_crm_client_stats(req.phone)
         return {"ok": True, "order_num": order_num}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
+
+
+# ══════════════════════════════════════
+#  CRM КЛИЕНТЫ
+# ══════════════════════════════════════
+class ClientCreateRequest(BaseModel):
+    phone: str
+    phone2: str = ""
+    first_name: str = ""
+    last_name: str = ""
+    source: str = "staff"
+    status: str = "new"
+    note: str = ""
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v):
+        v = normalize_phone(v)
+        if not PHONE_RE.match(v):
+            raise ValueError("Неверный формат номера")
+        return v
+
+class ClientUpdateRequest(BaseModel):
+    phone2: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    status: str | None = None
+    note: str | None = None
+
+
+@app.get("/api/clients")
+async def clients_list(search: str = "", limit: int = 50, offset: int = 0,
+                       _=Depends(require_perm("clients"))):
+    rows = await db.get_crm_clients_list(search=search, limit=limit, offset=offset)
+    counts = await db.get_crm_clients_count()
+    return {"ok": True, "clients": rows, "counts": counts}
+
+
+@app.get("/api/clients/by-phone/{phone}")
+async def client_by_phone(phone: str, _=Depends(require_perm("clients"))):
+    phone = normalize_phone(phone)
+    row = await db.get_crm_client_by_phone(phone)
+    return {"ok": True, "client": row}
+
+
+@app.get("/api/clients/{client_id}")
+async def client_detail(client_id: int, _=Depends(require_perm("clients"))):
+    row = await db.get_crm_client_by_id(client_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    orders = await db.get_crm_client_orders(row["phone"])
+    return {"ok": True, "client": row, "orders": orders}
+
+
+@app.post("/api/clients")
+async def client_create(req: ClientCreateRequest, _=Depends(require_perm("clients"))):
+    existing = await db.get_crm_client_by_phone(req.phone)
+    if existing:
+        raise HTTPException(status_code=409, detail={
+            "msg": "Клиент с таким номером уже существует",
+            "client": existing
+        })
+    row = await db.upsert_crm_client(
+        phone=req.phone, first_name=req.first_name,
+        last_name=req.last_name, source=req.source,
+    )
+    if req.phone2 or req.note or req.status != "new":
+        row = await db.update_crm_client(
+            row["id"], phone2=req.phone2 or None,
+            note=req.note or None, status=req.status
+        ) or row
+    return {"ok": True, "client": row}
+
+
+@app.put("/api/clients/{client_id}")
+async def client_update(client_id: int, req: ClientUpdateRequest,
+                        _=Depends(require_perm("clients"))):
+    updates = {k: v for k, v in req.dict().items() if v is not None}
+    row = await db.update_crm_client(client_id, **updates)
+    if not row:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    return {"ok": True, "client": row}
+
+
+@app.get("/api/clients/{client_id}/orders")
+async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
+    row = await db.get_crm_client_by_id(client_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    orders = await db.get_crm_client_orders(row["phone"])
+    return {"ok": True, "orders": orders}
 
 
 @app.get("/api/prices")
@@ -1144,5 +1242,14 @@ async def create_order(order: OrderRequest):
 
     await notify_group_new_order(order_num, order)
     await notify_sheets_new_order(order_num, order)
+
+    # Авто-регистрация клиента в CRM
+    await db.upsert_crm_client(
+        phone=order.phone,
+        first_name=order.first_name,
+        last_name=order.last_name,
+        source="site",
+    )
+    await db.refresh_crm_client_stats(order.phone)
 
     return {"ok": True, "order_num": order_num}
