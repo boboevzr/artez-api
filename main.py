@@ -387,20 +387,24 @@ async def staff_list(_=Depends(require_perm("staff"))):
 @app.post("/api/staff/create")
 async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))):
     from datetime import date as date_type
+    import traceback
     hashed = pwd_context.hash(req.password[:72])
     hire = None
     if req.hire_date:
         try: hire = date_type.fromisoformat(req.hire_date)
         except ValueError: pass
-    sid = await db.create_staff({
-        "first_name": req.first_name, "last_name": req.last_name,
-        "middle_name": req.middle_name, "phone": req.phone,
-        "login": req.login, "password_hash": hashed,
-        "role": req.role, "position": req.position, "branch": req.branch,
-        "tg_id": req.tg_id, "tg_username": req.tg_username,
-        "salary_type": req.salary_type, "salary_rate": req.salary_rate,
-        "hire_date": hire, "note": req.note,
-    })
+    try:
+        sid = await db.create_staff({
+            "first_name": req.first_name, "last_name": req.last_name,
+            "middle_name": req.middle_name, "phone": req.phone,
+            "login": req.login, "password_hash": hashed,
+            "role": req.role, "position": req.position, "branch": req.branch,
+            "tg_id": req.tg_id, "tg_username": req.tg_username,
+            "salary_type": req.salary_type, "salary_rate": req.salary_rate,
+            "hire_date": hire, "note": req.note,
+        })
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"DB error: {type(e).__name__}: {e}")
     return {"ok": True, "id": sid}
 
 @app.patch("/api/staff/{staff_id}")

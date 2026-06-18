@@ -88,14 +88,24 @@ async def create_tables():
         );
         CREATE INDEX IF NOT EXISTS idx_users_phone     ON users(phone);
         CREATE INDEX IF NOT EXISTS idx_sms_codes_phone ON sms_codes(phone);
-        ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL;
-        ALTER TABLE prices  ADD COLUMN IF NOT EXISTS unit_key  VARCHAR(20)    DEFAULT 'm2';
-        ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2)  DEFAULT NULL;
-        ALTER TABLE users   ADD COLUMN IF NOT EXISTS address   VARCHAR(200)   DEFAULT NULL;
-        ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20)    DEFAULT NULL;
-        ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE        DEFAULT NULL;
-        ALTER TABLE orders  ADD COLUMN IF NOT EXISTS total_price INT          DEFAULT NULL;
         """)
+
+    # Опциональные миграции других таблиц — каждый отдельно чтобы не блокировать
+    other_migrations = [
+        "ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL",
+        "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS unit_key  VARCHAR(20)   DEFAULT 'm2'",
+        "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS address   VARCHAR(200)  DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20)   DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE       DEFAULT NULL",
+        "ALTER TABLE orders  ADD COLUMN IF NOT EXISTS total_price INT         DEFAULT NULL",
+    ]
+    async with pool.acquire() as c:
+        for sql in other_migrations:
+            try:
+                await c.execute(sql)
+            except Exception:
+                pass
 
     # ── Шаг 2: миграции staff (добавляем недостающие колонки) ────────────
     staff_migrations = [
@@ -114,6 +124,16 @@ async def create_tables():
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS active        BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS updated_at    TIMESTAMPTZ DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_staff_login ON staff(login)",
+        # Снять CHECK constraints на role — бот мог ограничить список ролей
+        """DO $$ DECLARE r RECORD;
+           BEGIN
+             FOR r IN SELECT conname FROM pg_constraint
+                      WHERE conrelid='staff'::regclass AND contype='c'
+             LOOP EXECUTE format('ALTER TABLE staff DROP CONSTRAINT %I', r.conname);
+             END LOOP;
+           END $$""",
+        # Снять NOT NULL с role если был
+        "ALTER TABLE staff ALTER COLUMN role DROP NOT NULL",
     ]
     async with pool.acquire() as c:
         for sql in staff_migrations:
