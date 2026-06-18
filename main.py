@@ -763,13 +763,13 @@ async def contact_delete(contact_id: int, _=Depends(require_perm("clients"))):
     return {"ok": True}
 
 
-class ContactsDeleteAllRequest(BaseModel):
+class ContactsPurgeRequest(BaseModel):
     password: str
 
-@app.delete("/api/contacts")
-async def contacts_delete_all(req: ContactsDeleteAllRequest, me=Depends(get_current_staff)):
-    """Удалить все контакты — только после подтверждения паролем текущего админа."""
-    if not pwd_context.verify(req.password[:72], me["password_hash"]):
+@app.post("/api/contacts/purge")
+async def contacts_purge(req: ContactsPurgeRequest, _=Depends(get_admin)):
+    """Удалить все контакты — только для администратора (проверка ADMIN_PASS)."""
+    if not ADMIN_PASS or req.password != ADMIN_PASS:
         raise HTTPException(status_code=403, detail="Неверный пароль")
     deleted = await db.delete_all_contacts()
     return {"ok": True, "deleted": deleted}
