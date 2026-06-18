@@ -110,6 +110,7 @@ async def create_tables():
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS salary_rate   NUMERIC(10,2)",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS hire_date     DATE",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS note          TEXT",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS middle_name   VARCHAR(100)",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS active        BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS updated_at    TIMESTAMPTZ DEFAULT NOW()",
         "CREATE INDEX IF NOT EXISTS idx_staff_login ON staff(login)",
