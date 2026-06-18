@@ -227,14 +227,16 @@ def generate_code() -> str:
     return f"{secrets.randbelow(1000000):06d}"
 
 
-def sms_text(code: str, purpose: str = "register") -> str:
-    """Формирует текст SMS по требованиям Eskiz (Пункт 2): цель + название ресурса."""
-    if purpose == "reset":
-        return f"Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}"
-    if purpose == "login":
-        return f"Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}"
-    # register (default)
-    return f"Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}"
+async def sms_text(code: str, purpose: str = "register") -> str:
+    """Формирует текст SMS, читая шаблон из config (если задан)."""
+    defaults = {
+        "reset":    "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
+        "login":    "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
+        "register": "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
+    }
+    key = f"sms_text_{purpose}"
+    tpl = await db.get_config(key) or defaults.get(purpose, defaults["register"])
+    return tpl.replace("{code}", code)
 
 
 # ══════════════════════════════════════
@@ -305,7 +307,7 @@ async def register(req: RegisterRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, "register", expires_at)
-    await send_sms(req.phone, sms_text(code, "register"))
+    await send_sms(req.phone, await sms_text(code, "register"))
 
     return {"ok": True, "message": "Код подтверждения отправлен", "phone": req.phone}
 
@@ -346,7 +348,7 @@ async def resend_code(req: ResendCodeRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, req.purpose, expires_at)
-    await send_sms(req.phone, sms_text(code, req.purpose))
+    await send_sms(req.phone, await sms_text(code, req.purpose))
 
     return {"ok": True, "message": "Код отправлен повторно"}
 
@@ -697,15 +699,30 @@ async def save_osago_settings(body: OsagoSettings, _=Depends(get_admin)):
 
 # ── Настройки сайта ──────────────────────────────────────────
 SITE_SETTINGS_DEFAULTS = {
-    "social_instagram":   "https://www.instagram.com/ziyoboboev/",
-    "social_tg_bot":      "https://t.me/artez_orders_bot",
-    "social_tg_group":    "https://t.me/artez_gilam_yuvish",
-    "contact_short":      "1221",
-    "contact_main":       "+998792221221",
+    # Соцсети
+    "social_instagram":    "https://www.instagram.com/ziyoboboev/",
+    "social_tg_bot":       "https://t.me/artez_orders_bot",
+    "social_tg_group":     "https://t.me/artez_gilam_yuvish",
+    # Контакты
+    "contact_short":       "1221",
+    "contact_main":        "+998792221221",
     "contact_zarafshan_1": "+998882001221",
     "contact_zarafshan_2": "+998947380444",
-    "contact_navoi_1":    "+998997500020",
-    "contact_navoi_2":    "+998991124848",
+    "contact_navoi_1":     "+998997500020",
+    "contact_navoi_2":     "+998991124848",
+    # Telegram бот
+    "tg_bot_token":        "",
+    "tg_group_id":         "",
+    "tg_group_sms_id":     "",
+    # Яндекс Карты
+    "yandex_maps_key":     "",
+    # Eskiz SMS
+    "eskiz_email":         "",
+    "eskiz_password":      "",
+    "eskiz_from":          "4546",
+    "sms_text_register":   "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
+    "sms_text_login":      "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
+    "sms_text_reset":      "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
 }
 
 @app.get("/api/settings/site")
@@ -727,6 +744,16 @@ class SiteSettings(BaseModel):
     contact_zarafshan_2: str | None = None
     contact_navoi_1:     str | None = None
     contact_navoi_2:     str | None = None
+    tg_bot_token:        str | None = None
+    tg_group_id:         str | None = None
+    tg_group_sms_id:     str | None = None
+    yandex_maps_key:     str | None = None
+    eskiz_email:         str | None = None
+    eskiz_password:      str | None = None
+    eskiz_from:          str | None = None
+    sms_text_register:   str | None = None
+    sms_text_login:      str | None = None
+    sms_text_reset:      str | None = None
 
 @app.put("/api/admin/settings/site")
 async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
