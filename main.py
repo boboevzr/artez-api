@@ -750,7 +750,7 @@ async def contact_update(contact_id: int, req: ContactUpdateRequest,
     return {"ok": True, "contact": contact}
 
 @app.delete("/api/contacts/{contact_id}")
-async def contact_delete(contact_id: int, _=Depends(require_staff)):
+async def contact_delete(contact_id: int, _=Depends(require_perm("clients"))):
     ok = await db.delete_contact(contact_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Контакт не найден")
