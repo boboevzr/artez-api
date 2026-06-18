@@ -767,8 +767,8 @@ class ContactsPurgeRequest(BaseModel):
     password: str
 
 @app.post("/api/contacts/purge")
-async def contacts_purge(req: ContactsPurgeRequest, _=Depends(get_admin)):
-    """Удалить все контакты — только для администратора (проверка ADMIN_PASS)."""
+async def contacts_purge(req: ContactsPurgeRequest):
+    """Удалить все контакты — только по паролю администратора."""
     if not ADMIN_PASS or req.password != ADMIN_PASS:
         raise HTTPException(status_code=403, detail="Неверный пароль")
     deleted = await db.delete_all_contacts()
