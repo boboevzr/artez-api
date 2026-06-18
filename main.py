@@ -537,12 +537,13 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
 #  GOOGLE-ТАБЛИЦА — ТА ЖЕ, КУДА ПИШЕТ БОТ
 # ══════════════════════════════════════
 async def send_to_sheets(data: dict):
-    if not SHEETS_URL:
-        logging.warning("SHEETS_URL not set — skipping sheets export")
+    url = await _get_cfg("sheets_url")
+    if not url:
+        logging.warning("sheets_url not set — skipping sheets export")
         return
     try:
         async with aiohttp.ClientSession() as session:
-            await session.post(SHEETS_URL, json=data, timeout=aiohttp.ClientTimeout(total=10))
+            await session.post(url, json=data, timeout=aiohttp.ClientTimeout(total=10))
     except Exception as e:
         logging.warning(f"Sheets error: {e}")
 
@@ -725,6 +726,11 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_text_register":   "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
     "sms_text_login":      "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
     "sms_text_reset":      "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
+    # ОСАГО партнёр
+    "osago_partner_phone": "+998936121300",
+    "osago_partner_promo": "ARTEZ",
+    # Google Sheets
+    "sheets_url":          SHEETS_URL,
 }
 
 async def _get_cfg(key: str) -> str:
@@ -740,9 +746,10 @@ async def get_site_settings():
     PUBLIC_KEYS = [
         "social_instagram", "social_tg_bot", "social_tg_group",
         "contact_short", "contact_main",
-        "yandex_maps_key",
         "contact_zarafshan_1", "contact_zarafshan_2",
         "contact_navoi_1", "contact_navoi_2",
+        "yandex_maps_key",
+        "osago_partner_phone", "osago_partner_promo",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -770,6 +777,9 @@ class SiteSettings(BaseModel):
     sms_text_register:   str | None = None
     sms_text_login:      str | None = None
     sms_text_reset:      str | None = None
+    osago_partner_phone: str | None = None
+    osago_partner_promo: str | None = None
+    sheets_url:          str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
