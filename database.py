@@ -955,7 +955,7 @@ async def get_contacts_source_counts() -> dict:
 async def update_contact(contact_id: int, **kwargs) -> dict | None:
     if not pool:
         return None
-    allowed = {"first_name","last_name","middle_name","phone2","address","short_address","source"}
+    allowed = {"phone","first_name","last_name","middle_name","phone2","address","short_address","source"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields:
         return None

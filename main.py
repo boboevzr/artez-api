@@ -755,6 +755,7 @@ class ContactCreateRequest(BaseModel):
     source:        str = "ARTEZ"
 
 class ContactUpdateRequest(BaseModel):
+    phone:         str | None = None
     first_name:    str | None = None
     last_name:     str | None = None
     middle_name:   str | None = None
@@ -809,8 +810,13 @@ async def contact_update(contact_id: int, req: ContactUpdateRequest,
         raise HTTPException(status_code=404, detail="Контакт не найден")
     return {"ok": True, "contact": contact}
 
-@app.delete("/api/contacts/{contact_id}")
-async def contact_delete(contact_id: int, _=Depends(_get_admin)):
+class ContactDeleteRequest(BaseModel):
+    password: str
+
+@app.post("/api/contacts/{contact_id}/delete")
+async def contact_delete(contact_id: int, req: ContactDeleteRequest):
+    if not ADMIN_PASS or req.password != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль")
     ok = await db.delete_contact(contact_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Контакт не найден")
