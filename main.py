@@ -755,6 +755,14 @@ class SiteSettings(BaseModel):
     sms_text_login:      str | None = None
     sms_text_reset:      str | None = None
 
+@app.get("/api/admin/settings/site")
+async def get_admin_site_settings(_=Depends(get_admin)):
+    result = {}
+    for key, default in SITE_SETTINGS_DEFAULTS.items():
+        val = await db.get_config(key)
+        result[key] = val if val is not None else default
+    return {"ok": True, "settings": result}
+
 @app.put("/api/admin/settings/site")
 async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
     data = {k: v for k, v in body.dict().items() if v is not None}
