@@ -682,6 +682,81 @@ async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
     return {"ok": True, "orders": orders}
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# CONTACTS — справочник контактов
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ContactCreateRequest(BaseModel):
+    phone:       str
+    first_name:  str = ""
+    last_name:   str = ""
+    middle_name: str = ""
+    phone2:      str = ""
+    address:     str = ""
+    source:      str = "ARTEZ"
+
+class ContactUpdateRequest(BaseModel):
+    first_name:  str | None = None
+    last_name:   str | None = None
+    middle_name: str | None = None
+    phone2:      str | None = None
+    address:     str | None = None
+    source:      str | None = None
+
+class ContactsBulkRequest(BaseModel):
+    rows: list[dict]
+
+@app.get("/api/contacts/search")
+async def contacts_search(q: str = "", limit: int = 10, _=Depends(require_perm("clients"))):
+    results = await db.search_contacts(q.strip(), limit=min(limit, 20))
+    return {"ok": True, "contacts": results}
+
+@app.get("/api/contacts")
+async def contacts_list(search: str = "", limit: int = 50, offset: int = 0,
+                        _=Depends(require_perm("clients"))):
+    contacts = await db.get_contacts_list(search, limit=min(limit, 200), offset=offset)
+    total    = await db.get_contacts_total(search)
+    counts   = await db.get_contacts_source_counts()
+    return {"ok": True, "contacts": contacts, "total": total, "counts": counts}
+
+@app.post("/api/contacts")
+async def contact_create(req: ContactCreateRequest, _=Depends(require_perm("clients"))):
+    contact = await db.upsert_contact(
+        phone=req.phone, first_name=req.first_name, last_name=req.last_name,
+        middle_name=req.middle_name, phone2=req.phone2,
+        address=req.address, source=req.source)
+    return {"ok": True, "contact": contact}
+
+@app.post("/api/contacts/bulk")
+async def contacts_bulk(req: ContactsBulkRequest, _=Depends(require_perm("clients"))):
+    result = await db.bulk_insert_contacts(req.rows)
+    return {"ok": True, **result}
+
+@app.get("/api/contacts/{contact_id}")
+async def contact_get(contact_id: int, _=Depends(require_perm("clients"))):
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM contacts WHERE id=$1", contact_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Контакт не найден")
+    return {"ok": True, "contact": dict(row)}
+
+@app.put("/api/contacts/{contact_id}")
+async def contact_update(contact_id: int, req: ContactUpdateRequest,
+                         _=Depends(require_perm("clients"))):
+    data = {k: v for k, v in req.dict().items() if v is not None}
+    contact = await db.update_contact(contact_id, **data)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Контакт не найден")
+    return {"ok": True, "contact": contact}
+
+@app.delete("/api/contacts/{contact_id}")
+async def contact_delete(contact_id: int, _=Depends(require_staff)):
+    ok = await db.delete_contact(contact_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Контакт не найден")
+    return {"ok": True}
+
+
 @app.get("/api/prices")
 async def get_prices():
     """Возвращает актуальные цены из БД для калькулятора и прайс-листа на сайте"""
