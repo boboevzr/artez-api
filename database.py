@@ -17,25 +17,19 @@ async def init_db():
 
 
 async def create_tables():
-    async with pool.acquire() as conn:
-        await conn.execute("""
-        -- ══════════════════════════════════════
-        --  ПОЛЬЗОВАТЕЛИ САЙТА (личный кабинет)
-        -- ══════════════════════════════════════
+    # ── Шаг 1: основные таблицы ──────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id              SERIAL PRIMARY KEY,
             phone           VARCHAR(20) UNIQUE NOT NULL,
             password_hash   VARCHAR(255) NOT NULL,
             first_name      VARCHAR(100),
-            tg_id           BIGINT,                    -- связь с Telegram-клиентом (если есть)
+            tg_id           BIGINT,
             is_verified     BOOLEAN DEFAULT FALSE,
             created_at      TIMESTAMP DEFAULT NOW(),
             updated_at      TIMESTAMP DEFAULT NOW()
         );
-
-        -- ══════════════════════════════════════
-        --  SMS-КОДЫ ПОДТВЕРЖДЕНИЯ
-        -- ══════════════════════════════════════
         CREATE TABLE IF NOT EXISTS sms_codes (
             id              SERIAL PRIMARY KEY,
             phone           VARCHAR(20) NOT NULL,
@@ -46,25 +40,11 @@ async def create_tables():
             used            BOOLEAN DEFAULT FALSE,
             created_at      TIMESTAMP DEFAULT NOW()
         );
-
-        CREATE INDEX IF NOT EXISTS idx_users_phone     ON users(phone);
-        CREATE INDEX IF NOT EXISTS idx_sms_codes_phone ON sms_codes(phone);
-
-        -- ══════════════════════════════════════
-        --  СИСТЕМНЫЕ НАСТРОЙКИ (кэш токенов и т.п.)
-        -- ══════════════════════════════════════
         CREATE TABLE IF NOT EXISTS config (
             key        VARCHAR(100) PRIMARY KEY,
             value      TEXT NOT NULL,
             updated_at TIMESTAMP DEFAULT NOW()
         );
-
-        -- Заявки с сайта не имеют Telegram ID — снимаем NOT NULL, если ещё установлен
-        ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL;
-
-        -- ══════════════════════════════════════
-        --  ЕДИНИЦЫ ИЗМЕРЕНИЯ (общая таблица с ботом)
-        -- ══════════════════════════════════════
         CREATE TABLE IF NOT EXISTS units (
             id          SERIAL PRIMARY KEY,
             key         VARCHAR(20) UNIQUE NOT NULL,
@@ -74,10 +54,6 @@ async def create_tables():
             symbol_uz   VARCHAR(10) NOT NULL,
             created_at  TIMESTAMP DEFAULT NOW()
         );
-
-        -- ══════════════════════════════════════
-        --  ЦЕНЫ (общая таблица с ботом)
-        -- ══════════════════════════════════════
         CREATE TABLE IF NOT EXISTS prices (
             id              SERIAL PRIMARY KEY,
             service_key     VARCHAR(30) NOT NULL,
@@ -89,30 +65,15 @@ async def create_tables():
             updated_at      TIMESTAMP DEFAULT NOW(),
             UNIQUE(service_key, type_key)
         );
-        ALTER TABLE prices ADD COLUMN IF NOT EXISTS unit_key VARCHAR(20) DEFAULT 'm2';
-        ALTER TABLE prices ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL;
-
-        -- Профиль пользователя: адрес, авто, дата окончания полиса ОСАГО
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(200) DEFAULT NULL;
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20) DEFAULT NULL;
-        ALTER TABLE users ADD COLUMN IF NOT EXISTS osago_expiry DATE DEFAULT NULL;
-
-        -- Сумма заказа для бонусной программы
-        ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_price INT DEFAULT NULL;
-
-        -- ══════════════════════════════════════
-        --  СОТРУДНИКИ
-        -- ══════════════════════════════════════
         CREATE TABLE IF NOT EXISTS staff (
             id              SERIAL PRIMARY KEY,
             first_name      VARCHAR(100) NOT NULL,
             last_name       VARCHAR(100),
             middle_name     VARCHAR(100),
             phone           VARCHAR(20),
-            login           VARCHAR(50) UNIQUE NOT NULL,
-            password_hash   TEXT NOT NULL,
-            role            VARCHAR(30) NOT NULL DEFAULT 'callcenter'
-                            CHECK (role IN ('admin','manager','callcenter','driver','logistics')),
+            login           VARCHAR(50),
+            password_hash   TEXT,
+            role            VARCHAR(30) DEFAULT 'callcenter',
             position        VARCHAR(100),
             branch          VARCHAR(50),
             tg_id           VARCHAR(50),
@@ -125,11 +86,44 @@ async def create_tables():
             created_at      TIMESTAMPTZ DEFAULT NOW(),
             updated_at      TIMESTAMPTZ DEFAULT NOW()
         );
-        CREATE INDEX IF NOT EXISTS idx_staff_login ON staff(login);
+        CREATE INDEX IF NOT EXISTS idx_users_phone     ON users(phone);
+        CREATE INDEX IF NOT EXISTS idx_sms_codes_phone ON sms_codes(phone);
+        ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL;
+        ALTER TABLE prices  ADD COLUMN IF NOT EXISTS unit_key  VARCHAR(20)    DEFAULT 'm2';
+        ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2)  DEFAULT NULL;
+        ALTER TABLE users   ADD COLUMN IF NOT EXISTS address   VARCHAR(200)   DEFAULT NULL;
+        ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20)    DEFAULT NULL;
+        ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE        DEFAULT NULL;
+        ALTER TABLE orders  ADD COLUMN IF NOT EXISTS total_price INT          DEFAULT NULL;
+        """)
 
-        -- ══════════════════════════════════════
-        --  ЛИДЫ (будущие заявки)
-        -- ══════════════════════════════════════
+    # ── Шаг 2: миграции staff (добавляем недостающие колонки) ────────────
+    staff_migrations = [
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS login         VARCHAR(50)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS password_hash TEXT",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS role          VARCHAR(30) DEFAULT 'callcenter'",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS position      VARCHAR(100)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS branch        VARCHAR(50)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS tg_id         VARCHAR(50)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS tg_username   VARCHAR(100)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS salary_type   VARCHAR(20)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS salary_rate   NUMERIC(10,2)",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS hire_date     DATE",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS note          TEXT",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS active        BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS updated_at    TIMESTAMPTZ DEFAULT NOW()",
+        "CREATE INDEX IF NOT EXISTS idx_staff_login ON staff(login)",
+    ]
+    async with pool.acquire() as c:
+        for sql in staff_migrations:
+            try:
+                await c.execute(sql)
+            except Exception:
+                pass  # колонка или индекс уже существует
+
+    # ── Шаг 3: таблица leads ─────────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
         CREATE TABLE IF NOT EXISTS leads (
             id              SERIAL PRIMARY KEY,
             lead_num        VARCHAR(20) UNIQUE,
@@ -151,8 +145,9 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
         """)
 
-        # Дефолтные единицы измерения (если таблица пуста)
-        units_count = await conn.fetchval("SELECT COUNT(*) FROM units")
+    # ── Шаг 4: дефолтные единицы измерения ───────────────────────────────
+    async with pool.acquire() as c:
+        units_count = await c.fetchval("SELECT COUNT(*) FROM units")
         if units_count == 0:
             default_units = [
                 ("m2",  "Квадратный метр", "Kvadrat metr",  "м²",  "m²"),
@@ -162,11 +157,11 @@ async def create_tables():
                 ("cm2", "Кв. сантиметр",   "Kv. santimetr", "см²", "sm²"),
                 ("kg",  "Килограмм",       "Kilogramm",     "кг",  "kg"),
             ]
-            await conn.executemany("""
+            await c.executemany("""
                 INSERT INTO units (key, name_ru, name_uz, symbol_ru, symbol_uz)
-                VALUES ($1, $2, $3, $4, $5)
-                ON CONFLICT (key) DO NOTHING
+                VALUES ($1, $2, $3, $4, $5) ON CONFLICT (key) DO NOTHING
             """, default_units)
+
     logging.info("✅ API: Tables created/verified")
 
 
