@@ -504,10 +504,15 @@ async def staff_own_orders(staff=Depends(get_current_staff)):
 async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm("orders"))):
     try:
         order_num = await db.get_next_order_num()
-        staff_name = staff.get("first_name") or "сотрудник"
+        first_name = staff.get("first_name") or ""
+        last_name  = staff.get("last_name") or ""
+        login      = staff.get("login") or ""
+        staff_label = " ".join(filter(None, [first_name, last_name])) or login or "сотрудник"
+        if login and login != staff_label:
+            staff_label = f"{staff_label} (@{login})"
         branch = req.branch or staff.get("branch") or ""
-        location = getattr(req, "location", "") or ""
-        note_full = f"📱 Заявка от сотрудника: {staff_name}" + (f"\n{req.note}" if req.note else "")
+        location = req.location or ""
+        note_full = f"📱 Заявка от сотрудника: {staff_label}" + (f"\n{req.note}" if req.note else "")
         await db.save_site_order({
             "order_num":   order_num,
             "first_name":  req.first_name,
@@ -526,6 +531,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
         # Уведомление в Telegram — строим текст вручную, без Pydantic
         if BOT_TOKEN and GROUP_ID:
             full_name = req.first_name
+            staff_name = staff_label
             if location:
                 try:
                     lat, lon = location.split(",", 1)
@@ -535,13 +541,21 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                     loc_line = f"\n🗺 {location}"
             else:
                 loc_line = ""
+            SERVICE_RU = {
+                "carpet":      "Ковры",
+                "carpet_home": "Ковры на дому",
+                "sofa":        "Диваны",
+                "mattress":    "Матрасы",
+                "curtains":    "Шторы",
+            }
+            service_ru = SERVICE_RU.get(req.service, req.service or "—")
             text = (
                 f"📱 Заявка от сотрудника {order_num}\n"
                 f"━━━━━━━━━━\n"
                 f"👤 {full_name}\n"
                 f"📞 {req.phone}\n"
                 f"🏢 {branch}\n"
-                f"🧺 {req.service or '—'}\n"
+                f"🧺 {service_ru}\n"
                 f"🏠 {req.address or '—'}{loc_line}\n"
                 f"👷 {staff_name}\n"
                 f"━━━━━━━━━━"
@@ -553,7 +567,8 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             async with aiohttp.ClientSession() as session:
                 await session.post(
                     f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    json={"chat_id": GROUP_ID, "text": text, "reply_markup": keyboard, "parse_mode": "HTML"},
+                    json={"chat_id": GROUP_ID, "text": text, "reply_markup": keyboard,
+                          "parse_mode": "HTML", "disable_web_page_preview": True},
                     timeout=aiohttp.ClientTimeout(total=8),
                 )
         return {"ok": True, "order_num": order_num}
