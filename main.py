@@ -153,17 +153,17 @@ class OrderRequest(BaseModel):
 #  SMS — Eskiz.uz
 # ══════════════════════════════════════
 async def _eskiz_get_token() -> str:
-    """Получает/обновляет токен Eskiz. Кэш в памяти + персистентность в БД."""
+    """Получает/обновляет токен Eskiz. Читает email/пароль из БД (приоритет) или env."""
     global _eskiz_token
-    if not ESKIZ_EMAIL or not ESKIZ_PASSWORD:
+    email    = await _get_cfg("eskiz_email")
+    password = await _get_cfg("eskiz_password")
+    if not email or not password:
         return ""
 
-    # Загружаем из БД, если в памяти пусто
     if not _eskiz_token:
         _eskiz_token = await db.get_config("eskiz_token") or ""
 
     async with aiohttp.ClientSession() as session:
-        # Пробуем обновить существующий токен
         if _eskiz_token:
             resp = await session.patch(
                 "https://notify.eskiz.uz/api/auth/refresh",
@@ -177,10 +177,9 @@ async def _eskiz_get_token() -> str:
                     await db.set_config("eskiz_token", _eskiz_token)
                 return _eskiz_token
 
-        # Refresh не прошёл — логинимся заново
         resp = await session.post(
             "https://notify.eskiz.uz/api/auth/login",
-            data={"email": ESKIZ_EMAIL, "password": ESKIZ_PASSWORD},
+            data={"email": email, "password": password},
         )
         if resp.status == 200:
             data = await resp.json()
@@ -198,8 +197,10 @@ async def send_sms(phone: str, message: str):
     """Отправляет SMS через Eskiz.uz. Если ключи не заданы — пишет в лог."""
     logging.info(f"📲 [SMS->{phone}] {message}")
 
-    if not ESKIZ_EMAIL or not ESKIZ_PASSWORD:
-        logging.warning("⚠️ ESKIZ_EMAIL/ESKIZ_PASSWORD не заданы — SMS не отправлен")
+    email    = await _get_cfg("eskiz_email")
+    password = await _get_cfg("eskiz_password")
+    if not email or not password:
+        logging.warning("⚠️ eskiz_email/eskiz_password не заданы — SMS не отправлен")
         return
 
     token = await _eskiz_get_token()
@@ -213,7 +214,7 @@ async def send_sms(phone: str, message: str):
         resp = await session.post(
             "https://notify.eskiz.uz/api/message/sms/send",
             headers={"Authorization": f"Bearer {token}"},
-            data={"mobile_phone": mobile, "message": message, "from": ESKIZ_FROM},
+            data={"mobile_phone": mobile, "message": message, "from": await _get_cfg("eskiz_from")},
         )
         if resp.status == 200:
             data = await resp.json()
@@ -698,6 +699,7 @@ async def save_osago_settings(body: OsagoSettings, _=Depends(get_admin)):
 
 
 # ── Настройки сайта ──────────────────────────────────────────
+# Fallback: если в БД пусто — берём env-переменную, затем хардкод
 SITE_SETTINGS_DEFAULTS = {
     # Соцсети
     "social_instagram":    "https://www.instagram.com/ziyoboboev/",
@@ -710,27 +712,41 @@ SITE_SETTINGS_DEFAULTS = {
     "contact_zarafshan_2": "+998947380444",
     "contact_navoi_1":     "+998997500020",
     "contact_navoi_2":     "+998991124848",
-    # Telegram бот
-    "tg_bot_token":        "",
-    "tg_group_id":         "",
-    "tg_group_sms_id":     "",
-    # Яндекс Карты
-    "yandex_maps_key":     "",
-    # Eskiz SMS
-    "eskiz_email":         "",
-    "eskiz_password":      "",
-    "eskiz_from":          "4546",
+    # Telegram бот — fallback из env
+    "tg_bot_token":        BOT_TOKEN,
+    "tg_group_id":         GROUP_ID,
+    "tg_group_sms_id":     os.getenv("GROUP_SMS_ID", ""),
+    # Яндекс Карты — fallback из env
+    "yandex_maps_key":     os.getenv("YANDEX_MAPS_KEY", ""),
+    # Eskiz SMS — fallback из env
+    "eskiz_email":         ESKIZ_EMAIL,
+    "eskiz_password":      ESKIZ_PASSWORD,
+    "eskiz_from":          ESKIZ_FROM,
     "sms_text_register":   "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
     "sms_text_login":      "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
     "sms_text_reset":      "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
 }
 
+async def _get_cfg(key: str) -> str:
+    """БД → env-fallback из SITE_SETTINGS_DEFAULTS."""
+    val = await db.get_config(key)
+    if val:
+        return val
+    return SITE_SETTINGS_DEFAULTS.get(key, "")
+
 @app.get("/api/settings/site")
 async def get_site_settings():
+    # Публичный эндпоинт — соцсети, контакты и ключ карты (не секреты)
+    PUBLIC_KEYS = [
+        "social_instagram", "social_tg_bot", "social_tg_group",
+        "contact_short", "contact_main",
+        "yandex_maps_key",
+        "contact_zarafshan_1", "contact_zarafshan_2",
+        "contact_navoi_1", "contact_navoi_2",
+    ]
     result = {}
-    for key, default in SITE_SETTINGS_DEFAULTS.items():
-        val = await db.get_config(key)
-        result[key] = val if val is not None else default
+    for key in PUBLIC_KEYS:
+        result[key] = await _get_cfg(key)
     return {"ok": True, "settings": result}
 
 
@@ -757,10 +773,7 @@ class SiteSettings(BaseModel):
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
-    result = {}
-    for key, default in SITE_SETTINGS_DEFAULTS.items():
-        val = await db.get_config(key)
-        result[key] = val if val is not None else default
+    result = {key: await _get_cfg(key) for key in SITE_SETTINGS_DEFAULTS}
     return {"ok": True, "settings": result}
 
 @app.put("/api/admin/settings/site")
