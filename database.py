@@ -93,6 +93,8 @@ async def create_tables():
     # Опциональные миграции других таблиц — каждый отдельно чтобы не блокировать
     other_migrations = [
         "ALTER TABLE orders ALTER COLUMN client_tg_id DROP NOT NULL",
+        "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_source_check",
+        "ALTER TABLE orders ADD CONSTRAINT orders_source_check CHECK (source IN ('bot','site','staff'))",
         "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS unit_key  VARCHAR(20)   DEFAULT 'm2'",
         "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS address   VARCHAR(200)  DEFAULT NULL",
