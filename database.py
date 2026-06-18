@@ -92,9 +92,10 @@ async def create_tables():
         ALTER TABLE prices ADD COLUMN IF NOT EXISTS unit_key VARCHAR(20) DEFAULT 'm2';
         ALTER TABLE prices ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL;
 
-        -- Профиль пользователя: адрес и авто
+        -- Профиль пользователя: адрес, авто, дата окончания полиса ОСАГО
         ALTER TABLE users ADD COLUMN IF NOT EXISTS address VARCHAR(200) DEFAULT NULL;
         ALTER TABLE users ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20) DEFAULT NULL;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS osago_expiry DATE DEFAULT NULL;
 
         -- Сумма заказа для бонусной программы
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS total_price INT DEFAULT NULL;
@@ -182,12 +183,13 @@ async def update_user_password(user_id: int, password_hash: str):
         """, user_id, password_hash)
 
 
-async def update_user_profile(user_id: int, first_name: str, address: str = None, car_plate: str = None):
+async def update_user_profile(user_id: int, first_name: str, address: str = None,
+                               car_plate: str = None, osago_expiry=None):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE users SET first_name=$2, address=$3, car_plate=$4, updated_at=NOW() WHERE id=$1
-        """, user_id, first_name, address, car_plate)
+            UPDATE users SET first_name=$2, address=$3, car_plate=$4, osago_expiry=$5, updated_at=NOW() WHERE id=$1
+        """, user_id, first_name, address, car_plate, osago_expiry)
 
 
 # ══════════════════════════════════════

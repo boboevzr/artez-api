@@ -332,6 +332,7 @@ async def verify(req: VerifyRequest):
             "first_name": user["first_name"],
             "address": user["address"],
             "car_plate": user["car_plate"],
+            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
         }
     }
 
@@ -373,12 +374,14 @@ async def login(req: LoginRequest):
             "first_name": user["first_name"],
             "address": user["address"],
             "car_plate": user["car_plate"],
+            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
         }
     }
 
 
 @app.get("/api/me")
 async def me(user = Depends(get_current_user)):
+    expiry = user.get("osago_expiry")
     return {
         "id": user["id"],
         "phone": user["phone"],
@@ -386,6 +389,7 @@ async def me(user = Depends(get_current_user)):
         "is_verified": user["is_verified"],
         "address": user["address"],
         "car_plate": user["car_plate"],
+        "osago_expiry": expiry.isoformat() if expiry else None,
     }
 
 
@@ -393,6 +397,7 @@ class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None
     car_plate: str | None = None
+    osago_expiry: str | None = None  # ISO date YYYY-MM-DD или null
 
     @field_validator("first_name")
     @classmethod
@@ -416,7 +421,14 @@ class UpdatePasswordRequest(BaseModel):
 
 @app.patch("/api/me")
 async def update_profile(req: UpdateProfileRequest, user = Depends(get_current_user)):
-    await db.update_user_profile(user["id"], req.first_name, req.address, req.car_plate)
+    from datetime import date as date_type
+    expiry = None
+    if req.osago_expiry:
+        try:
+            expiry = date_type.fromisoformat(req.osago_expiry)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Неверный формат даты (ожидается YYYY-MM-DD)")
+    await db.update_user_profile(user["id"], req.first_name, req.address, req.car_plate, expiry)
     return {"ok": True, "first_name": req.first_name}
 
 
