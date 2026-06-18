@@ -617,6 +617,43 @@ class ClientCreateRequest(BaseModel):
             raise ValueError("Неверный формат номера")
         return v
 
+# ── Admin auth helpers (defined early so they can be used anywhere below) ──────
+
+async def _get_admin(authorization: str = Header(None)):
+    """Проверяет admin JWT (sub='admin')."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("sub") != "admin":
+            raise HTTPException(status_code=403, detail="Нет доступа")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    return True
+
+async def _get_admin_or_staff_clients(authorization: str = Header(None)):
+    """Принимает admin JWT или staff JWT с пермиссией clients."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    token = authorization.removeprefix("Bearer ").strip()
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        if payload.get("sub") == "admin":
+            return True
+        login = payload.get("sub")
+        if login:
+            staff = await db.get_staff_by_login(login)
+            if staff:
+                perms = staff.get("permissions") or []
+                if "clients" in perms or "admin" in (staff.get("role") or ""):
+                    return True
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+
+# ──────────────────────────────────────────────────────────────────────────────
+
 class ClientUpdateRequest(BaseModel):
     phone2: str | None = None
     first_name: str | None = None
@@ -706,39 +743,6 @@ async def client_orders(client_id: int, _=Depends(require_perm("clients"))):
 # CONTACTS — справочник контактов
 # ══════════════════════════════════════════════════════════════════════════════
 
-async def _get_admin(authorization: str = Header(None)):
-    """Проверяет admin JWT (sub='admin'). Используется до определения get_admin ниже."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Не авторизован")
-    token = authorization.removeprefix("Bearer ").strip()
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if payload.get("sub") != "admin":
-            raise HTTPException(status_code=403, detail="Нет доступа")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Недействительный токен")
-    return True
-
-async def _get_admin_or_staff_clients(authorization: str = Header(None)):
-    """Принимает admin JWT или staff JWT с пермиссией clients (для поиска из staff.html)."""
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Не авторизован")
-    token = authorization.removeprefix("Bearer ").strip()
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        if payload.get("sub") == "admin":
-            return True
-        # попытка как staff
-        login = payload.get("sub")
-        if login:
-            staff = await db.get_staff_by_login(login)
-            if staff:
-                perms = staff.get("permissions") or []
-                if "clients" in perms or "admin" in (staff.get("role") or ""):
-                    return True
-        raise HTTPException(status_code=403, detail="Нет доступа")
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Недействительный токен")
 
 class ContactCreateRequest(BaseModel):
     phone:         str
