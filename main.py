@@ -156,6 +156,7 @@ class StaffOrderRequest(BaseModel):
     branch: str = ""
     address: str = ""
     location: str = ""
+    location_address: str = ""
     note: str = ""
 
 
@@ -512,6 +513,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             staff_label = f"{staff_label} (@{login})"
         branch = req.branch or staff.get("branch") or ""
         location = req.location or ""
+        location_address = req.location_address or ""
         note_full = f"📱 Заявка от сотрудника: {staff_label}" + (f"\n{req.note}" if req.note else "")
         await db.save_site_order({
             "order_num":   order_num,
@@ -536,9 +538,10 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                 try:
                     lat, lon = location.split(",", 1)
                     yandex_url = f"https://yandex.uz/maps/?pt={lon.strip()},{lat.strip()}&z=16"
-                    loc_line = f"\n🗺 <a href=\"{yandex_url}\">Открыть в Яндекс Картах</a>"
+                    link_text = location_address if location_address else f"{lat.strip()}, {lon.strip()}"
+                    loc_line = f"\n🗺 <a href=\"{yandex_url}\">{link_text}</a>"
                 except Exception:
-                    loc_line = f"\n🗺 {location}"
+                    loc_line = f"\n🗺 {location_address or location}"
             else:
                 loc_line = ""
             SERVICE_RU = {
