@@ -100,7 +100,10 @@ async def create_tables():
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS address   VARCHAR(200)  DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20)   DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE       DEFAULT NULL",
-        "ALTER TABLE orders  ADD COLUMN IF NOT EXISTS total_price INT         DEFAULT NULL",
+        "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS total_price   INT          DEFAULT NULL",
+        "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -461,13 +464,13 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             INSERT INTO orders (
                 order_num, source,
                 client_tg_id, client_first_name, client_last_name, client_phone,
-                branch, city, address, location, service, pickup_date, pickup_time, note,
+                branch, city, address, short_address, location, service, pickup_date, pickup_time, note,
                 total_price, status
             ) VALUES (
                 $1, $2,
                 NULL, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11, $12, $13,
-                $14, 'new'
+                $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                $15, 'new'
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
@@ -479,6 +482,7 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             data.get("branch"),
             data.get("city"),
             data.get("address"),
+            data.get("short_address", ""),
             data.get("location"),
             data.get("service"),
             data.get("pickup_date"),
@@ -656,13 +660,13 @@ async def create_lead(data: dict) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO leads (lead_num, client_name, client_phone, service, branch,
-                               city, address, note, status, assigned_to, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                               city, address, short_address, note, status, assigned_to, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
             RETURNING *
         """, data["lead_num"], data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
-            data.get("address"), data.get("note"), data.get("status","new"),
-            data.get("assigned_to"), data.get("created_by"))
+            data.get("address"), data.get("short_address", ""), data.get("note"),
+            data.get("status","new"), data.get("assigned_to"), data.get("created_by"))
         return dict(row)
 
 async def get_leads(status: str = None, branch: str = None,

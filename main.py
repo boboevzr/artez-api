@@ -160,6 +160,7 @@ class StaffOrderRequest(BaseModel):
     service: str = ""
     branch: str = ""
     address: str = ""
+    short_address: str = ""
     location: str = ""
     location_address: str = ""
     note: str = ""
@@ -456,6 +457,7 @@ class LeadCreateRequest(BaseModel):
     branch: str | None = None
     city: str | None = None
     address: str | None = None
+    short_address: str | None = None
     note: str | None = None
     assigned_to: int | None = None
 
@@ -466,7 +468,8 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(require_perm("leads"
         "lead_num": lead_num, "client_name": req.client_name,
         "client_phone": req.client_phone, "service": req.service,
         "branch": req.branch, "city": req.city, "address": req.address,
-        "note": req.note, "assigned_to": req.assigned_to, "created_by": staff["id"],
+        "short_address": req.short_address, "note": req.note,
+        "assigned_to": req.assigned_to, "created_by": staff["id"],
     })
     return {"ok": True, "lead": lead}
 
@@ -527,8 +530,9 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "phone":       req.phone,
             "branch":      branch,
             "city":        "",
-            "address":     req.address or "",
-            "location":    location,
+            "address":       req.address or "",
+            "short_address": req.short_address or "",
+            "location":      location,
             "service":     req.service,
             "pickup_date": "",
             "pickup_time": "",
@@ -564,7 +568,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                 f"📞 {req.phone}\n"
                 f"🏢 {branch}\n"
                 f"🧺 {service_ru}\n"
-                f"🏠 {req.address or '—'}{loc_line}\n"
+                f"🏠 {req.short_address or req.address or '—'}{(' | ' + req.address) if req.short_address and req.address and req.short_address != req.address else ''}{loc_line}\n"
                 f"👷 {staff_name}\n"
                 f"━━━━━━━━━━"
             )
