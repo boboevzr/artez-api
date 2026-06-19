@@ -524,6 +524,13 @@ async def get_leads(status: str = None, branch: str = None,
     rows = await db.get_leads(status=status, branch=branch, assigned_to=assigned)
     return {"ok": True, "leads": [dict(r) for r in rows]}
 
+@app.patch("/api/staff/leads/{lead_id}")
+async def update_lead(lead_id: int, body: dict, _=Depends(require_perm("leads"))):
+    allowed = {"client_name","client_phone","branch","address","short_address","note"}
+    fields = {k: v for k, v in body.items() if k in allowed}
+    lead = await db.update_lead(lead_id, **fields)
+    return {"ok": True, "lead": lead}
+
 @app.patch("/api/staff/leads/{lead_id}/status")
 async def update_lead_status(lead_id: int, body: dict,
                              _=Depends(require_perm("leads"))):
