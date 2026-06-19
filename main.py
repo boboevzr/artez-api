@@ -1535,6 +1535,30 @@ async def agent_apply(user=Depends(get_current_user)):
 
     return {"ok": True, "message": "Вы зарегистрированы как агент! Войдите через artez.uz/staff.html"}
 
+class ApplyByTgRequest(BaseModel):
+    tg_id: int
+
+@app.post("/api/agent/apply-by-tg")
+async def agent_apply_by_tg(req: ApplyByTgRequest):
+    """Бот регистрирует агента по tg_id — ищет аккаунт сайта по привязанному tg_id."""
+    site_user = await db.get_user_by_tg_id(str(req.tg_id))
+    if not site_user:
+        return {"ok": False, "reason": "no_site_account"}
+    if not site_user.get("is_verified"):
+        return {"ok": False, "reason": "not_verified"}
+    # Уже агент?
+    existing = await db.get_staff_by_login(site_user["phone"])
+    if existing and existing["role"] == "agent":
+        return {"ok": True, "already": True, "phone": site_user["phone"]}
+    password_hash = site_user.get("password_hash")
+    if not password_hash:
+        return {"ok": False, "reason": "no_password"}
+    staff_id = await db.create_agent_from_user(dict(site_user), password_hash)
+    if not staff_id:
+        # ON CONFLICT — значит уже есть запись с таким логином
+        return {"ok": True, "already": True, "phone": site_user["phone"]}
+    return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
+
 @app.post("/api/agent/reset-password")
 async def agent_reset_password(body: dict):
     """Сброс пароля агента — отправляет временный пароль через Telegram."""
