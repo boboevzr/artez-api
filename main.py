@@ -1179,6 +1179,20 @@ async def update_password(req: UpdatePasswordRequest, user = Depends(get_current
     return {"ok": True}
 
 
+class LinkTgRequest(BaseModel):
+    user_id: int
+    tg_id: int
+    tg_username: str | None = None
+
+@app.post("/api/user/link-tg")
+async def link_tg(req: LinkTgRequest):
+    """Бот вызывает этот endpoint чтобы привязать tg_id к аккаунту сайта."""
+    user = await db.get_user_by_id(req.user_id)
+    if not user:
+        raise HTTPException(404, "Пользователь не найден")
+    await db.link_user_tg_id(user["phone"], req.tg_id)
+    return {"ok": True, "phone": user["phone"], "name": user.get("first_name") or ""}
+
 @app.get("/api/orders")
 async def my_orders(user = Depends(get_current_user)):
     orders = await db.get_orders_by_phone(user["phone"])
