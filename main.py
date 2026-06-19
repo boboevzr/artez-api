@@ -1369,6 +1369,56 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                                           note=note or f"Статус изменён сотрудником {staff.get('login','')}")
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
+
+    # ── Telegram уведомление клиенту ──────────────────────────────────────
+    tg_id = order.get("client_tg_id")
+    if tg_id and BOT_TOKEN:
+        try:
+            tmpl = await db.get_tg_status_message(status)
+            if tmpl and tmpl.get("enabled"):
+                # Определяем язык клиента — пробуем найти в таблице clients
+                lang = "ru"
+                try:
+                    async with db.pool.acquire() as _c:
+                        row = await _c.fetchrow(
+                            "SELECT language FROM clients WHERE tg_id=$1", int(tg_id))
+                        if row and row["language"] in ("uz", "ru"):
+                            lang = row["language"]
+                except Exception:
+                    pass
+
+                raw = tmpl.get(f"message_{lang}") or tmpl.get("message_ru") or ""
+                if raw:
+                    STATUS_EMOJI = {
+                        "new":"🆕","confirmed":"✅","pickup":"🚗","received":"📦",
+                        "washing":"🧼","drying":"💨","packing":"📦","ready":"✅",
+                        "delivery":"🚚","delivered":"✅","cancelled":"❌",
+                    }
+                    STATUS_NAME_RU = {
+                        "new":"Новый","confirmed":"Подтверждён","pickup":"Вывоз",
+                        "received":"В мастерской","washing":"Мойка","drying":"Сушка",
+                        "packing":"Упаковка","ready":"Готов","delivery":"Доставка",
+                        "delivered":"Доставлен","cancelled":"Отменён",
+                    }
+                    text = raw.format(
+                        order_num  = order.get("order_num", ""),
+                        status     = STATUS_NAME_RU.get(status, status),
+                        status_emoji = STATUS_EMOJI.get(status, ""),
+                        client_name  = order.get("client_first_name", ""),
+                        service      = order.get("service", ""),
+                        branch       = order.get("branch", ""),
+                        pickup_date  = str(order.get("pickup_date", "") or ""),
+                        phone        = order.get("client_phone", ""),
+                    )
+                    async with aiohttp.ClientSession() as session:
+                        await session.post(
+                            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                            json={"chat_id": tg_id, "text": text, "parse_mode": "HTML"},
+                            timeout=aiohttp.ClientTimeout(total=8),
+                        )
+        except Exception as e:
+            logging.warning(f"TG notify failed for order {order_id}: {e}")
+
     return {"ok": True, "order": order}
 
 @app.get("/api/admin/orders/{order_id}/items")
