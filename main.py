@@ -1128,6 +1128,7 @@ async def me(user = Depends(get_current_user)):
         "address": user["address"],
         "car_plate": user["car_plate"],
         "osago_expiry": expiry.isoformat() if expiry else None,
+        "tg_id": user.get("tg_id"),
     }
 
 
