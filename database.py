@@ -754,15 +754,21 @@ async def get_leads(status: str = None, branch: str = None,
     async with pool.acquire() as conn:
         filters, args = ["1=1"], []
         if status:
-            args.append(status);   filters.append(f"status=${len(args)}")
+            args.append(status);   filters.append(f"l.status=${len(args)}")
         if branch:
-            args.append(branch);   filters.append(f"branch=${len(args)}")
+            args.append(branch);   filters.append(f"l.branch=${len(args)}")
         if assigned_to:
-            args.append(assigned_to); filters.append(f"assigned_to=${len(args)}")
+            args.append(assigned_to); filters.append(f"l.assigned_to=${len(args)}")
         args.append(limit)
         return await conn.fetch(
-            f"SELECT * FROM leads WHERE {' AND '.join(filters)} "
-            f"ORDER BY created_at DESC LIMIT ${len(args)}", *args
+            f"""SELECT l.*,
+                       s.first_name  AS creator_first_name,
+                       s.last_name   AS creator_last_name,
+                       s.position    AS creator_position
+                FROM leads l
+                LEFT JOIN staff s ON s.id = l.created_by
+                WHERE {' AND '.join(filters)}
+                ORDER BY l.created_at DESC LIMIT ${len(args)}""", *args
         )
 
 async def update_lead_status(lead_id: int, status: str):
