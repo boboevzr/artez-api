@@ -106,8 +106,13 @@ async def create_tables():
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
-        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items BOOLEAN DEFAULT TRUE",
-        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login  VARCHAR(50)  DEFAULT NULL",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items  BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login   VARCHAR(50)  DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_width_cm  NUMERIC(8,1) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_length_cm NUMERIC(8,1) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_sqm       NUMERIC(8,3) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_total_sum NUMERIC(12,2) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS measure_status   VARCHAR(20)  DEFAULT 'pending'",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1104,6 +1109,26 @@ async def update_order_discount(order_id: int, discount_sum: float) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE orders SET discount_sum=$2 WHERE id=$1 RETURNING *", order_id, discount_sum)
+        return dict(row) if row else {}
+
+async def confirm_item_measure(item_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE order_items SET measure_status='confirmed' WHERE id=$1 RETURNING *", item_id)
+        return dict(row) if row else {}
+
+async def correct_item_measure(item_id: int, actual_width_cm: float, actual_length_cm: float) -> dict:
+    if not pool: return {}
+    actual_sqm = round(actual_width_cm * actual_length_cm / 10000, 3)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items
+            SET actual_width_cm=$2, actual_length_cm=$3, actual_sqm=$4,
+                actual_total_sum=ROUND($4 * price_per_sqm, 2),
+                measure_status='corrected'
+            WHERE id=$1 RETURNING *
+        """, item_id, actual_width_cm, actual_length_cm, actual_sqm)
         return dict(row) if row else {}
 
 async def update_item_washer(item_id: int, washer_login: str) -> dict:

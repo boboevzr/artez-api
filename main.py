@@ -1348,13 +1348,18 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                                      note: str = Body("", embed=True)):
     role = staff.get("role", "")
     if role == "washer":
-        # Мойщик может только двигать по своей цепочке
         order = await db.get_order_by_id(order_id)
         if not order:
             raise HTTPException(status_code=404, detail="Заказ не найден")
         allowed = WASHER_STATUS_FLOW.get(order.get("status", ""))
         if status != allowed:
             raise HTTPException(status_code=403, detail=f"Мойщик может изменить статус только на: {allowed}")
+        # Перед началом мойки — все позиции должны быть замерены
+        if status == "washing":
+            items = await db.get_order_items(order_id)
+            pending = [i for i in items if i.get("measure_status", "pending") == "pending"]
+            if pending:
+                raise HTTPException(status_code=400, detail=f"Не все позиции замерены: осталось {len(pending)}")
     elif "status" not in ROLE_PERMISSIONS.get(role, []) and role != "admin":
         raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
     if status not in ALL_ORDER_STATUSES:
@@ -1422,6 +1427,23 @@ async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staf
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     return {"ok": True, "order": order}
+
+@app.patch("/api/admin/orders/{order_id}/items/{item_id}/measure")
+async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_current_staff),
+                              action: str = Body(..., embed=True),
+                              actual_width_cm: float = Body(None, embed=True),
+                              actual_length_cm: float = Body(None, embed=True)):
+    if action == "confirm":
+        item = await db.confirm_item_measure(item_id)
+    elif action == "correct":
+        if not actual_width_cm or not actual_length_cm:
+            raise HTTPException(status_code=400, detail="Укажите фактические размеры")
+        item = await db.correct_item_measure(item_id, actual_width_cm, actual_length_cm)
+    else:
+        raise HTTPException(status_code=400, detail="action: confirm или correct")
+    if not item:
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+    return {"ok": True, "item": item}
 
 @app.patch("/api/admin/orders/{order_id}/items/{item_id}/washer")
 async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_current_staff),
