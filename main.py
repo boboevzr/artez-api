@@ -1537,11 +1537,35 @@ async def agent_apply(user=Depends(get_current_user)):
 
 class ApplyByTgRequest(BaseModel):
     tg_id: int
+    phone: str | None = None  # телефон из базы бота как запасной вариант
+
+async def _find_site_user_for_bot(tg_id: int, phone: str | None):
+    """Ищет пользователя сайта: сначала по tg_id, потом по телефону из бота."""
+    user = await db.get_user_by_tg_id(str(tg_id))
+    if user:
+        return user
+    if phone:
+        norm = normalize_phone(phone)
+        user = await db.get_user_by_phone(norm)
+        if user:
+            # Заодно привязываем tg_id
+            await db.link_user_tg_id(user["phone"], tg_id)
+        return user
+    return None
+
+@app.get("/api/agent/status-by-tg/{tg_id}")
+async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None):
+    """Для бота: проверить статус агента по tg_id без авторизации."""
+    staff = await db.get_staff_by_tg_id(str(tg_id))
+    if staff and staff["role"] == "agent":
+        return {"ok": True, "is_agent": True, "has_site_account": True}
+    site_user = await _find_site_user_for_bot(tg_id, phone)
+    return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
 
 @app.post("/api/agent/apply-by-tg")
 async def agent_apply_by_tg(req: ApplyByTgRequest):
-    """Бот регистрирует агента по tg_id — ищет аккаунт сайта по привязанному tg_id."""
-    site_user = await db.get_user_by_tg_id(str(req.tg_id))
+    """Бот регистрирует агента по tg_id — ищет аккаунт сайта по tg_id или телефону."""
+    site_user = await _find_site_user_for_bot(req.tg_id, req.phone)
     if not site_user:
         return {"ok": False, "reason": "no_site_account"}
     if not site_user.get("is_verified"):
@@ -1555,7 +1579,6 @@ async def agent_apply_by_tg(req: ApplyByTgRequest):
         return {"ok": False, "reason": "no_password"}
     staff_id = await db.create_agent_from_user(dict(site_user), password_hash)
     if not staff_id:
-        # ON CONFLICT — значит уже есть запись с таким логином
         return {"ok": True, "already": True, "phone": site_user["phone"]}
     return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
 
@@ -1602,15 +1625,6 @@ async def agent_change_password(body: dict, staff=Depends(get_current_staff)):
     await db.clear_staff_temp_password(staff["id"])
     return {"ok": True}
 
-@app.get("/api/agent/status-by-tg/{tg_id}")
-async def agent_status_by_tg(tg_id: int):
-    """Для бота: проверить статус агента по tg_id без авторизации."""
-    staff = await db.get_staff_by_tg_id(str(tg_id))
-    if staff and staff["role"] == "agent":
-        return {"ok": True, "is_agent": True, "has_site_account": True}
-    # Есть ли пользователь сайта с этим tg_id?
-    site_user = await db.get_user_by_tg_id(str(tg_id))
-    return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
 
 class ResetByTgRequest(BaseModel):
     tg_id: int
