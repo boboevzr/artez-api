@@ -817,7 +817,7 @@ class ContactsBulkRequest(BaseModel):
     rows: list[dict]
 
 @app.get("/api/contacts/search")
-async def contacts_search(q: str = "", limit: int = 10, _=Depends(_get_admin_or_staff_clients)):
+async def contacts_search(q: str = "", limit: int = 10, _=Depends(get_current_staff)):
     results = await db.search_contacts(q.strip(), limit=min(limit, 20))
     return {"ok": True, "contacts": results}
 
