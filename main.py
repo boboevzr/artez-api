@@ -1592,6 +1592,26 @@ async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
     return {"ok": True}
 
 
+# ── Telegram: шаблоны уведомлений ──────────────────────────────────────
+@app.get("/api/admin/settings/tg-messages")
+async def get_tg_messages(_=Depends(get_admin)):
+    rows = await db.get_tg_status_messages()
+    return rows
+
+@app.put("/api/admin/settings/tg-messages/{status}")
+async def save_tg_message(status: str, body: dict, _=Depends(get_admin)):
+    ALL_STATUSES = {"new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"}
+    if status not in ALL_STATUSES:
+        raise HTTPException(status_code=400, detail="Неизвестный статус")
+    row = await db.upsert_tg_status_message(
+        status=status,
+        enabled=bool(body.get("enabled", True)),
+        message_ru=body.get("message_ru", ""),
+        message_uz=body.get("message_uz", ""),
+    )
+    return row
+
+
 @app.post("/api/orders")
 async def create_order(order: OrderRequest):
     order_num = await db.get_next_order_num()

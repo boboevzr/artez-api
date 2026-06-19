@@ -268,6 +268,46 @@ async def create_tables():
                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT (key) DO NOTHING
             """, default_units)
 
+    # ── Шаг 5: таблица шаблонов Telegram-уведомлений ────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS tg_status_messages (
+            status      VARCHAR(30) PRIMARY KEY,
+            enabled     BOOLEAN     DEFAULT TRUE,
+            message_ru  TEXT        DEFAULT '',
+            message_uz  TEXT        DEFAULT ''
+        );
+        """)
+        # Дефолтные шаблоны если таблица пустая
+        defaults = [
+            ("new",       True,  "🆕 Ваша заявка #{order_num} принята!\n\nУслуга: {service}\nДата вывоза: {pickup_date}\n\nМы свяжемся с вами для подтверждения.",
+                                 "🆕 #{order_num} raqamli arizangiz qabul qilindi!\n\nXizmat: {service}\nOlib ketish sanasi: {pickup_date}\n\nTasdiqlash uchun siz bilan bog'lanamiz."),
+            ("confirmed", True,  "✅ Ваш заказ #{order_num} подтверждён!\n\nВодитель приедет: {pickup_date}\n📞 По вопросам: 1221",
+                                 "✅ #{order_num} raqamli buyurtmangiz tasdiqlandi!\n\nHaydovchi keladi: {pickup_date}\n📞 Savollar uchun: 1221"),
+            ("pickup",    False, "🚗 Водитель выехал за вашим ковром #{order_num}.\n\nАдрес: {address}",
+                                 "🚗 Haydovchi #{order_num} gilamingiz uchun yo'lga chiqdi.\n\nManzil: {address}"),
+            ("received",  True,  "📥 Ваш ковёр #{order_num} доставлен в мастерскую.\n\nНачинаем обработку. Сообщим о готовности!",
+                                 "📥 #{order_num} gilamingiz ustaxonaga yetkazildi.\n\nIshlashni boshladik. Tayyor bo'lganda xabar beramiz!"),
+            ("washing",   False, "🧼 Ваш ковёр #{order_num} на мойке.",
+                                 "🧼 #{order_num} gilamingiz yuvish jarayonida."),
+            ("drying",    False, "💨 Ваш ковёр #{order_num} на сушке.",
+                                 "💨 #{order_num} gilamingiz quritilmoqda."),
+            ("packing",   False, "📦 Ваш ковёр #{order_num} упаковывается.",
+                                 "📦 #{order_num} gilamingiz qadoqlanmoqda."),
+            ("ready",     True,  "✅ Ваш ковёр #{order_num} готов!\n\nМожем доставить или вы можете забрать сами.\n📞 Позвоните: 1221",
+                                 "✅ #{order_num} gilamingiz tayyor!\n\nYetkazib berishimiz yoki o'zingiz olib ketishingiz mumkin.\n📞 Qo'ng'iroq qiling: 1221"),
+            ("delivery",  True,  "🚚 Ваш ковёр #{order_num} в пути!\n\nВодитель скоро будет у вас. Ждите звонка.",
+                                 "🚚 #{order_num} gilamingiz yo'lda!\n\nHaydovchi tez orada sizga etib keladi. Qo'ng'iroqni kuting."),
+            ("delivered", True,  "🎉 Ваш ковёр #{order_num} доставлен!\n\nСпасибо что выбрали ARTEZ. Будем рады видеть вас снова! ⭐",
+                                 "🎉 #{order_num} gilamingiz yetkazildi!\n\nARTEZ ni tanlaganingiz uchun rahmat. Yana ko'rishishni xohlaymiz! ⭐"),
+            ("cancelled", True,  "❌ Ваш заказ #{order_num} отменён.\n\nЕсли это ошибка — позвоните нам: 1221",
+                                 "❌ #{order_num} raqamli buyurtmangiz bekor qilindi.\n\nXato bo'lsa — qo'ng'iroq qiling: 1221"),
+        ]
+        await c.executemany("""
+            INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz)
+            VALUES ($1, $2, $3, $4) ON CONFLICT (status) DO NOTHING
+        """, defaults)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1142,4 +1182,33 @@ async def update_item_washer(item_id: int, washer_login: str) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE order_items SET washer_login=$2 WHERE id=$1 RETURNING *", item_id, washer_login or None)
+        return dict(row) if row else {}
+
+
+# ══════════════════════════════════════
+#  TELEGRAM — ШАБЛОНЫ УВЕДОМЛЕНИЙ
+# ══════════════════════════════════════
+
+async def get_tg_status_messages() -> list[dict]:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM tg_status_messages ORDER BY status")
+        return [dict(r) for r in rows]
+
+async def get_tg_status_message(status: str) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM tg_status_messages WHERE status=$1", status)
+        return dict(row) if row else None
+
+async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, message_uz: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO tg_status_messages (status, enabled, message_ru, message_uz)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (status) DO UPDATE
+              SET enabled=$2, message_ru=$3, message_uz=$4
+            RETURNING *
+        """, status, enabled, message_ru, message_uz)
         return dict(row) if row else {}
