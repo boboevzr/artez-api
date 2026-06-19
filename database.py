@@ -373,6 +373,21 @@ async def update_user_password(user_id: int, password_hash: str):
             UPDATE users SET password_hash=$2, updated_at=NOW() WHERE id=$1
         """, user_id, password_hash)
 
+async def get_all_site_users(search: str = "", limit: int = 200):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        if search:
+            return await conn.fetch(
+                "SELECT id, phone, first_name, is_verified, tg_id, created_at "
+                "FROM users WHERE phone ILIKE $1 OR first_name ILIKE $1 "
+                "ORDER BY created_at DESC LIMIT $2",
+                f"%{search}%", limit
+            )
+        return await conn.fetch(
+            "SELECT id, phone, first_name, is_verified, tg_id, created_at "
+            "FROM users ORDER BY created_at DESC LIMIT $1", limit
+        )
+
 
 async def update_user_profile(user_id: int, first_name: str, address: str = None,
                                car_plate: str = None, osago_expiry=None):

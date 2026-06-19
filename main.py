@@ -1329,6 +1329,24 @@ async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
     return {"ok": True, "lead": lead}
 
 # ══════════════════════════════════════════════════════════════════════════════
+# ADMIN: ПОЛЬЗОВАТЕЛИ САЙТА
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/admin/site-users")
+async def admin_get_site_users(search: str = "", _=Depends(_get_admin)):
+    rows = await db.get_all_site_users(search=search.strip())
+    return {"ok": True, "users": [dict(r) for r in rows]}
+
+@app.post("/api/admin/site-users/{user_id}/reset-password")
+async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_get_admin)):
+    new_password = (body.get("new_password") or "").strip()
+    if len(new_password) < 4:
+        raise HTTPException(status_code=400, detail="Пароль минимум 4 символа")
+    hashed = pwd_context.hash(new_password[:72])
+    await db.update_user_password(user_id, hashed)
+    return {"ok": True}
+
+# ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/admin/prices")
 async def admin_get_prices(_=Depends(get_admin)):
