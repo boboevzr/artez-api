@@ -1541,18 +1541,23 @@ class ApplyByTgRequest(BaseModel):
 
 async def _find_site_user_for_bot(tg_id: int, phone: str | None):
     """Ищет пользователя сайта: сначала по tg_id, потом по телефону из бота."""
-    user = await db.get_user_by_tg_id(str(tg_id))
-    if user:
-        return user
-    if phone:
-        norm = normalize_phone(phone)
-        user = await db.get_user_by_phone(norm)
-        # Попробуем без + если не нашли
-        if not user and norm.startswith("+"):
-            user = await db.get_user_by_phone(norm[1:])
+    try:
+        user = await db.get_user_by_tg_id(tg_id)
         if user:
-            await db.link_user_tg_id(user["phone"], tg_id)
-        return user
+            return user
+    except Exception:
+        pass
+    if phone:
+        try:
+            norm = normalize_phone(phone)
+            user = await db.get_user_by_phone(norm)
+            if not user and norm.startswith("+"):
+                user = await db.get_user_by_phone(norm[1:])
+            if user:
+                await db.link_user_tg_id(user["phone"], tg_id)
+            return user
+        except Exception:
+            pass
     return None
 
 @app.get("/api/agent/status-by-tg/{tg_id}")
