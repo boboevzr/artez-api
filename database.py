@@ -121,6 +121,11 @@ async def create_tables():
         "ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_code       VARCHAR(20) UNIQUE",
         "ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_status_check",
         "ALTER TABLE leads ADD CONSTRAINT leads_status_check CHECK (status IN ('new','contacted','callback','converted','lost','no_answer'))",
+        # Агент: временный пароль
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS temp_password_hash    VARCHAR(255) DEFAULT NULL",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS temp_password_expires TIMESTAMPTZ  DEFAULT NULL",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS must_change_password  BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS site_user_id          INTEGER REFERENCES users(id)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -718,6 +723,51 @@ async def get_staff_by_login(login: str):
         return await conn.fetchrow(
             "SELECT * FROM staff WHERE login=$1 AND active=TRUE", login
         )
+
+async def get_staff_by_site_user(site_user_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM staff WHERE site_user_id=$1 AND active=TRUE", site_user_id
+        )
+
+async def get_staff_by_tg_id(tg_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow(
+            "SELECT * FROM staff WHERE tg_id=$1 AND active=TRUE", tg_id
+        )
+
+async def create_agent_from_user(user: dict, password_hash: str) -> int:
+    """Создаёт staff-аккаунт агента из пользователя сайта."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchval("""
+            INSERT INTO staff (first_name, phone, login, password_hash, role,
+                               tg_id, site_user_id, active)
+            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE)
+            ON CONFLICT (login) DO NOTHING
+            RETURNING id
+        """, user["first_name"], user["phone"], user["phone"],
+            password_hash, user.get("tg_id"), user["id"])
+
+async def set_staff_temp_password(staff_id: int, temp_hash: str, expires_at):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE staff SET temp_password_hash=$2, temp_password_expires=$3,
+                             must_change_password=TRUE
+            WHERE id=$1
+        """, staff_id, temp_hash, expires_at)
+
+async def clear_staff_temp_password(staff_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE staff SET temp_password_hash=NULL, temp_password_expires=NULL,
+                             must_change_password=FALSE
+            WHERE id=$1
+        """, staff_id)
 
 async def get_staff_by_id(staff_id: int):
     if not pool: return None

@@ -428,10 +428,25 @@ def _staff_public(s: dict) -> dict:
 @app.post("/api/staff/login")
 async def staff_login(req: StaffLoginRequest):
     staff = await db.get_staff_by_login(req.login)
-    if not staff or not pwd_context.verify(req.password[:72], staff["password_hash"]):
+    if not staff:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+
+    pw = req.password[:72]
+    valid = pwd_context.verify(pw, staff["password_hash"])
+
+    # Проверяем временный пароль если основной не подошёл
+    if not valid and staff.get("temp_password_hash") and staff.get("temp_password_expires"):
+        from datetime import datetime, timezone
+        if datetime.now(timezone.utc) < staff["temp_password_expires"]:
+            valid = pwd_context.verify(pw, staff["temp_password_hash"])
+
+    if not valid:
+        raise HTTPException(status_code=401, detail="Неверный логин или пароль")
+
     token = create_staff_token(staff["id"], staff["login"], staff["role"])
-    return {"ok": True, "token": token, "staff": _staff_public(dict(staff))}
+    pub = _staff_public(dict(staff))
+    pub["must_change_password"] = bool(staff.get("must_change_password"))
+    return {"ok": True, "token": token, "staff": pub}
 
 @app.get("/api/staff/me")
 async def staff_me(staff=Depends(get_current_staff)):
@@ -1456,6 +1471,90 @@ async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
         "assigned_to": req.assigned_to, "created_by": None,
     })
     return {"ok": True, "lead": lead}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# АГЕНТЫ — регистрация и сброс пароля
+# ══════════════════════════════════════════════════════════════════════════════
+
+@app.get("/api/agent/status")
+async def agent_status(user=Depends(get_current_user)):
+    """Возвращает статус агента для текущего пользователя сайта."""
+    staff = await db.get_staff_by_site_user(user["id"])
+    if staff:
+        return {"ok": True, "is_agent": True, "must_change_password": staff["must_change_password"]}
+    # Проверяем по tg_id тоже
+    if user.get("tg_id"):
+        staff = await db.get_staff_by_tg_id(user["tg_id"])
+        if staff and staff["role"] == "agent":
+            return {"ok": True, "is_agent": True, "must_change_password": staff["must_change_password"]}
+    return {"ok": True, "is_agent": False}
+
+@app.post("/api/agent/apply")
+async def agent_apply(body: dict, user=Depends(get_current_user)):
+    """Пользователь сайта регистрируется как агент."""
+    if not user.get("is_verified"):
+        raise HTTPException(400, "Сначала подтвердите номер телефона")
+    if not user.get("tg_id"):
+        raise HTTPException(400, "Необходимо привязать Telegram-бота. Напишите боту /start")
+
+    # Уже агент?
+    existing = await db.get_staff_by_site_user(user["id"])
+    if existing:
+        raise HTTPException(400, "Вы уже зарегистрированы как агент")
+
+    password = (body.get("password") or "").strip()
+    if len(password) < 6:
+        raise HTTPException(400, "Пароль минимум 6 символов")
+
+    hashed = pwd_context.hash(password[:72])
+    staff_id = await db.create_agent_from_user(dict(user), hashed)
+    if not staff_id:
+        raise HTTPException(400, "Этот номер телефона уже используется в системе. Обратитесь к администратору.")
+
+    return {"ok": True, "message": "Вы зарегистрированы как агент! Войдите через staff.artez.uz"}
+
+@app.post("/api/agent/reset-password")
+async def agent_reset_password(body: dict):
+    """Сброс пароля агента — отправляет временный пароль через Telegram."""
+    phone = normalize_phone(body.get("phone", ""))
+    staff = await db.get_staff_by_login(phone)
+    if not staff or staff["role"] != "agent":
+        # Не раскрываем что аккаунта нет
+        return {"ok": True, "message": "Если аккаунт агента найден — пароль отправлен в Telegram"}
+
+    if not staff.get("tg_id"):
+        raise HTTPException(400, "Telegram не привязан. Обратитесь к администратору.")
+
+    import random, string
+    from datetime import datetime, timezone, timedelta
+    temp_pw = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    hashed  = pwd_context.hash(temp_pw)
+    await db.set_staff_temp_password(staff["id"], hashed, expires)
+
+    text = (f"🔑 Временный пароль для входа в систему ARTEZ:\n\n"
+            f"<b>{temp_pw}</b>\n\n"
+            f"⏰ Действует 10 минут.\n"
+            f"После входа сразу смените пароль.")
+    tg_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    async with aiohttp.ClientSession() as s:
+        await s.post(tg_url, json={"chat_id": staff["tg_id"], "text": text, "parse_mode": "HTML"},
+                     timeout=aiohttp.ClientTimeout(total=8))
+
+    return {"ok": True, "message": "Временный пароль отправлен в Telegram"}
+
+@app.post("/api/agent/change-password")
+async def agent_change_password(body: dict, staff=Depends(get_current_staff)):
+    """Смена пароля после входа по временному."""
+    if staff.get("role") != "agent":
+        raise HTTPException(403, "Только для агентов")
+    new_pw = (body.get("password") or "").strip()
+    if len(new_pw) < 6:
+        raise HTTPException(400, "Пароль минимум 6 символов")
+    hashed = pwd_context.hash(new_pw[:72])
+    await db.update_staff_password(staff["id"], hashed, plain=new_pw)
+    await db.clear_staff_temp_password(staff["id"])
+    return {"ok": True}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ADMIN: ПОЛЬЗОВАТЕЛИ САЙТА
