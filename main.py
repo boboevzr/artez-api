@@ -353,7 +353,7 @@ def require_perm(permission: str):
 # ══════════════════════════════════════
 @app.get("/api/health")
 async def health():
-    return {"ok": True}
+    return {"ok": True, "version": "2026-06-19-v3"}
 
 
 # ══════════════════════════════════════
