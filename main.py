@@ -1556,6 +1556,41 @@ async def agent_change_password(body: dict, staff=Depends(get_current_staff)):
     await db.clear_staff_temp_password(staff["id"])
     return {"ok": True}
 
+@app.get("/api/agent/status-by-tg/{tg_id}")
+async def agent_status_by_tg(tg_id: int):
+    """Для бота: проверить статус агента по tg_id без авторизации."""
+    staff = await db.get_staff_by_tg_id(str(tg_id))
+    if staff and staff["role"] == "agent":
+        return {"ok": True, "is_agent": True, "has_site_account": True}
+    # Есть ли пользователь сайта с этим tg_id?
+    site_user = await db.get_user_by_tg_id(str(tg_id))
+    return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
+
+class ResetByTgRequest(BaseModel):
+    tg_id: int
+
+@app.post("/api/agent/reset-password-by-tg")
+async def agent_reset_password_by_tg(req: ResetByTgRequest):
+    """Для бота: сброс пароля агента по tg_id."""
+    staff = await db.get_staff_by_tg_id(str(req.tg_id))
+    if not staff or staff["role"] != "agent":
+        return {"ok": True}
+    import random, string
+    from datetime import datetime, timezone, timedelta
+    temp_pw = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    expires = datetime.now(timezone.utc) + timedelta(minutes=10)
+    hashed  = pwd_context.hash(temp_pw)
+    await db.set_staff_temp_password(staff["id"], hashed, expires)
+    text = (f"🔑 Временный пароль для входа в систему ARTEZ:\n\n"
+            f"<b>{temp_pw}</b>\n\n"
+            f"⏰ Действует 10 минут.\n"
+            f"Войдите на staff.artez.uz и сразу смените пароль.")
+    tg_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    async with aiohttp.ClientSession() as s:
+        await s.post(tg_url, json={"chat_id": req.tg_id, "text": text, "parse_mode": "HTML"},
+                     timeout=aiohttp.ClientTimeout(total=8))
+    return {"ok": True}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # ADMIN: ПОЛЬЗОВАТЕЛИ САЙТА
 # ══════════════════════════════════════════════════════════════════════════════

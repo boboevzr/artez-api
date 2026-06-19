@@ -363,6 +363,11 @@ async def get_user_by_id(user_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM users WHERE id=$1", user_id)
 
+async def get_user_by_tg_id(tg_id: str):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE tg_id=$1", tg_id)
+
 
 async def create_user(phone: str, password_hash: str, first_name: str):
     if not pool: return None
