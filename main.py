@@ -1490,24 +1490,24 @@ async def agent_status(user=Depends(get_current_user)):
     return {"ok": True, "is_agent": False}
 
 @app.post("/api/agent/apply")
-async def agent_apply(body: dict, user=Depends(get_current_user)):
-    """Пользователь сайта регистрируется как агент."""
+async def agent_apply(user=Depends(get_current_user)):
+    """Пользователь сайта регистрируется как агент — использует свой сайтовый пароль."""
     if not user.get("is_verified"):
         raise HTTPException(400, "Сначала подтвердите номер телефона")
     if not user.get("tg_id"):
         raise HTTPException(400, "Необходимо привязать Telegram-бота. Напишите боту /start")
 
-    # Уже агент?
     existing = await db.get_staff_by_site_user(user["id"])
     if existing:
         raise HTTPException(400, "Вы уже зарегистрированы как агент")
 
-    password = (body.get("password") or "").strip()
-    if len(password) < 6:
-        raise HTTPException(400, "Пароль минимум 6 символов")
+    # Берём хеш пароля прямо из таблицы users
+    site_user = await db.get_user_by_id(user["id"])
+    password_hash = site_user["password_hash"] if site_user else None
+    if not password_hash:
+        raise HTTPException(400, "Пароль не установлен. Установите пароль в настройках сайта.")
 
-    hashed = pwd_context.hash(password[:72])
-    staff_id = await db.create_agent_from_user(dict(user), hashed)
+    staff_id = await db.create_agent_from_user(dict(user), password_hash)
     if not staff_id:
         raise HTTPException(400, "Этот номер телефона уже используется в системе. Обратитесь к администратору.")
 
