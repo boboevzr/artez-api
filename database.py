@@ -736,6 +736,13 @@ async def get_staff_by_site_user(site_user_id: int):
             "SELECT * FROM staff WHERE site_user_id=$1 AND active=TRUE", site_user_id
         )
 
+async def link_staff_to_site_user(staff_id: int, site_user_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE staff SET site_user_id=$2 WHERE id=$1", staff_id, site_user_id
+        )
+
 async def get_staff_by_tg_id(tg_id: int):
     if not pool: return None
     async with pool.acquire() as conn:

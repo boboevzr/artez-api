@@ -1494,14 +1494,21 @@ async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
 @app.get("/api/agent/status")
 async def agent_status(user=Depends(get_current_user)):
     """Возвращает статус агента для текущего пользователя сайта."""
+    # 1. По site_user_id
     staff = await db.get_staff_by_site_user(user["id"])
     if staff:
-        return {"ok": True, "is_agent": True, "must_change_password": staff["must_change_password"]}
-    # Проверяем по tg_id тоже
+        return {"ok": True, "is_agent": True, "must_change_password": bool(staff.get("must_change_password"))}
+    # 2. По tg_id
     if user.get("tg_id"):
         staff = await db.get_staff_by_tg_id(user["tg_id"])
         if staff and staff["role"] == "agent":
-            return {"ok": True, "is_agent": True, "must_change_password": staff["must_change_password"]}
+            return {"ok": True, "is_agent": True, "must_change_password": bool(staff.get("must_change_password"))}
+    # 3. По номеру телефона (логину)
+    staff = await db.get_staff_by_login(user["phone"])
+    if staff and staff["role"] == "agent":
+        # Заодно прописываем site_user_id чтобы следующий раз найти быстрее
+        await db.link_staff_to_site_user(staff["id"], user["id"])
+        return {"ok": True, "is_agent": True, "must_change_password": bool(staff.get("must_change_password"))}
     return {"ok": True, "is_agent": False}
 
 @app.post("/api/agent/apply")
