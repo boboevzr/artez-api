@@ -654,12 +654,13 @@ async def _get_admin_or_staff_clients(authorization: str = Header(None)):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         if payload.get("sub") == "admin":
             return True
-        login = payload.get("sub")
+        login = payload.get("login") or payload.get("sub")
         if login:
             staff = await db.get_staff_by_login(login)
             if staff:
-                perms = staff.get("permissions") or []
-                if "clients" in perms or "admin" in (staff.get("role") or ""):
+                role = staff.get("role") or ""
+                perms = ROLE_PERMISSIONS.get(role, [])
+                if "clients" in perms or role == "admin":
                     return True
         raise HTTPException(status_code=403, detail="Нет доступа")
     except JWTError:
