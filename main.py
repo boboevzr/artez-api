@@ -1324,14 +1324,14 @@ async def admin_get_orders(_=Depends(get_admin), status: str = None, limit: int 
     return {"ok": True, "orders": [dict(o) for o in prices]}
 
 @app.get("/api/admin/orders/{order_id}")
-async def admin_get_order(order_id: int, _=Depends(_get_admin)):
+async def admin_get_order(order_id: int, _=Depends(get_current_staff)):
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     return {"ok": True, "order": order}
 
 @app.get("/api/admin/orders/{order_id}/items")
-async def admin_get_order_items(order_id: int, _=Depends(_get_admin)):
+async def admin_get_order_items(order_id: int, _=Depends(get_current_staff)):
     items = await db.get_order_items(order_id)
     return {"ok": True, "items": items}
 
@@ -1343,7 +1343,7 @@ class OrderItemRequest(BaseModel):
     price_per_sqm: float = 0
 
 @app.post("/api/admin/orders/{order_id}/items")
-async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depends(_get_admin)):
+async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depends(get_current_staff)):
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
@@ -1357,7 +1357,7 @@ async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depend
 
 @app.put("/api/admin/orders/{order_id}/items/{item_id}")
 async def admin_update_order_item(order_id: int, item_id: int,
-                                   req: OrderItemRequest, _=Depends(_get_admin)):
+                                   req: OrderItemRequest, _=Depends(get_current_staff)):
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
@@ -1371,7 +1371,7 @@ async def admin_update_order_item(order_id: int, item_id: int,
     return {"ok": True, "item": item}
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}")
-async def admin_delete_order_item(order_id: int, item_id: int, _=Depends(_get_admin)):
+async def admin_delete_order_item(order_id: int, item_id: int, _=Depends(get_current_staff)):
     ok = await db.delete_order_item(item_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
