@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from passlib.context import CryptContext
@@ -287,7 +287,18 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "callcenter": ["leads", "orders", "clients"],
     "driver":     ["orders_own", "status_delivery"],
     "logistics":  ["orders", "status"],
+    "washer":     ["orders", "status_wash"],
 }
+
+# Допустимые переходы статусов для мойщиков
+WASHER_STATUS_FLOW = {
+    "received": "washing",
+    "washing":  "drying",
+    "drying":   "packing",
+}
+ALL_ORDER_STATUSES = [
+    "new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"
+]
 
 async def get_current_user(authorization: str = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
@@ -380,8 +391,9 @@ def _staff_public(s: dict) -> dict:
         "branch":     s.get("branch"),
         "phone":      s.get("phone"),
         "tg_username":s.get("tg_username"),
-        "active":     s["active"],
-        "permissions": ROLE_PERMISSIONS.get(s["role"], []),
+        "active":        s["active"],
+        "permissions":   ROLE_PERMISSIONS.get(s["role"], []),
+        "can_edit_items": s.get("can_edit_items", True),
     }
 
 @app.post("/api/staff/login")
@@ -1330,6 +1342,29 @@ async def admin_get_order(order_id: int, _=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Заказ не найден")
     return {"ok": True, "order": order}
 
+@app.patch("/api/admin/orders/{order_id}/status")
+async def admin_change_order_status(order_id: int, staff=Depends(get_current_staff),
+                                     status: str = Body(..., embed=True),
+                                     note: str = Body("", embed=True)):
+    role = staff.get("role", "")
+    if role == "washer":
+        # Мойщик может только двигать по своей цепочке
+        order = await db.get_order_by_id(order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Заказ не найден")
+        allowed = WASHER_STATUS_FLOW.get(order.get("status", ""))
+        if status != allowed:
+            raise HTTPException(status_code=403, detail=f"Мойщик может изменить статус только на: {allowed}")
+    elif "status" not in ROLE_PERMISSIONS.get(role, []) and role != "admin":
+        raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
+    if status not in ALL_ORDER_STATUSES:
+        raise HTTPException(status_code=400, detail="Неизвестный статус")
+    order = await db.update_order_status(order_id, status,
+                                          note=note or f"Статус изменён сотрудником {staff.get('login','')}")
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    return {"ok": True, "order": order}
+
 @app.get("/api/admin/orders/{order_id}/items")
 async def admin_get_order_items(order_id: int, _=Depends(get_current_staff)):
     items = await db.get_order_items(order_id)
@@ -1376,6 +1411,37 @@ async def admin_delete_order_item(order_id: int, item_id: int, _=Depends(get_cur
     if not ok:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     return {"ok": True}
+
+@app.patch("/api/admin/orders/{order_id}/discount")
+async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
+                                    discount_sum: float = Body(0, embed=True)):
+    role = staff.get("role", "")
+    if role not in ("admin", "manager") and "status" not in ROLE_PERMISSIONS.get(role, []):
+        raise HTTPException(status_code=403, detail="Нет прав")
+    order = await db.update_order_discount(order_id, discount_sum)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    return {"ok": True, "order": order}
+
+@app.patch("/api/admin/orders/{order_id}/items/{item_id}/washer")
+async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_current_staff),
+                                 washer_login: str = Body("", embed=True)):
+    item = await db.update_item_washer(item_id, washer_login or None)
+    if not item:
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+    return {"ok": True, "item": item}
+
+@app.patch("/api/admin/staff/{staff_id}/can-edit-items")
+async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),
+                                    can_edit_items: bool = Body(..., embed=True)):
+    if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE staff SET can_edit_items=$2 WHERE id=$1 RETURNING id, can_edit_items",
+            staff_id, can_edit_items)
+    if not row:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    return {"ok": True, **dict(row)}
 
 
 OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,

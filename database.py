@@ -102,9 +102,12 @@ async def create_tables():
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE       DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS total_price   INT          DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS discount_sum  NUMERIC(12,2) DEFAULT 0",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login  VARCHAR(50)  DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1042,6 +1045,18 @@ async def delete_all_contacts() -> int:
 # ══════════════════════════════════════
 #  ПОЗИЦИИ УСЛУГ В ЗАКАЗАХ
 # ══════════════════════════════════════
+async def update_order_status(order_id: int, status: str, note: str = "") -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE orders SET status=$2 WHERE id=$1 RETURNING *", order_id, status)
+        if row:
+            await conn.execute("""
+                INSERT INTO order_status_history (order_num, new_status, note)
+                VALUES ($1, $2, $3)
+            """, dict(row).get("order_num", ""), status, note)
+        return dict(row) if row else {}
+
 async def get_order_items(order_id: int) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
@@ -1082,4 +1097,18 @@ async def get_order_by_id(order_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
+        return dict(row) if row else {}
+
+async def update_order_discount(order_id: int, discount_sum: float) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE orders SET discount_sum=$2 WHERE id=$1 RETURNING *", order_id, discount_sum)
+        return dict(row) if row else {}
+
+async def update_item_washer(item_id: int, washer_login: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE order_items SET washer_login=$2 WHERE id=$1 RETURNING *", item_id, washer_login or None)
         return dict(row) if row else {}
