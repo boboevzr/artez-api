@@ -533,7 +533,7 @@ async def update_lead(lead_id: int, body: dict, _=Depends(require_perm("leads"))
 async def update_lead_status(lead_id: int, body: dict,
                              _=Depends(require_perm("leads"))):
     status = body.get("status")
-    if status not in ("new","contacted","qualified","converted","lost"):
+    if status not in ("new","contacted","callback","converted","lost"):
         raise HTTPException(status_code=400, detail="Неверный статус")
     await db.update_lead_status(lead_id, status)
     return {"ok": True}
@@ -1328,7 +1328,7 @@ async def admin_update_lead(lead_id: int, req: LeadUpdateRequest, _=Depends(_get
 @app.patch("/api/admin/leads/{lead_id}/status")
 async def admin_update_lead_status(lead_id: int, body: dict, _=Depends(_get_admin)):
     status = body.get("status")
-    if status not in ("new","contacted","qualified","converted","lost"):
+    if status not in ("new","contacted","callback","converted","lost"):
         raise HTTPException(status_code=400, detail="Неверный статус")
     await db.update_lead_status(lead_id, status)
     return {"ok": True}
