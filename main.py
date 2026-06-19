@@ -1511,7 +1511,7 @@ async def agent_apply(user=Depends(get_current_user)):
     if not staff_id:
         raise HTTPException(400, "Этот номер телефона уже используется в системе. Обратитесь к администратору.")
 
-    return {"ok": True, "message": "Вы зарегистрированы как агент! Войдите через staff.artez.uz"}
+    return {"ok": True, "message": "Вы зарегистрированы как агент! Войдите через artez.uz/staff.html"}
 
 @app.post("/api/agent/reset-password")
 async def agent_reset_password(body: dict):
@@ -1584,7 +1584,7 @@ async def agent_reset_password_by_tg(req: ResetByTgRequest):
     text = (f"🔑 Временный пароль для входа в систему ARTEZ:\n\n"
             f"<b>{temp_pw}</b>\n\n"
             f"⏰ Действует 10 минут.\n"
-            f"Войдите на staff.artez.uz и сразу смените пароль.")
+            f"Войдите на artez.uz/staff.html и сразу смените пароль.")
     tg_url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     async with aiohttp.ClientSession() as s:
         await s.post(tg_url, json={"chat_id": req.tg_id, "text": text, "parse_mode": "HTML"},
