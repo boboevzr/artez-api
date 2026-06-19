@@ -475,33 +475,29 @@ class LeadCreateRequest(BaseModel):
     assigned_to: int | None = None
 
 @app.get("/api/staff/search")
-async def staff_search(q: str = "", limit: int = 8, staff=Depends(require_perm("clients"))):
-    """Поиск по клиентам CRM + справочнику для сотрудников."""
+async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)):
+    """Поиск клиентов из CRM + справочника. Доступен всем авторизованным сотрудникам."""
     q = q.strip()
     if not q or len(q) < 2:
         return {"ok": True, "results": []}
+    crm      = await db.get_crm_clients_list(search=q, limit=limit)
     contacts = await db.search_contacts(q, limit=limit)
-    crm = await db.get_crm_clients_list(search=q, limit=limit)
-    seen_phones = set()
+    seen = set()
     results = []
     for c in crm:
-        phone = c.get("phone") or ""
-        seen_phones.add(phone)
-        results.append({
-            "phone": phone, "phone2": c.get("phone2") or "",
-            "first_name": c.get("first_name") or "", "last_name": c.get("last_name") or "",
-            "middle_name": "", "address": c.get("address") or "",
-            "short_address": c.get("short_address") or "", "_src": "crm",
-        })
+        p = c.get("phone") or ""
+        seen.add(p)
+        results.append({"phone": p, "phone2": c.get("phone2") or "",
+                        "first_name": c.get("first_name") or "", "last_name": c.get("last_name") or "",
+                        "middle_name": "", "address": c.get("address") or "",
+                        "short_address": c.get("short_address") or "", "_src": "crm"})
     for c in contacts:
-        phone = c.get("phone") or ""
-        if phone not in seen_phones:
-            results.append({
-                "phone": phone, "phone2": c.get("phone2") or "",
-                "first_name": c.get("first_name") or "", "last_name": c.get("last_name") or "",
-                "middle_name": c.get("middle_name") or "", "address": c.get("address") or "",
-                "short_address": c.get("short_address") or "", "_src": "contacts",
-            })
+        p = c.get("phone") or ""
+        if p not in seen:
+            results.append({"phone": p, "phone2": c.get("phone2") or "",
+                            "first_name": c.get("first_name") or "", "last_name": c.get("last_name") or "",
+                            "middle_name": c.get("middle_name") or "", "address": c.get("address") or "",
+                            "short_address": c.get("short_address") or "", "_src": "contacts"})
     return {"ok": True, "results": results[:limit]}
 
 
