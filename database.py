@@ -114,6 +114,13 @@ async def create_tables():
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_sqm       NUMERIC(8,3) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_total_sum NUMERIC(12,2) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS measure_status   VARCHAR(20)  DEFAULT 'pending'",
+        # CRM leads расширение
+        "ALTER TABLE leads ADD COLUMN IF NOT EXISTS converted_by   INTEGER REFERENCES staff(id)",
+        "ALTER TABLE leads ADD COLUMN IF NOT EXISTS volunteer_id   INTEGER REFERENCES staff(id)",
+        "ALTER TABLE leads ADD COLUMN IF NOT EXISTS converted_order VARCHAR(20)",
+        "ALTER TABLE leads ADD COLUMN IF NOT EXISTS lead_code       VARCHAR(20) UNIQUE",
+        "ALTER TABLE leads DROP CONSTRAINT IF EXISTS leads_status_check",
+        "ALTER TABLE leads ADD CONSTRAINT leads_status_check CHECK (status IN ('new','contacted','callback','converted','lost','no_answer'))",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -234,7 +241,33 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
         """)
 
-    # ── Шаг 4б: позиции услуг в заказах ─────────────────────────────────
+    # ── Шаг 4б: CRM — журнал звонков и напоминания ───────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS lead_calls (
+            id          SERIAL PRIMARY KEY,
+            lead_id     INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            operator_id INTEGER REFERENCES staff(id),
+            action      VARCHAR(50) NOT NULL,
+            note        TEXT,
+            scheduled_at TIMESTAMPTZ,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_calls_lead ON lead_calls(lead_id);
+        CREATE TABLE IF NOT EXISTS lead_reminders (
+            id          SERIAL PRIMARY KEY,
+            lead_id     INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+            staff_id    INTEGER REFERENCES staff(id),
+            remind_at   TIMESTAMPTZ NOT NULL,
+            message     TEXT,
+            sent_browser BOOLEAN DEFAULT FALSE,
+            sent_tg      BOOLEAN DEFAULT FALSE,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_lead_reminders_staff ON lead_reminders(staff_id, sent_browser);
+        """)
+
+    # ── Шаг 4в: позиции услуг в заказах ─────────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
         CREATE TABLE IF NOT EXISTS order_items (
@@ -810,6 +843,109 @@ async def delete_lead(lead_id: int) -> bool:
     async with pool.acquire() as conn:
         res = await conn.execute("DELETE FROM leads WHERE id=$1", lead_id)
         return res == "DELETE 1"
+
+async def generate_lead_code() -> str:
+    if not pool: return "L-0001"
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM leads") or 0
+        return f"L-{count+1:04d}"
+
+async def set_lead_code(lead_id: int, code: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE leads SET lead_code=$2 WHERE id=$1 AND lead_code IS NULL", lead_id, code)
+
+async def get_lead_by_id(lead_id: int):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("""
+            SELECT l.*,
+                   s.first_name  AS creator_first_name,
+                   s.last_name   AS creator_last_name,
+                   s.position    AS creator_position,
+                   vol.first_name AS volunteer_first_name,
+                   vol.last_name  AS volunteer_last_name,
+                   conv.first_name AS converted_first_name,
+                   conv.last_name  AS converted_last_name
+            FROM leads l
+            LEFT JOIN staff s    ON s.id   = l.created_by
+            LEFT JOIN staff vol  ON vol.id = l.volunteer_id
+            LEFT JOIN staff conv ON conv.id = l.converted_by
+            WHERE l.id = $1
+        """, lead_id)
+
+# ── lead_calls (журнал звонков) ───────────────────────────────────────
+
+async def add_lead_call(lead_id: int, operator_id: int, action: str,
+                         note: str = None, scheduled_at=None):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO lead_calls (lead_id, operator_id, action, note, scheduled_at)
+            VALUES ($1,$2,$3,$4,$5) RETURNING *
+        """, lead_id, operator_id, action, note, scheduled_at)
+        return dict(row) if row else None
+
+async def get_lead_calls(lead_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT lc.*, s.first_name, s.last_name, s.position
+            FROM lead_calls lc
+            LEFT JOIN staff s ON s.id = lc.operator_id
+            WHERE lc.lead_id = $1
+            ORDER BY lc.created_at DESC
+        """, lead_id)
+
+# ── lead_reminders ────────────────────────────────────────────────────
+
+async def add_lead_reminder(lead_id: int, staff_id: int, remind_at, message: str = None):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO lead_reminders (lead_id, staff_id, remind_at, message)
+            VALUES ($1,$2,$3,$4) RETURNING *
+        """, lead_id, staff_id, remind_at, message)
+        return dict(row) if row else None
+
+async def get_due_reminders(staff_id: int):
+    """Возвращает напоминания которые уже наступили, ещё не отправлены в браузер."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT r.*, l.client_name, l.client_phone, l.lead_code
+            FROM lead_reminders r
+            JOIN leads l ON l.id = r.lead_id
+            WHERE r.staff_id = $1 AND r.remind_at <= NOW() AND r.sent_browser = FALSE
+        """, staff_id)
+
+async def mark_reminder_sent(reminder_id: int, channel: str = "browser"):
+    if not pool: return
+    async with pool.acquire() as conn:
+        col = "sent_tg" if channel == "tg" else "sent_browser"
+        await conn.execute(f"UPDATE lead_reminders SET {col}=TRUE WHERE id=$1", reminder_id)
+
+async def get_pending_tg_reminders():
+    """Для фонового воркера — напоминания для отправки в Telegram."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT r.*, l.client_name, l.client_phone, l.lead_code,
+                   s.tg_id AS staff_tg_id, s.first_name AS staff_name
+            FROM lead_reminders r
+            JOIN leads l  ON l.id  = r.lead_id
+            JOIN staff s  ON s.id  = r.staff_id
+            WHERE r.remind_at <= NOW() AND r.sent_tg = FALSE AND s.tg_id IS NOT NULL
+        """)
+
+async def convert_lead_to_order(lead_id: int, order_num: str, converted_by: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE leads SET status='converted', converted_by=$2,
+                             converted_order=$3, updated_at=NOW()
+            WHERE id=$1
+        """, lead_id, converted_by, order_num)
 
 
 # ══════════════════════════════════════

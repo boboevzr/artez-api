@@ -56,6 +56,31 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup():
     await db.init_db()
+    asyncio.create_task(_tg_reminder_worker())
+
+async def _tg_reminder_worker():
+    """Каждую минуту проверяет напоминания и шлёт в Telegram."""
+    await asyncio.sleep(10)
+    while True:
+        try:
+            rows = await db.get_pending_tg_reminders()
+            for r in rows:
+                tg_id = r["staff_tg_id"]
+                lead_code = r["lead_code"] or f"#{r['lead_id']}"
+                name = r["client_name"] or r["client_phone"]
+                msg = r["message"] or "Запланированный звонок"
+                text = (f"🔔 Напоминание\n"
+                        f"Лид {lead_code} — {name}\n"
+                        f"📞 {r['client_phone']}\n"
+                        f"💬 {msg}")
+                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                async with aiohttp.ClientSession() as s:
+                    await s.post(url, json={"chat_id": tg_id, "text": text},
+                                 timeout=aiohttp.ClientTimeout(total=5))
+                await db.mark_reminder_sent(r["id"], "tg")
+        except Exception as e:
+            logging.warning(f"TG reminder worker error: {e}")
+        await asyncio.sleep(60)
 
 
 # ══════════════════════════════════════
@@ -475,6 +500,7 @@ class LeadCreateRequest(BaseModel):
     short_address: str | None = None
     note: str | None = None
     assigned_to: int | None = None
+    volunteer_id: int | None = None
 
 @app.get("/api/staff/search")
 async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)):
@@ -506,13 +532,20 @@ async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)
 @app.post("/api/staff/leads")
 async def create_lead(req: LeadCreateRequest, staff=Depends(require_perm("leads"))):
     lead_num = await db.get_next_lead_num()
+    lead_code = await db.generate_lead_code()
+    creator_id = None if staff.get("sub") == "admin" else staff.get("id")
+    volunteer_id = getattr(req, "volunteer_id", None)
     lead = await db.create_lead({
         "lead_num": lead_num, "client_name": req.client_name,
         "client_phone": req.client_phone, "service": req.service,
         "branch": req.branch, "city": req.city, "address": req.address,
         "short_address": req.short_address, "note": req.note,
-        "assigned_to": req.assigned_to, "created_by": staff["id"],
+        "assigned_to": req.assigned_to, "created_by": creator_id,
+        "volunteer_id": volunteer_id, "lead_code": lead_code,
     })
+    if lead:
+        await db.add_lead_call(lead["id"], creator_id, action="created",
+                               note=f"Лид создан ({lead_code})")
     return {"ok": True, "lead": lead}
 
 @app.get("/api/staff/leads")
@@ -531,12 +564,61 @@ async def update_lead(lead_id: int, body: dict, _=Depends(require_perm("leads"))
 
 @app.patch("/api/staff/leads/{lead_id}/status")
 async def update_lead_status(lead_id: int, body: dict,
-                             _=Depends(require_perm("leads"))):
+                             staff=Depends(require_perm("leads"))):
     status = body.get("status")
-    if status not in ("new","contacted","callback","converted","lost"):
+    if status not in ("new","contacted","callback","converted","lost","no_answer"):
         raise HTTPException(status_code=400, detail="Неверный статус")
+    operator_id = None if staff.get("sub") == "admin" else staff.get("id")
     await db.update_lead_status(lead_id, status)
+    # лог
+    action_labels = {
+        "new": "Сменил статус на «Новый»",
+        "contacted": "Связался с клиентом",
+        "callback": "Клиент попросил перезвонить",
+        "no_answer": "Не дозвонился",
+        "converted": "Конвертировал в заказ",
+        "lost": "Закрыл как потерянный",
+    }
+    note = body.get("note") or action_labels.get(status, status)
+    scheduled_at = body.get("scheduled_at")  # ISO string or None
+    from datetime import datetime
+    sched = datetime.fromisoformat(scheduled_at) if scheduled_at else None
+    await db.add_lead_call(lead_id, operator_id, action=f"status_{status}", note=note, scheduled_at=sched)
+    if sched and operator_id:
+        await db.add_lead_reminder(lead_id, operator_id, remind_at=sched,
+                                   message=f"Перезвонить клиенту — лид {lead_id}")
     return {"ok": True}
+
+@app.get("/api/staff/leads/{lead_id}/calls")
+async def get_lead_calls(lead_id: int, _=Depends(require_perm("leads"))):
+    rows = await db.get_lead_calls(lead_id)
+    return {"ok": True, "calls": [dict(r) for r in rows]}
+
+@app.post("/api/staff/leads/{lead_id}/calls")
+async def add_lead_call(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
+    operator_id = None if staff.get("sub") == "admin" else staff.get("id")
+    action = body.get("action", "note")
+    note = body.get("note", "")
+    scheduled_at = body.get("scheduled_at")
+    from datetime import datetime
+    sched = datetime.fromisoformat(scheduled_at) if scheduled_at else None
+    row = await db.add_lead_call(lead_id, operator_id, action=action, note=note, scheduled_at=sched)
+    if sched and operator_id:
+        await db.add_lead_reminder(lead_id, operator_id, remind_at=sched,
+                                   message=note or "Запланированный звонок")
+    return {"ok": True, "call": row}
+
+@app.get("/api/staff/reminders/due")
+async def get_due_reminders(staff=Depends(require_perm("leads"))):
+    if staff.get("sub") == "admin":
+        return {"ok": True, "reminders": []}
+    rows = await db.get_due_reminders(staff["id"])
+    result = []
+    for r in rows:
+        d = dict(r)
+        result.append(d)
+        await db.mark_reminder_sent(r["id"], "browser")
+    return {"ok": True, "reminders": result}
 
 @app.delete("/api/staff/leads/{lead_id}")
 async def delete_lead_staff(lead_id: int, body: dict, _=Depends(require_perm("leads"))):
