@@ -1214,28 +1214,38 @@ async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, 
         return dict(row) if row else {}
 
 
-async def get_tg_clients(search: str = "", limit: int = 100) -> list[dict]:
-    """Клиенты у которых есть tg_id (взаимодействовали с ботом)"""
+async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
+    """Клиенты из таблицы бота (clients) — все кто писал в Telegram"""
     if not pool: return []
     async with pool.acquire() as conn:
+        # Проверяем что таблица clients существует (создаётся ботом)
+        exists = await conn.fetchval(
+            "SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='clients')"
+        )
+        if not exists:
+            return []
         if search:
             rows = await conn.fetch("""
-                SELECT id, phone, first_name, last_name, tg_id, tg_username,
-                       source, status, orders_count, total_spent, last_order_at, created_at
-                FROM crm_clients
-                WHERE tg_id IS NOT NULL
-                  AND (phone ILIKE $1 OR first_name ILIKE $1
-                       OR last_name ILIKE $1 OR tg_username ILIKE $1)
-                ORDER BY last_order_at DESC NULLS LAST
+                SELECT id, tg_id, tg_username, first_name, last_name, phone,
+                       lang, total_orders AS orders_count,
+                       NULL::numeric AS total_spent,
+                       NULL::timestamptz AS last_order_at,
+                       created_at
+                FROM clients
+                WHERE phone ILIKE $1 OR first_name ILIKE $1
+                   OR last_name ILIKE $1 OR tg_username ILIKE $1
+                ORDER BY created_at DESC
                 LIMIT $2
             """, f"%{search}%", limit)
         else:
             rows = await conn.fetch("""
-                SELECT id, phone, first_name, last_name, tg_id, tg_username,
-                       source, status, orders_count, total_spent, last_order_at, created_at
-                FROM crm_clients
-                WHERE tg_id IS NOT NULL
-                ORDER BY last_order_at DESC NULLS LAST
+                SELECT id, tg_id, tg_username, first_name, last_name, phone,
+                       lang, total_orders AS orders_count,
+                       NULL::numeric AS total_spent,
+                       NULL::timestamptz AS last_order_at,
+                       created_at
+                FROM clients
+                ORDER BY created_at DESC
                 LIMIT $1
             """, limit)
         return [dict(r) for r in rows]
