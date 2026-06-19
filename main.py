@@ -1151,34 +1151,37 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
             pass
         loc_display = data.location_address if data.location_address else data.location
 
+    def he(s):
+        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;") if s else "—"
+
+    loc_line = f'🗺 <a href="{location_url}">{he(loc_display)}</a>' if location_url else f"🗺 {he(loc_display)}"
+
     if data.is_quick:
         text = (
             f"⚡ Быстрая заявка {order_num} (сайт)\n"
             f"━━━━━━━━━━\n"
-            f"👤 {full_name}\n"
-            f"📞 {data.phone}\n"
+            f"👤 {he(full_name)}\n"
+            f"📞 {he(data.phone)}\n"
             f"━━━━━━━━━━"
         )
     else:
         text = (
             f"🌐 Новая заявка {order_num} (сайт)\n"
             f"━━━━━━━━━━\n"
-            f"👤 {full_name}\n"
-            f"📞 {data.phone}\n"
-            f"🏢 {branch_ru(data.branch)}\n"
-            f"📍 {data.city}\n"
-            f"🏠 {data.address}\n"
-            f"🗺 {loc_display}\n"
-            f"🧺 {data.service}\n"
-            f"⚙️ {data.service_type}\n"
-            f"📅 {data.pickup_date}\n"
-            f"🕐 {data.pickup_time}\n"
+            f"👤 {he(full_name)}\n"
+            f"📞 {he(data.phone)}\n"
+            f"🏢 {he(branch_ru(data.branch))}\n"
+            f"📍 {he(data.city)}\n"
+            f"🏠 {he(data.address)}\n"
+            f"{loc_line}\n"
+            f"🧺 {he(data.service)}\n"
+            f"⚙️ {he(data.service_type)}\n"
+            f"📅 {he(data.pickup_date)}\n"
+            f"🕐 {he(data.pickup_time)}\n"
             f"━━━━━━━━━━"
         )
 
     kb_rows = []
-    if location_url:
-        kb_rows.append([{"text": "🗺 Открыть на карте", "url": location_url}])
     kb_rows.extend([
         [{"text": "✅ Принять заказ", "callback_data": f"accept_{order_num}_0"}],
         [
@@ -1189,7 +1192,7 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
     keyboard = {"inline_keyboard": kb_rows}
 
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "reply_markup": keyboard}
+    payload = {"chat_id": chat_id, "text": text, "reply_markup": keyboard, "parse_mode": "HTML", "disable_web_page_preview": True}
 
     try:
         async with aiohttp.ClientSession() as session:
