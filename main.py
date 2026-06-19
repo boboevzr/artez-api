@@ -626,7 +626,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                     f"━━━━━━━━━━\n"
                     f"👤 {full_name}\n"
                     f"📞 {req.phone}\n"
-                    f"🏢 {branch}\n"
+                    f"🏢 {branch_ru(branch)}\n"
                     f"🧺 {service_ru}\n"
                     f"🏠 {req.short_address or req.address or '—'}{(' | ' + req.address) if req.short_address and req.address and req.short_address != req.address else ''}{loc_line}\n"
                     f"👷 {staff_name}\n"
@@ -1088,7 +1088,7 @@ async def notify_group_client_cancel(order: dict):
         f"👤 {order.get('client_name') or '—'}\n"
         f"📞 {order.get('client_phone') or '—'}\n"
         f"🧺 {order.get('service') or '—'}\n"
-        f"🏢 {order.get('branch') or '—'}\n"
+        f"🏢 {branch_ru(order.get('branch') or '')}\n"
         f"━━━━━━━━━━"
     )
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -1110,6 +1110,14 @@ def md_escape(text):
         text = text.replace(ch, f"\\{ch}")
     return text
 
+
+BRANCH_RU = {
+    "zarafshan": "Зарафшан",
+    "navoi":     "Навои",
+}
+
+def branch_ru(branch: str) -> str:
+    return BRANCH_RU.get(branch, branch) if branch else "—"
 
 async def _group_id_for_branch(branch: str) -> str:
     """Возвращает chat_id группы для указанного филиала (из БД или env)."""
@@ -1157,7 +1165,7 @@ async def notify_group_new_order(order_num: str, data: "OrderRequest"):
             f"━━━━━━━━━━\n"
             f"👤 {full_name}\n"
             f"📞 {data.phone}\n"
-            f"🏢 {data.branch}\n"
+            f"🏢 {branch_ru(data.branch)}\n"
             f"📍 {data.city}\n"
             f"🏠 {data.address}\n"
             f"🗺 {loc_display}\n"
