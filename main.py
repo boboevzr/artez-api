@@ -536,6 +536,15 @@ async def update_lead_status(lead_id: int, body: dict,
     await db.update_lead_status(lead_id, status)
     return {"ok": True}
 
+@app.delete("/api/staff/leads/{lead_id}")
+async def delete_lead_staff(lead_id: int, body: dict, _=Depends(require_perm("leads"))):
+    if not body.get("admin_password") or body["admin_password"] != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль администратора")
+    ok = await db.delete_lead(lead_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Лид не найден")
+    return {"ok": True}
+
 
 # ══════════════════════════════════════
 #  ЗАЯВКИ — для сотрудников
