@@ -810,11 +810,14 @@ async def get_leads(status: str = None, branch: str = None,
         args.append(limit)
         return await conn.fetch(
             f"""SELECT l.*,
-                       s.first_name  AS creator_first_name,
-                       s.last_name   AS creator_last_name,
-                       s.position    AS creator_position
+                       s.first_name   AS creator_first_name,
+                       s.last_name    AS creator_last_name,
+                       s.position     AS creator_position,
+                       vol.first_name AS volunteer_first_name,
+                       vol.last_name  AS volunteer_last_name
                 FROM leads l
-                LEFT JOIN staff s ON s.id = l.created_by
+                LEFT JOIN staff s   ON s.id   = l.created_by
+                LEFT JOIN staff vol ON vol.id = l.volunteer_id
                 WHERE {' AND '.join(filters)}
                 ORDER BY l.created_at DESC LIMIT ${len(args)}""", *args
         )
@@ -843,6 +846,20 @@ async def delete_lead(lead_id: int) -> bool:
     async with pool.acquire() as conn:
         res = await conn.execute("DELETE FROM leads WHERE id=$1", lead_id)
         return res == "DELETE 1"
+
+async def get_leads_by_agent(agent_id: int, status: str = None):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        filters = ["(l.created_by=$1 OR l.volunteer_id=$1)"]
+        args = [agent_id]
+        if status:
+            args.append(status); filters.append(f"l.status=${len(args)}")
+        return await conn.fetch(
+            f"""SELECT l.*,
+                       s.first_name AS creator_first_name, s.last_name AS creator_last_name,
+                       s.position AS creator_position
+                FROM leads l LEFT JOIN staff s ON s.id = l.created_by
+                WHERE {' AND '.join(filters)} ORDER BY l.created_at DESC LIMIT 200""", *args)
 
 async def generate_lead_code() -> str:
     if not pool: return "L-0001"

@@ -315,6 +315,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "driver":     ["orders_own", "status_delivery"],
     "logistics":  ["orders", "status"],
     "washer":     ["orders", "status_wash"],
+    "agent":      ["leads_own"],  # агент видит только свои лиды
 }
 
 # Допустимые переходы статусов для мойщиков
@@ -437,9 +438,12 @@ async def staff_me(staff=Depends(get_current_staff)):
     return {"ok": True, "staff": _staff_public(staff)}
 
 @app.get("/api/staff/list")
-async def staff_list(_=Depends(require_perm("staff"))):
+async def staff_list(role: str = None, _=Depends(get_current_staff)):
     rows = await db.get_all_staff()
-    return {"ok": True, "staff": [_staff_public(dict(r)) for r in rows]}
+    staff = [_staff_public(dict(r)) for r in rows]
+    if role:
+        staff = [s for s in staff if s.get("role") == role]
+    return {"ok": True, "staff": staff}
 
 @app.post("/api/staff/create")
 async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))):
@@ -530,18 +534,25 @@ async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)
 
 
 @app.post("/api/staff/leads")
-async def create_lead(req: LeadCreateRequest, staff=Depends(require_perm("leads"))):
+async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    perms = ROLE_PERMISSIONS.get(role, [])
+    if "leads" not in perms and "leads_own" not in perms and staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     lead_num = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
     creator_id = None if staff.get("sub") == "admin" else staff.get("id")
-    volunteer_id = getattr(req, "volunteer_id", None)
+    # агент автоматически становится agent_id лида
+    agent_id = req.volunteer_id
+    if role == "agent" and not agent_id:
+        agent_id = creator_id
     lead = await db.create_lead({
         "lead_num": lead_num, "client_name": req.client_name,
         "client_phone": req.client_phone, "service": req.service,
         "branch": req.branch, "city": req.city, "address": req.address,
         "short_address": req.short_address, "note": req.note,
         "assigned_to": req.assigned_to, "created_by": creator_id,
-        "volunteer_id": volunteer_id, "lead_code": lead_code,
+        "volunteer_id": agent_id, "lead_code": lead_code,
     })
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
@@ -550,9 +561,16 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(require_perm("leads"
 
 @app.get("/api/staff/leads")
 async def get_leads(status: str = None, branch: str = None,
-                    staff=Depends(require_perm("leads"))):
-    assigned = staff["id"] if staff["role"] == "driver" else None
-    rows = await db.get_leads(status=status, branch=branch, assigned_to=assigned)
+                    staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    perms = ROLE_PERMISSIONS.get(role, [])
+    # агент: только свои лиды (где он создатель или агент)
+    if "leads_own" in perms and "leads" not in perms:
+        rows = await db.get_leads_by_agent(staff["id"], status=status)
+    elif "leads" in perms or staff.get("sub") == "admin":
+        rows = await db.get_leads(status=status, branch=branch)
+    else:
+        raise HTTPException(status_code=403, detail="Нет доступа")
     return {"ok": True, "leads": [dict(r) for r in rows]}
 
 @app.patch("/api/staff/leads/{lead_id}")
