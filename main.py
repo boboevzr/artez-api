@@ -391,9 +391,10 @@ def _staff_public(s: dict) -> dict:
         "branch":     s.get("branch"),
         "phone":      s.get("phone"),
         "tg_username":s.get("tg_username"),
-        "active":        s["active"],
-        "permissions":   ROLE_PERMISSIONS.get(s["role"], []),
+        "active":         s["active"],
+        "permissions":    ROLE_PERMISSIONS.get(s["role"], []),
         "can_edit_items": s.get("can_edit_items", True),
+        "plain_password": s.get("plain_password"),
     }
 
 @app.post("/api/staff/login")
@@ -426,7 +427,7 @@ async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))
         sid = await db.create_staff({
             "first_name": req.first_name, "last_name": req.last_name,
             "middle_name": req.middle_name, "phone": req.phone,
-            "login": req.login, "password_hash": hashed,
+            "login": req.login, "password_hash": hashed, "plain_password": req.password,
             "role": req.role, "position": req.position, "branch": req.branch,
             "tg_id": req.tg_id, "tg_username": req.tg_username,
             "salary_type": req.salary_type, "salary_rate": req.salary_rate,
@@ -455,7 +456,7 @@ async def staff_change_password(staff_id: int, body: dict, me=Depends(get_curren
     new_pw = body.get("password", "")
     if len(new_pw) < 6:
         raise HTTPException(status_code=400, detail=bi("Минимум 6 символов","Kamida 6 ta belgi"))
-    await db.update_staff_password(staff_id, pwd_context.hash(new_pw[:72]))
+    await db.update_staff_password(staff_id, pwd_context.hash(new_pw[:72]), plain=new_pw)
     return {"ok": True}
 
 

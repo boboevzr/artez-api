@@ -106,7 +106,8 @@ async def create_tables():
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
-        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items  BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items   BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS plain_password   VARCHAR(100) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login   VARCHAR(50)  DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_width_cm  NUMERIC(8,1) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_length_cm NUMERIC(8,1) DEFAULT NULL",
@@ -643,12 +644,13 @@ async def create_staff(data: dict) -> int:
     async with pool.acquire() as conn:
         return await conn.fetchval("""
             INSERT INTO staff (first_name, last_name, middle_name, phone, login, password_hash,
-                               role, position, branch, tg_id, tg_username,
+                               plain_password, role, position, branch, tg_id, tg_username,
                                salary_type, salary_rate, hire_date, note)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
             RETURNING id
         """, data["first_name"], data.get("last_name"), data.get("middle_name"),
             data.get("phone"), data["login"], data["password_hash"],
+            data.get("plain_password"),
             data.get("role","callcenter"), data.get("position"), data.get("branch"),
             data.get("tg_id"), data.get("tg_username"),
             data.get("salary_type"), data.get("salary_rate"),
@@ -671,12 +673,12 @@ async def update_staff(staff_id: int, **kwargs):
             staff_id, *vals
         )
 
-async def update_staff_password(staff_id: int, password_hash: str):
+async def update_staff_password(staff_id: int, password_hash: str, plain: str = None):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE staff SET password_hash=$2, updated_at=NOW() WHERE id=$1",
-            staff_id, password_hash
+            "UPDATE staff SET password_hash=$2, plain_password=$3, updated_at=NOW() WHERE id=$1",
+            staff_id, password_hash, plain
         )
 
 # ══════════════════════════════════════
