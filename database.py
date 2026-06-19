@@ -1212,3 +1212,30 @@ async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, 
             RETURNING *
         """, status, enabled, message_ru, message_uz)
         return dict(row) if row else {}
+
+
+async def get_tg_clients(search: str = "", limit: int = 100) -> list[dict]:
+    """Клиенты у которых есть tg_id (взаимодействовали с ботом)"""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch("""
+                SELECT id, phone, first_name, last_name, tg_id, tg_username,
+                       source, status, orders_count, total_spent, last_order_at, created_at
+                FROM crm_clients
+                WHERE tg_id IS NOT NULL
+                  AND (phone ILIKE $1 OR first_name ILIKE $1
+                       OR last_name ILIKE $1 OR tg_username ILIKE $1)
+                ORDER BY last_order_at DESC NULLS LAST
+                LIMIT $2
+            """, f"%{search}%", limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT id, phone, first_name, last_name, tg_id, tg_username,
+                       source, status, orders_count, total_spent, last_order_at, created_at
+                FROM crm_clients
+                WHERE tg_id IS NOT NULL
+                ORDER BY last_order_at DESC NULLS LAST
+                LIMIT $1
+            """, limit)
+        return [dict(r) for r in rows]

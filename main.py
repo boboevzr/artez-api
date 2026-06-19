@@ -1611,6 +1611,11 @@ async def save_tg_message(status: str, body: dict, _=Depends(get_admin)):
     )
     return row
 
+@app.get("/api/admin/tg-clients")
+async def get_tg_clients(search: str = "", _=Depends(get_admin)):
+    rows = await db.get_tg_clients(search=search)
+    return {"clients": rows, "total": len(rows)}
+
 
 @app.post("/api/orders")
 async def create_order(order: OrderRequest):
