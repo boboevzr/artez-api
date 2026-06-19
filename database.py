@@ -591,14 +591,21 @@ async def get_admin_orders(status: str = None, limit: int = 50):
     if not pool:
         return []
     async with pool.acquire() as conn:
+        q = """
+            SELECT o.*, COALESCE(i.cnt, 0)::int AS item_count
+            FROM orders o
+            LEFT JOIN (
+                SELECT order_id, COUNT(*) AS cnt FROM order_items GROUP BY order_id
+            ) i ON i.order_id = o.id
+            {where}
+            ORDER BY o.created_at DESC LIMIT $1
+        """
         if status:
-            return await conn.fetch(
-                "SELECT * FROM orders WHERE status=$1 ORDER BY created_at DESC LIMIT $2",
-                status, limit
-            )
-        return await conn.fetch(
-            "SELECT * FROM orders ORDER BY created_at DESC LIMIT $1", limit
-        )
+            rows = await conn.fetch(
+                q.format(where="WHERE o.status=$2"), limit, status)
+        else:
+            rows = await conn.fetch(q.format(where=""), limit)
+        return rows
 
 
 # ══════════════════════════════════════
