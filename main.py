@@ -2287,18 +2287,30 @@ async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current
     await db.delete_order_photo(photo_id)
     return {"ok": True}
 
-# ── Оплата заказа ─────────────────────────────────────────────────────────────
+# ── Платежи заказа ────────────────────────────────────────────────────────────
 
-@app.patch("/api/admin/orders/{order_id}/payment")
-async def set_order_payment(
+@app.get("/api/admin/orders/{order_id}/payments")
+async def get_order_payments(order_id: int, _=Depends(get_current_staff)):
+    rows = await db.get_order_payments(order_id)
+    return {"ok": True, "payments": rows}
+
+@app.post("/api/admin/orders/{order_id}/payments")
+async def add_order_payment(
     order_id: int,
-    payment_method: str  = Body(..., embed=False),
-    payment_status: str  = Body(..., embed=False),
-    prepaid_amount: float = Body(0,  embed=False),
-    _=Depends(get_current_staff),
+    amount:  float = Body(..., embed=False),
+    method:  str   = Body(..., embed=False),
+    purpose: str   = Body("payment", embed=False),
+    note:    str   = Body("", embed=False),
+    staff=Depends(get_current_staff),
 ):
-    row = await db.update_order_payment(order_id, payment_method, payment_status, prepaid_amount)
-    return {"ok": True, "order": row}
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    row = await db.add_order_payment(order_id, amount, method, purpose, note, name)
+    return {"ok": True, "payment": row}
+
+@app.delete("/api/admin/orders/{order_id}/payments/{payment_id}")
+async def delete_order_payment(order_id: int, payment_id: int, _=Depends(get_current_staff)):
+    await db.delete_order_payment(payment_id)
+    return {"ok": True}
 
 # ── Касса ─────────────────────────────────────────────────────────────────────
 

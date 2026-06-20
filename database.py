@@ -398,6 +398,20 @@ async def create_tables():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at         TIMESTAMPTZ   DEFAULT NULL;
         """)
         await c.execute("""
+        CREATE TABLE IF NOT EXISTS order_payments (
+            id          SERIAL PRIMARY KEY,
+            order_id    INTEGER       NOT NULL,
+            amount      NUMERIC(12,2) NOT NULL,
+            method      VARCHAR(20)   NOT NULL,
+            purpose     VARCHAR(50)   DEFAULT 'payment',
+            note        TEXT          DEFAULT '',
+            created_by  VARCHAR(100)  DEFAULT '',
+            created_at  TIMESTAMPTZ   DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_payments_order ON order_payments(order_id);
+        ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS purpose VARCHAR(50) DEFAULT 'payment';
+        """)
+        await c.execute("""
         CREATE TABLE IF NOT EXISTS cash_shifts (
             id             SERIAL PRIMARY KEY,
             shift_date     DATE          NOT NULL,
@@ -1848,3 +1862,49 @@ async def get_cash_shifts(limit: int = 30) -> list:
         rows = await conn.fetch(
             "SELECT * FROM cash_shifts ORDER BY shift_date DESC, closed_at DESC LIMIT $1", limit)
         return [dict(r) for r in rows]
+
+# ── order_payments ────────────────────────────────────────────────────────────
+
+async def get_order_payments(order_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_payments WHERE order_id=$1 ORDER BY created_at", order_id)
+        return [dict(r) for r in rows]
+
+async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO order_payments (order_id, amount, method, purpose, note, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
+        """, order_id, amount, method, purpose, note, created_by)
+        # Пересчитать payment_status на orders
+        total_row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1", order_id)
+        paid = float(total_row['paid'])
+        order = await conn.fetchrow("SELECT total_price, discount_sum FROM orders WHERE id=$1", order_id)
+        if order:
+            net = float(order['total_price'] or 0) - float(order['discount_sum'] or 0)
+            status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
+            await conn.execute(
+                "UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
+        return dict(row) if row else {}
+
+async def delete_order_payment(payment_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT order_id FROM order_payments WHERE id=$1", payment_id)
+        if not row: return False
+        order_id = row['order_id']
+        await conn.execute("DELETE FROM order_payments WHERE id=$1", payment_id)
+        total_row = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1", order_id)
+        paid = float(total_row['paid'])
+        order = await conn.fetchrow("SELECT total_price, discount_sum FROM orders WHERE id=$1", order_id)
+        if order:
+            net = float(order['total_price'] or 0) - float(order['discount_sum'] or 0)
+            status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
+            await conn.execute(
+                "UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
+        return True
