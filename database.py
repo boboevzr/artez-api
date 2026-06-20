@@ -904,9 +904,10 @@ async def get_leads(status: str = None, branch: str = None,
                        s.last_name    AS creator_last_name,
                        s.position     AS creator_position,
                        s.login        AS creator_login,
+                       s.phone        AS creator_phone,
                        vol.first_name AS volunteer_first_name,
                        vol.last_name  AS volunteer_last_name,
-                       vol.login      AS volunteer_phone
+                       vol.phone      AS volunteer_phone
                 FROM leads l
                 LEFT JOIN staff s   ON s.id   = l.created_by
                 LEFT JOIN staff vol ON vol.id = l.volunteer_id
@@ -952,9 +953,10 @@ async def get_leads_by_agent(agent_id: int, status: str = None):
                        s.last_name    AS creator_last_name,
                        s.position     AS creator_position,
                        s.login        AS creator_login,
+                       s.phone        AS creator_phone,
                        vol.first_name AS volunteer_first_name,
                        vol.last_name  AS volunteer_last_name,
-                       vol.login      AS volunteer_phone
+                       vol.phone      AS volunteer_phone
                 FROM leads l
                 LEFT JOIN staff s   ON s.id  = l.created_by
                 LEFT JOIN staff vol ON vol.id = l.volunteer_id
@@ -980,9 +982,10 @@ async def get_lead_by_id(lead_id: int):
                    s.last_name   AS creator_last_name,
                    s.position    AS creator_position,
                    s.login       AS creator_login,
+                   s.phone       AS creator_phone,
                    vol.first_name AS volunteer_first_name,
                    vol.last_name  AS volunteer_last_name,
-                   vol.login     AS volunteer_phone,
+                   vol.phone     AS volunteer_phone,
                    conv.first_name AS converted_first_name,
                    conv.last_name  AS converted_last_name
             FROM leads l
