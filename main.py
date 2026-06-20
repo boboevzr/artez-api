@@ -2288,32 +2288,47 @@ async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current
     return {"ok": True}
 
 @app.get("/api/media/{photo_id}")
-async def serve_order_photo(photo_id: int, t: str = None, authorization: str = Header(None)):
-    # Принимаем токен как ?t=TOKEN (для img src) или как Bearer заголовок
+async def serve_order_photo(
+    photo_id: int,
+    t: str = None,
+    authorization: str = Header(None),
+    range_header: str = Header(None, alias="range"),
+):
     token = t or (authorization[7:] if authorization and authorization.startswith("Bearer ") else None)
     if not token:
         raise HTTPException(status_code=401)
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         raise HTTPException(status_code=401)
+
     row = await db.get_photo_by_id(photo_id)
     if not row:
         raise HTTPException(status_code=404)
+
     file_id = row["tg_file_id"]
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}") as r:
             data = await r.json()
     if not data.get("ok"):
         raise HTTPException(status_code=502, detail="Не удалось получить файл")
-    file_path = data["result"]["file_path"]
-    file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
+
+    req_headers = {"Range": range_header} if range_header else {}
     async with aiohttp.ClientSession() as s:
-        async with s.get(file_url) as r:
+        async with s.get(file_url, headers=req_headers) as r:
             content = await r.read()
             ct = r.headers.get("Content-Type", "application/octet-stream")
+            cl = r.headers.get("Content-Length", str(len(content)))
+            cr = r.headers.get("Content-Range")
+            status = r.status
+
     from fastapi.responses import Response
-    return Response(content=content, media_type=ct)
+    resp_headers = {"Accept-Ranges": "bytes", "Content-Length": cl}
+    if cr:
+        resp_headers["Content-Range"] = cr
+    return Response(content=content, media_type=ct, status_code=status, headers=resp_headers)
 
 @app.patch("/api/admin/orders/{order_id}/discount")
 async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
