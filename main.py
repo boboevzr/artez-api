@@ -589,10 +589,12 @@ async def get_leads(status: str = None, branch: str = None,
     return {"ok": True, "leads": [dict(r) for r in rows]}
 
 @app.patch("/api/staff/leads/{lead_id}")
-async def update_lead(lead_id: int, body: dict, _=Depends(require_perm("leads"))):
+async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
     allowed = {"client_name","client_phone","branch","address","short_address","note"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
+    operator_id = None if staff.get("sub") == "admin" else staff.get("id")
+    await db.add_lead_call(lead_id, operator_id, action="edited", note="Лид отредактирован")
     return {"ok": True, "lead": lead}
 
 @app.patch("/api/staff/leads/{lead_id}/status")
