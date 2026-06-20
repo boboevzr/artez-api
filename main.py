@@ -1928,7 +1928,7 @@ async def update_order_data(order_id: int, body: dict, staff=Depends(get_current
     if staff.get("sub") != "admin" and order.get("status") not in _ORDER_EDITABLE_STATUSES:
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone",
-               "address","short_address","location","location_address","note"}
+               "branch","address","short_address","location","location_address","note"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
