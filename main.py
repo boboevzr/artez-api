@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from fastapi import FastAPI, HTTPException, Depends, Header, Body
-from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from passlib.context import CryptContext
@@ -1588,36 +1587,30 @@ async def _find_site_user_for_bot(tg_id: int, phone: str | None):
 @app.get("/api/agent/status-by-tg/{tg_id}")
 async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None):
     """Для бота: проверить статус агента по tg_id без авторизации."""
-    try:
-        staff = await db.get_staff_by_tg_id(tg_id)
-        if staff and staff["role"] == "agent":
-            return {"ok": True, "is_agent": True, "has_site_account": True}
-        site_user = await _find_site_user_for_bot(tg_id, phone)
-        return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    staff = await db.get_staff_by_tg_id(tg_id)
+    if staff and staff["role"] == "agent":
+        return {"ok": True, "is_agent": True, "has_site_account": True}
+    site_user = await _find_site_user_for_bot(tg_id, phone)
+    return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
 
 @app.post("/api/agent/apply-by-tg")
 async def agent_apply_by_tg(req: ApplyByTgRequest):
     """Бот регистрирует агента по tg_id — ищет аккаунт сайта по tg_id или телефону."""
-    try:
-        site_user = await _find_site_user_for_bot(req.tg_id, req.phone)
-        if not site_user:
-            return {"ok": False, "reason": "no_site_account"}
-        if not site_user.get("is_verified"):
-            return {"ok": False, "reason": "not_verified"}
-        existing = await db.get_staff_by_login(site_user["phone"])
-        if existing and existing["role"] == "agent":
-            return {"ok": True, "already": True, "phone": site_user["phone"]}
-        password_hash = site_user.get("password_hash")
-        if not password_hash:
-            return {"ok": False, "reason": "no_password"}
-        staff_id = await db.create_agent_from_user(dict(site_user), password_hash)
-        if not staff_id:
-            return {"ok": True, "already": True, "phone": site_user["phone"]}
-        return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+    site_user = await _find_site_user_for_bot(req.tg_id, req.phone)
+    if not site_user:
+        return {"ok": False, "reason": "no_site_account"}
+    if not site_user.get("is_verified"):
+        return {"ok": False, "reason": "not_verified"}
+    existing = await db.get_staff_by_login(site_user["phone"])
+    if existing and existing["role"] == "agent":
+        return {"ok": True, "already": True, "phone": site_user["phone"]}
+    password_hash = site_user.get("password_hash")
+    if not password_hash:
+        return {"ok": False, "reason": "no_password"}
+    staff_id = await db.create_agent_from_user(dict(site_user), password_hash)
+    if not staff_id:
+        return {"ok": True, "already": True, "phone": site_user["phone"]}
+    return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
 
 @app.post("/api/agent/reset-password")
 async def agent_reset_password(body: dict):
