@@ -389,6 +389,29 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos(order_id);
         """)
 
+    # ── Шаг 6: оплата и касса ────────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method  VARCHAR(20)   DEFAULT NULL;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS prepaid_amount  NUMERIC(12,2) DEFAULT 0;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_status  VARCHAR(20)   DEFAULT 'unpaid';
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS paid_at         TIMESTAMPTZ   DEFAULT NULL;
+        """)
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS cash_shifts (
+            id             SERIAL PRIMARY KEY,
+            shift_date     DATE          NOT NULL,
+            closed_by      VARCHAR(100)  DEFAULT '',
+            closed_at      TIMESTAMPTZ   DEFAULT NOW(),
+            cash_total     NUMERIC(12,2) DEFAULT 0,
+            card_total     NUMERIC(12,2) DEFAULT 0,
+            transfer_total NUMERIC(12,2) DEFAULT 0,
+            grand_total    NUMERIC(12,2) DEFAULT 0,
+            orders_count   INTEGER       DEFAULT 0,
+            note           TEXT          DEFAULT ''
+        );
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1738,3 +1761,90 @@ async def get_photo_by_id(photo_id: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
         return dict(row) if row else {}
+
+# ── Оплата заказов ────────────────────────────────────────────────────────────
+
+async def update_order_payment(order_id: int, payment_method: str, payment_status: str,
+                                prepaid_amount: float) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        paid_at = "NOW()" if payment_status == "paid" else "NULL"
+        row = await conn.fetchrow(f"""
+            UPDATE orders SET
+                payment_method = $1,
+                payment_status = $2,
+                prepaid_amount = $3,
+                paid_at        = {paid_at}
+            WHERE id = $4 RETURNING *
+        """, payment_method, payment_status, prepaid_amount, order_id)
+        return dict(row) if row else {}
+
+# ── Касса ─────────────────────────────────────────────────────────────────────
+
+async def get_cash_summary(date_from: str, date_to: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                payment_method,
+                payment_status,
+                COALESCE(SUM(
+                    CASE WHEN payment_status='paid' THEN COALESCE(total_price,0) - COALESCE(discount_sum,0)
+                         WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                         ELSE 0 END
+                ), 0) AS amount,
+                COUNT(*) AS cnt
+            FROM orders
+            WHERE created_at::date BETWEEN $1 AND $2
+              AND payment_status IN ('paid','partial')
+            GROUP BY payment_method, payment_status
+        """, date_from, date_to)
+        orders = await conn.fetch("""
+            SELECT id, order_num, created_at, total_price, discount_sum,
+                   payment_method, payment_status, prepaid_amount, paid_at
+            FROM orders
+            WHERE created_at::date BETWEEN $1 AND $2
+              AND payment_status IS DISTINCT FROM 'unpaid'
+            ORDER BY created_at DESC
+        """, date_from, date_to)
+        return {
+            "summary": [dict(r) for r in rows],
+            "orders": [dict(r) for r in orders],
+        }
+
+async def close_cash_shift(shift_date: str, closed_by: str, note: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            WITH totals AS (
+                SELECT
+                    COALESCE(SUM(CASE WHEN payment_method='cash' THEN
+                        CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
+                             WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                             ELSE 0 END ELSE 0 END),0) AS cash_total,
+                    COALESCE(SUM(CASE WHEN payment_method='card' THEN
+                        CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
+                             WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                             ELSE 0 END ELSE 0 END),0) AS card_total,
+                    COALESCE(SUM(CASE WHEN payment_method='transfer' THEN
+                        CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
+                             WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                             ELSE 0 END ELSE 0 END),0) AS transfer_total,
+                    COUNT(*) FILTER (WHERE payment_status IN ('paid','partial')) AS orders_count
+                FROM orders
+                WHERE created_at::date = $1
+            )
+            INSERT INTO cash_shifts (shift_date, closed_by, cash_total, card_total, transfer_total, grand_total, orders_count, note)
+            SELECT $1, $2, cash_total, card_total, transfer_total,
+                   cash_total+card_total+transfer_total, orders_count, $3
+            FROM totals
+            RETURNING *
+        """, shift_date, closed_by, note)
+        return dict(row) if row else {}
+
+async def get_cash_shifts(limit: int = 30) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM cash_shifts ORDER BY shift_date DESC, closed_at DESC LIMIT $1", limit)
+        return [dict(r) for r in rows]

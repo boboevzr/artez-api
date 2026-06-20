@@ -2287,6 +2287,48 @@ async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current
     await db.delete_order_photo(photo_id)
     return {"ok": True}
 
+# ── Оплата заказа ─────────────────────────────────────────────────────────────
+
+@app.patch("/api/admin/orders/{order_id}/payment")
+async def set_order_payment(
+    order_id: int,
+    payment_method: str  = Body(..., embed=False),
+    payment_status: str  = Body(..., embed=False),
+    prepaid_amount: float = Body(0,  embed=False),
+    _=Depends(get_current_staff),
+):
+    row = await db.update_order_payment(order_id, payment_method, payment_status, prepaid_amount)
+    return {"ok": True, "order": row}
+
+# ── Касса ─────────────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/cash/summary")
+async def cash_summary(
+    date_from: str = None,
+    date_to:   str = None,
+    _=Depends(get_current_staff),
+):
+    from datetime import date
+    today = date.today().isoformat()
+    data = await db.get_cash_summary(date_from or today, date_to or today)
+    return {"ok": True, **data}
+
+@app.post("/api/admin/cash/close-shift")
+async def close_shift(
+    shift_date: str  = Body(None, embed=False),
+    note:       str  = Body("",  embed=False),
+    staff=Depends(get_current_staff),
+):
+    from datetime import date
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    row = await db.close_cash_shift(shift_date or date.today().isoformat(), name, note)
+    return {"ok": True, "shift": row}
+
+@app.get("/api/admin/cash/shifts")
+async def get_shifts(_=Depends(get_current_staff)):
+    rows = await db.get_cash_shifts()
+    return {"ok": True, "shifts": rows}
+
 @app.get("/api/media/{photo_id}")
 async def serve_order_photo(
     photo_id: int,
