@@ -126,14 +126,25 @@ async def _tg_reminder_worker():
                                 f"📞 {r['client_phone']}\n"
                                 f"💬 {msg}")
                         await send_tg(LEADS_GROUP_ID, text)
-                    # Web Push (если сотрудник подписан)
+                    # Web Push + уведомление в приложении
                     if r.get("staff_id"):
+                        push_body = f"📞 {r['client_phone']}" + (f"\n{msg}" if msg != "Запланированный звонок" else "")
                         asyncio.create_task(send_web_push(
                             r["staff_id"],
                             f"🔔 Перезвонить: {client}",
-                            f"📞 {r['client_phone']}" + (f"\n{msg}" if msg != "Запланированный звонок" else ""),
+                            push_body,
                             r["lead_id"]
                         ))
+                        # Пишем в Уведомления приложения
+                        try:
+                            await db.create_agent_notification(
+                                r["staff_id"], r["lead_id"],
+                                "callback",
+                                f"Пора перезвонить: {client} — {r['client_phone']}"
+                                + (f". {msg}" if msg != "Запланированный звонок" else "")
+                            )
+                        except Exception:
+                            pass
                     await db.mark_reminder_sent(r["id"], "tg")
         except Exception as e:
             logging.warning(f"TG reminder worker error: {e}")
