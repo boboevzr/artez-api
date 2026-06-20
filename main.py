@@ -1909,6 +1909,27 @@ async def admin_get_order(order_id: int, _=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Заказ не найден")
     return {"ok": True, "order": order}
 
+_ORDER_EDITABLE_STATUSES = {"new","confirmed","pickup","received","washing","drying","packing","ready"}
+
+@app.patch("/api/admin/orders/{order_id}")
+async def update_order_data(order_id: int, body: dict, staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    perms = ROLE_PERMISSIONS.get(role, [])
+    if "orders" not in perms and staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if staff.get("sub") != "admin" and order.get("status") not in _ORDER_EDITABLE_STATUSES:
+        raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
+    allowed = {"client_first_name","client_last_name","client_phone",
+               "address","short_address","location","location_address","note"}
+    updates = {k: v for k, v in body.items() if k in allowed}
+    if not updates:
+        raise HTTPException(status_code=400, detail="Нет данных для обновления")
+    updated = await db.update_order(order_id, **updates)
+    return {"ok": True, "order": updated}
+
 @app.patch("/api/admin/orders/{order_id}/status")
 async def admin_change_order_status(order_id: int, staff=Depends(get_current_staff),
                                      status: str = Body(..., embed=True),

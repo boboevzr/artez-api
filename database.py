@@ -1475,6 +1475,19 @@ async def get_order_by_id(order_id: int) -> dict:
         row = await conn.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
         return dict(row) if row else {}
 
+async def update_order(order_id: int, **kwargs) -> dict:
+    if not pool: return {}
+    allowed = {"client_first_name", "client_last_name", "client_phone",
+               "address", "short_address", "location", "location_address", "note"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields: return {}
+    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE orders SET {set_parts} WHERE id=$1 RETURNING *",
+            order_id, *list(fields.values()))
+        return dict(row) if row else {}
+
 async def update_order_discount(order_id: int, discount_sum: float) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
