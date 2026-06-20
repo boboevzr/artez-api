@@ -124,15 +124,10 @@ async def _notify_new_lead(lead: dict, staff: dict):
         "creator":      creator,
     }
 
-    parts = []
     if template_ru:
-        parts.append(template_ru.format_map(vars_))
+        await send_tg(group_id, template_ru.format_map(vars_))
     if template_uz and template_uz != template_ru:
-        parts.append(template_uz.format_map(vars_))
-
-    text = "\n\n—\n\n".join(parts) if parts else ""
-    if text:
-        await send_tg(group_id, text)
+        await send_tg(group_id, template_uz.format_map(vars_))
 
 
 # ══════════════════════════════════════
