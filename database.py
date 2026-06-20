@@ -133,6 +133,8 @@ async def create_tables():
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_id BIGINT",
         # Staff: уникальный логин для ON CONFLICT
         "CREATE UNIQUE INDEX IF NOT EXISTS staff_login_unique ON staff(login)",
+        # Orders: хранить текстовый адрес геолокации
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS location_address TEXT DEFAULT ''",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
