@@ -1463,24 +1463,17 @@ async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, 
 
 
 async def get_client_by_tg_phone(tg_phone: str) -> dict | None:
-    """Ищет клиента бота по верифицированному TG-номеру (clients.tg_phone)."""
+    """Ищет клиента бота по tg_phone (верифицированный) или phone (запасной)."""
     if not pool: return None
+    alt = tg_phone[1:] if tg_phone.startswith("+") else "+" + tg_phone
     async with pool.acquire() as conn:
         try:
             row = await conn.fetchrow(
-                "SELECT tg_id, tg_phone, phone, first_name FROM clients WHERE tg_phone=$1",
-                tg_phone)
-            if row:
-                return dict(row)
-            # Пробуем без + если не нашли
-            if tg_phone.startswith("+"):
-                row = await conn.fetchrow(
-                    "SELECT tg_id, tg_phone, phone, first_name FROM clients WHERE tg_phone=$1",
-                    tg_phone[1:])
-            else:
-                row = await conn.fetchrow(
-                    "SELECT tg_id, tg_phone, phone, first_name FROM clients WHERE tg_phone=$1",
-                    "+" + tg_phone)
+                """SELECT tg_id, tg_phone, phone, first_name FROM clients
+                   WHERE tg_phone=$1 OR tg_phone=$2
+                      OR phone=$1    OR phone=$2
+                   LIMIT 1""",
+                tg_phone, alt)
             return dict(row) if row else None
         except Exception:
             return None
