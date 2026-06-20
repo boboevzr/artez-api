@@ -1513,27 +1513,48 @@ async def agent_status(user=Depends(get_current_user)):
 
 @app.post("/api/agent/apply")
 async def agent_apply(user=Depends(get_current_user)):
-    """Пользователь сайта регистрируется как агент — использует свой сайтовый пароль."""
+    """Пользователь сайта регистрируется как агент.
+    Ищет клиента бота по clients.tg_phone = users.phone.
+    Если не найден — возвращает needs_bot=True (нужно написать боту).
+    """
     if not user.get("is_verified"):
         raise HTTPException(400, "Сначала подтвердите номер телефона")
-    if not user.get("tg_id"):
-        raise HTTPException(400, "Необходимо привязать Telegram-бота. Напишите боту /start")
 
+    # Уже агент?
     existing = await db.get_staff_by_site_user(user["id"])
     if existing:
-        raise HTTPException(400, "Вы уже зарегистрированы как агент")
+        return {"ok": True, "already": True, "message": "Вы уже зарегистрированы как агент"}
+    existing2 = await db.get_staff_by_login(user["phone"])
+    if existing2 and existing2["role"] == "agent":
+        await db.link_staff_to_site_user(existing2["id"], user["id"])
+        return {"ok": True, "already": True, "message": "Вы уже зарегистрированы как агент"}
 
-    # Берём хеш пароля прямо из таблицы users
+    # Ищем клиента бота по tg_phone = phone сайта
+    client = await db.get_client_by_tg_phone(user["phone"])
+    if not client:
+        # Telegram-контакт не верифицирован — нужно зайти в бот и поделиться номером
+        return {"ok": False, "needs_bot": True}
+
+    # Привязываем tg_id к аккаунту сайта (если ещё не привязан)
+    tg_id = client.get("tg_id")
+    if tg_id and not user.get("tg_id"):
+        await db.link_user_tg_id(user["phone"], int(tg_id))
+
     site_user = await db.get_user_by_id(user["id"])
     password_hash = site_user["password_hash"] if site_user else None
     if not password_hash:
-        raise HTTPException(400, "Пароль не установлен. Установите пароль в настройках сайта.")
+        raise HTTPException(400, "Пароль не установлен.")
 
-    staff_id = await db.create_agent_from_user(dict(user), password_hash)
+    # Передаём актуальный tg_id в create_agent_from_user
+    user_data = dict(user)
+    if tg_id:
+        user_data["tg_id"] = int(tg_id)
+
+    staff_id = await db.create_agent_from_user(user_data, password_hash)
     if not staff_id:
-        raise HTTPException(400, "Этот номер телефона уже используется в системе. Обратитесь к администратору.")
+        return {"ok": True, "already": True, "message": "Аккаунт агента уже существует"}
 
-    return {"ok": True, "message": "Вы зарегистрированы как агент! Войдите через artez.uz/staff.html"}
+    return {"ok": True, "already": False, "message": "Вы зарегистрированы как агент! Войдите через artez.uz/staff.html"}
 
 class ApplyByTgRequest(BaseModel):
     tg_id: int

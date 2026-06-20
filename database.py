@@ -126,6 +126,9 @@ async def create_tables():
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS temp_password_expires TIMESTAMPTZ  DEFAULT NULL",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS must_change_password  BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS site_user_id          INTEGER REFERENCES users(id)",
+        # Бот: верифицированный TG-номер клиента
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS tg_phone  VARCHAR(20) DEFAULT NULL",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS language  VARCHAR(5)  DEFAULT 'ru'",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1455,6 +1458,30 @@ async def upsert_tg_status_message(status: str, enabled: bool, message_ru: str, 
             RETURNING *
         """, status, enabled, message_ru, message_uz)
         return dict(row) if row else {}
+
+
+async def get_client_by_tg_phone(tg_phone: str) -> dict | None:
+    """Ищет клиента бота по верифицированному TG-номеру (clients.tg_phone)."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "SELECT tg_id, tg_phone, phone, first_name FROM clients WHERE tg_phone=$1",
+                tg_phone)
+            if row:
+                return dict(row)
+            # Пробуем без + если не нашли
+            if tg_phone.startswith("+"):
+                row = await conn.fetchrow(
+                    "SELECT tg_id, tg_phone, phone, first_name FROM clients WHERE tg_phone=$1",
+                    tg_phone[1:])
+            else:
+                row = await conn.fetchrow(
+                    "SELECT tg_id, tg_phone, phone, first_name FROM clients WHERE tg_phone=$1",
+                    "+" + tg_phone)
+            return dict(row) if row else None
+        except Exception:
+            return None
 
 
 async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
