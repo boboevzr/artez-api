@@ -1600,22 +1600,24 @@ async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None):
 @app.post("/api/agent/apply-by-tg")
 async def agent_apply_by_tg(req: ApplyByTgRequest):
     """Бот регистрирует агента по tg_id — ищет аккаунт сайта по tg_id или телефону."""
-    site_user = await _find_site_user_for_bot(req.tg_id, req.phone)
-    if not site_user:
-        return {"ok": False, "reason": "no_site_account"}
-    if not site_user.get("is_verified"):
-        return {"ok": False, "reason": "not_verified"}
-    # Уже агент?
-    existing = await db.get_staff_by_login(site_user["phone"])
-    if existing and existing["role"] == "agent":
-        return {"ok": True, "already": True, "phone": site_user["phone"]}
-    password_hash = site_user.get("password_hash")
-    if not password_hash:
-        return {"ok": False, "reason": "no_password"}
-    staff_id = await db.create_agent_from_user(dict(site_user), password_hash)
-    if not staff_id:
-        return {"ok": True, "already": True, "phone": site_user["phone"]}
-    return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
+    try:
+        site_user = await _find_site_user_for_bot(req.tg_id, req.phone)
+        if not site_user:
+            return {"ok": False, "reason": "no_site_account"}
+        if not site_user.get("is_verified"):
+            return {"ok": False, "reason": "not_verified"}
+        existing = await db.get_staff_by_login(site_user["phone"])
+        if existing and existing["role"] == "agent":
+            return {"ok": True, "already": True, "phone": site_user["phone"]}
+        password_hash = site_user.get("password_hash")
+        if not password_hash:
+            return {"ok": False, "reason": "no_password"}
+        staff_id = await db.create_agent_from_user(dict(site_user), password_hash)
+        if not staff_id:
+            return {"ok": True, "already": True, "phone": site_user["phone"]}
+        return {"ok": True, "already": False, "phone": site_user["phone"], "name": site_user.get("first_name") or ""}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 @app.post("/api/agent/reset-password")
 async def agent_reset_password(body: dict):
