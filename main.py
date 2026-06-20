@@ -839,12 +839,13 @@ async def get_due_reminders(staff=Depends(require_perm("leads"))):
     if staff.get("sub") == "admin":
         return {"ok": True, "reminders": []}
     rows = await db.get_due_reminders(staff["id"])
-    result = []
-    for r in rows:
-        d = dict(r)
-        result.append(d)
-        await db.mark_reminder_sent(r["id"], "browser")
+    result = [dict(r) for r in rows]
     return {"ok": True, "reminders": result}
+
+@app.post("/api/staff/reminders/{reminder_id}/ack")
+async def ack_reminder(reminder_id: int, staff=Depends(require_perm("leads"))):
+    await db.mark_reminder_sent(reminder_id, "browser")
+    return {"ok": True}
 
 @app.get("/api/push/vapid-key")
 async def get_vapid_key():
