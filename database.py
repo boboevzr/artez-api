@@ -871,13 +871,15 @@ async def create_lead(data: dict) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO leads (lead_num, client_name, client_phone, service, branch,
-                               city, address, short_address, note, status, assigned_to, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                               city, address, short_address, note, status, assigned_to,
+                               created_by, volunteer_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
             RETURNING *
         """, data["lead_num"], data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
-            data.get("status","new"), data.get("assigned_to"), data.get("created_by"))
+            data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
+            data.get("volunteer_id"))
         return dict(row)
 
 async def get_leads(status: str = None, branch: str = None,

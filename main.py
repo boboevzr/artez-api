@@ -702,7 +702,11 @@ async def update_lead_status(lead_id: int, body: dict,
     if status not in ("new","contacted","callback","converted","lost","no_answer"):
         raise HTTPException(status_code=400, detail="Неверный статус")
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
-    await db.update_lead_status(lead_id, status)
+    order_num = body.get("order_num")
+    if status == "converted" and order_num:
+        await db.convert_lead_to_order(lead_id, order_num, operator_id or 0)
+    else:
+        await db.update_lead_status(lead_id, status)
     # лог
     action_labels = {
         "new": "Сменил статус на «Новый»",
