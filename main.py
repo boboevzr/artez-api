@@ -146,14 +146,9 @@ async def _notify_agent_status(lead_id: int, status: str, note: str):
     # В личный кабинет (таблица)
     await db.create_agent_notification(agent["id"], lead_id, f"status_{status}", msg_ru)
 
-    # В Telegram личку или группу
     tg_id = agent.get("tg_id")
     if tg_id:
         await send_tg(tg_id, msg_ru + "\n\n" + msg_uz)
-    else:
-        leads_group = await _get_cfg("leads_group_id")
-        agent_name  = " ".join(filter(None, [agent.get("last_name"), agent.get("first_name")])) or agent.get("login", "Агент")
-        await send_tg(leads_group, f"📬 Уведомление для агента {agent_name}\n\n" + msg_ru)
 
 
 async def _notify_new_lead(lead: dict, staff: dict):
