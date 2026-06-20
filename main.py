@@ -743,6 +743,11 @@ async def mark_notifications_read(staff=Depends(get_current_staff)):
     await db.mark_agent_notifications_read(staff["id"])
     return {"ok": True}
 
+@app.patch("/api/staff/my-notifications/{notif_id}/read")
+async def mark_one_notification_read(notif_id: int, staff=Depends(get_current_staff)):
+    await db.mark_agent_notification_read_by_id(notif_id, staff["id"])
+    return {"ok": True}
+
 @app.get("/api/staff/leads/{lead_id}/calls")
 async def get_lead_calls(lead_id: int, _=Depends(require_perm("leads"))):
     rows = await db.get_lead_calls(lead_id)

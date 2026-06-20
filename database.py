@@ -1105,6 +1105,13 @@ async def mark_agent_notifications_read(agent_id: int):
             "UPDATE agent_notifications SET is_read=TRUE WHERE agent_id=$1 AND is_read=FALSE",
             agent_id)
 
+async def mark_agent_notification_read_by_id(notif_id: int, agent_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_notifications SET is_read=TRUE WHERE id=$1 AND agent_id=$2",
+            notif_id, agent_id)
+
 
 async def convert_lead_to_order(lead_id: int, order_num: str, converted_by: int):
     if not pool: return
