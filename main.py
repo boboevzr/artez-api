@@ -1954,7 +1954,7 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
     if staff.get("sub") != "admin" and order.get("status") not in _ORDER_EDITABLE_STATUSES:
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone",
-               "branch","address","short_address","location","location_address","note"}
+               "branch","address","short_address","location","location_address","note","deadline"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
@@ -1964,6 +1964,53 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
                                       for k, v in updated.items()}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка обновления: {str(e)}")
+
+@app.get("/api/staff/orders/{order_id}/history")
+async def get_order_history(order_id: int, _=Depends(get_current_staff)):
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    rows = await db.get_order_status_history(order.get("order_num", ""))
+    return {"ok": True, "history": [
+        {k: str(v) if hasattr(v, 'isoformat') else v for k, v in r.items()}
+        for r in rows
+    ]}
+
+@app.get("/api/staff/check-phone")
+async def check_phone(phone: str, _=Depends(get_current_staff)):
+    result = await db.check_phone_duplicate(phone)
+    return {"ok": True, **result}
+
+@app.post("/api/staff/leads/{lead_id}/convert")
+async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
+                                 staff=Depends(require_perm("orders"))):
+    lead = await db.get_lead_by_id(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="Лид не найден")
+    name_parts = (lead.get("name") or "").split(maxsplit=1)
+    first = name_parts[0] if name_parts else ""
+    last  = name_parts[1] if len(name_parts) > 1 else ""
+    order_num = await db.get_next_order_num()
+    lead_note = lead.get("note") or ""
+    note_text = f"Конвертирован из лида #{lead_id}" + (f". {lead_note}" if lead_note else "")
+    await db.save_site_order({
+        "order_num":     order_num,
+        "first_name":    first,
+        "last_name":     last,
+        "phone":         lead.get("phone", ""),
+        "branch":        lead.get("branch") or body.get("branch", ""),
+        "city":          "",
+        "address":       lead.get("address", ""),
+        "short_address": lead.get("short_address", ""),
+        "location":      lead.get("location", ""),
+        "service":       "",
+        "pickup_date":   "",
+        "pickup_time":   "",
+        "note":          note_text,
+        "total_price":   None,
+    }, source="staff")
+    await db.update_lead_status(lead_id, "converted")
+    return {"ok": True, "order_num": order_num}
 
 @app.patch("/api/admin/orders/{order_id}/status")
 async def admin_change_order_status(order_id: int, staff=Depends(get_current_staff),

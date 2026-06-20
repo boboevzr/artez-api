@@ -135,6 +135,8 @@ async def create_tables():
         "CREATE UNIQUE INDEX IF NOT EXISTS staff_login_unique ON staff(login)",
         # Orders: хранить текстовый адрес геолокации
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS location_address TEXT DEFAULT ''",
+        # Orders: дедлайн (дата готовности)
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS deadline DATE DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1494,7 +1496,7 @@ async def get_order_by_id(order_id: int) -> dict:
 async def update_order(order_id: int, **kwargs) -> dict:
     if not pool: return {}
     allowed = {"client_first_name", "client_last_name", "client_phone",
-               "branch", "address", "short_address", "location", "location_address", "note"}
+               "branch", "address", "short_address", "location", "location_address", "note", "deadline"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -1538,6 +1540,38 @@ async def update_item_washer(item_id: int, washer_login: str) -> dict:
             "UPDATE order_items SET washer_login=$2 WHERE id=$1 RETURNING *", item_id, washer_login or None)
         return dict(row) if row else {}
 
+
+# ══════════════════════════════════════
+#  ИСТОРИЯ СТАТУСОВ ЗАКАЗА
+# ══════════════════════════════════════
+async def get_order_status_history(order_num: str) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_status_history WHERE order_num=$1 ORDER BY created_at",
+            order_num)
+        return [dict(r) for r in rows]
+
+# ══════════════════════════════════════
+#  ДУБЛИКАТЫ ТЕЛЕФОНА
+# ══════════════════════════════════════
+async def check_phone_duplicate(phone: str) -> dict:
+    if not pool: return {}
+    clean = ''.join(c for c in phone if c.isdigit() or c == '+')
+    if not clean: return {}
+    async with pool.acquire() as conn:
+        order = await conn.fetchrow(
+            "SELECT id, order_num, client_first_name, client_last_name, status FROM orders "
+            "WHERE REGEXP_REPLACE(client_phone,'[^0-9]','','g') = REGEXP_REPLACE($1,'[^0-9]','','g') "
+            "ORDER BY created_at DESC LIMIT 1", clean)
+        lead = await conn.fetchrow(
+            "SELECT id, name, status FROM leads "
+            "WHERE REGEXP_REPLACE(phone,'[^0-9]','','g') = REGEXP_REPLACE($1,'[^0-9]','','g') "
+            "ORDER BY created_at DESC LIMIT 1", clean)
+        return {
+            "order": dict(order) if order else None,
+            "lead":  dict(lead)  if lead  else None,
+        }
 
 # ══════════════════════════════════════
 #  TELEGRAM — ШАБЛОНЫ УВЕДОМЛЕНИЙ
