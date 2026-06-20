@@ -131,6 +131,8 @@ async def create_tables():
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS language  VARCHAR(5)  DEFAULT 'ru'",
         # Users: привязка Telegram ID
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS tg_id BIGINT",
+        # Staff: уникальный логин для ON CONFLICT
+        "CREATE UNIQUE INDEX IF NOT EXISTS staff_login_unique ON staff(login) WHERE login IS NOT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
