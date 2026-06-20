@@ -1574,11 +1574,14 @@ async def _find_site_user_for_bot(tg_id: int, phone: str | None):
             user = await db.get_user_by_phone(norm)
             if not user and norm.startswith("+"):
                 user = await db.get_user_by_phone(norm[1:])
-            if user:
-                await db.link_user_tg_id(user["phone"], tg_id)
-            return user
         except Exception:
-            pass
+            user = None
+        if user:
+            try:
+                await db.link_user_tg_id(user["phone"], tg_id)
+            except Exception:
+                pass
+            return user
     return None
 
 @app.get("/api/agent/status-by-tg/{tg_id}")
