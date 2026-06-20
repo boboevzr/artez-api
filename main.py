@@ -2292,7 +2292,6 @@ async def serve_order_photo(
     photo_id: int,
     t: str = None,
     authorization: str = Header(None),
-    range_header: str = Header(None, alias="range"),
 ):
     token = t or (authorization[7:] if authorization and authorization.startswith("Bearer ") else None)
     if not token:
@@ -2306,29 +2305,15 @@ async def serve_order_photo(
     if not row:
         raise HTTPException(status_code=404)
 
-    file_id = row["tg_file_id"]
     async with aiohttp.ClientSession() as s:
-        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}") as r:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={row['tg_file_id']}") as r:
             data = await r.json()
     if not data.get("ok"):
         raise HTTPException(status_code=502, detail="Не удалось получить файл")
 
+    from fastapi.responses import RedirectResponse
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
-
-    req_headers = {"Range": range_header} if range_header else {}
-    async with aiohttp.ClientSession() as s:
-        async with s.get(file_url, headers=req_headers) as r:
-            content = await r.read()
-            ct = r.headers.get("Content-Type", "application/octet-stream")
-            cl = r.headers.get("Content-Length", str(len(content)))
-            cr = r.headers.get("Content-Range")
-            status = r.status
-
-    from fastapi.responses import Response
-    resp_headers = {"Accept-Ranges": "bytes", "Content-Length": cl}
-    if cr:
-        resp_headers["Content-Range"] = cr
-    return Response(content=content, media_type=ct, status_code=status, headers=resp_headers)
+    return RedirectResponse(url=file_url)
 
 @app.patch("/api/admin/orders/{order_id}/discount")
 async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
