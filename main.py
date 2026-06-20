@@ -74,29 +74,52 @@ async def _tg_reminder_worker():
                     staff_name = " ".join(filter(None, [r.get("staff_last_name"), r.get("staff_first_name")])) or "Сотрудник"
 
                     if tg_id:
-                        # личка сотруднику
                         text = (f"⏰ Напоминание о звонке\n\n"
                                 f"Лид {lead_code} — {client}\n"
                                 f"📞 {r['client_phone']}\n"
                                 f"💬 {msg}")
-                        chat_id = tg_id
+                        await send_tg(tg_id, text)
                     else:
-                        # fallback в группу
                         text = (f"⏰ Напоминание ({staff_name})\n\n"
                                 f"Лид {lead_code} — {client}\n"
                                 f"📞 {r['client_phone']}\n"
                                 f"💬 {msg}")
-                        chat_id = LEADS_GROUP_ID
-
-                    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                    async with aiohttp.ClientSession() as s:
-                        resp = await s.post(url, json={"chat_id": chat_id, "text": text},
-                                            timeout=aiohttp.ClientTimeout(total=5))
-                        if resp.status == 200:
-                            await db.mark_reminder_sent(r["id"], "tg")
+                        await send_tg(LEADS_GROUP_ID, text)
+                    await db.mark_reminder_sent(r["id"], "tg")
         except Exception as e:
             logging.warning(f"TG reminder worker error: {e}")
         await asyncio.sleep(60)
+
+
+async def send_tg(chat_id, text: str):
+    if not BOT_TOKEN or not chat_id:
+        return
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json={"chat_id": str(chat_id), "text": text},
+                         timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"send_tg error: {e}")
+
+
+async def _notify_new_lead(lead: dict, staff: dict):
+    code    = lead.get("lead_code") or f"#{lead.get('id')}"
+    client  = lead.get("client_name") or "—"
+    phone   = lead.get("client_phone") or "—"
+    note    = lead.get("note") or "—"
+    branch  = lead.get("branch") or "—"
+    role    = staff.get("role", "")
+    creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "—")
+
+    source = "🤝 Агент" if role == "agent" else "👤 Сотрудник"
+    text = (f"🎯 Новый лид {code}\n\n"
+            f"👤 {client}\n"
+            f"📞 {phone}\n"
+            f"🏢 Филиал: {branch}\n"
+            f"💬 {note}\n\n"
+            f"📌 {source}: {creator}")
+    await send_tg(LEADS_GROUP_ID, text)
 
 
 # ══════════════════════════════════════
@@ -588,6 +611,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
                                note=f"Лид создан ({lead_code})")
+        asyncio.create_task(_notify_new_lead(lead, staff))
     return {"ok": True, "lead": lead}
 
 @app.get("/api/staff/leads")
