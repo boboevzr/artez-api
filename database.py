@@ -896,7 +896,8 @@ async def get_leads(status: str = None, branch: str = None,
                        s.last_name    AS creator_last_name,
                        s.position     AS creator_position,
                        vol.first_name AS volunteer_first_name,
-                       vol.last_name  AS volunteer_last_name
+                       vol.last_name  AS volunteer_last_name,
+                       vol.login      AS volunteer_phone
                 FROM leads l
                 LEFT JOIN staff s   ON s.id   = l.created_by
                 LEFT JOIN staff vol ON vol.id = l.volunteer_id
@@ -938,9 +939,15 @@ async def get_leads_by_agent(agent_id: int, status: str = None):
             args.append(status); filters.append(f"l.status=${len(args)}")
         return await conn.fetch(
             f"""SELECT l.*,
-                       s.first_name AS creator_first_name, s.last_name AS creator_last_name,
-                       s.position AS creator_position
-                FROM leads l LEFT JOIN staff s ON s.id = l.created_by
+                       s.first_name   AS creator_first_name,
+                       s.last_name    AS creator_last_name,
+                       s.position     AS creator_position,
+                       vol.first_name AS volunteer_first_name,
+                       vol.last_name  AS volunteer_last_name,
+                       vol.login      AS volunteer_phone
+                FROM leads l
+                LEFT JOIN staff s   ON s.id  = l.created_by
+                LEFT JOIN staff vol ON vol.id = l.volunteer_id
                 WHERE {' AND '.join(filters)} ORDER BY l.created_at DESC LIMIT 200""", *args)
 
 async def generate_lead_code() -> str:
