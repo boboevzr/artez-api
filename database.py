@@ -897,6 +897,7 @@ async def get_leads(status: str = None, branch: str = None,
                        s.first_name   AS creator_first_name,
                        s.last_name    AS creator_last_name,
                        s.position     AS creator_position,
+                       s.login        AS creator_login,
                        vol.first_name AS volunteer_first_name,
                        vol.last_name  AS volunteer_last_name,
                        vol.login      AS volunteer_phone
@@ -944,6 +945,7 @@ async def get_leads_by_agent(agent_id: int, status: str = None):
                        s.first_name   AS creator_first_name,
                        s.last_name    AS creator_last_name,
                        s.position     AS creator_position,
+                       s.login        AS creator_login,
                        vol.first_name AS volunteer_first_name,
                        vol.last_name  AS volunteer_last_name,
                        vol.login      AS volunteer_phone
@@ -971,8 +973,10 @@ async def get_lead_by_id(lead_id: int):
                    s.first_name  AS creator_first_name,
                    s.last_name   AS creator_last_name,
                    s.position    AS creator_position,
+                   s.login       AS creator_login,
                    vol.first_name AS volunteer_first_name,
                    vol.last_name  AS volunteer_last_name,
+                   vol.login     AS volunteer_phone,
                    conv.first_name AS converted_first_name,
                    conv.last_name  AS converted_last_name
             FROM leads l
