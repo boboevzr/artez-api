@@ -478,7 +478,7 @@ def require_perm(permission: str):
 # ══════════════════════════════════════
 @app.get("/api/health")
 async def health():
-    return {"ok": True, "version": "2026-06-19-v3"}
+    return {"ok": True, "version": "2026-06-20-v1"}
 
 
 # ══════════════════════════════════════
@@ -515,6 +515,7 @@ def _staff_public(s: dict) -> dict:
         "position":   s.get("position"),
         "branch":     s.get("branch"),
         "phone":      s.get("phone"),
+        "tg_id":      s.get("tg_id"),
         "tg_username":s.get("tg_username"),
         "active":         s["active"],
         "permissions":    ROLE_PERMISSIONS.get(s["role"], []),
