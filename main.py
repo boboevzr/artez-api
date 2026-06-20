@@ -152,6 +152,9 @@ async def _notify_agent_status(lead_id: int, status: str, note: str):
 
 
 async def _notify_new_lead(lead: dict, staff: dict):
+    enabled = await _get_cfg("leads_group_enabled")
+    if enabled not in ("1", "true"):
+        return
     group_id = await _get_cfg("leads_group_id")
     if not group_id:
         return
@@ -2113,6 +2116,7 @@ SITE_SETTINGS_DEFAULTS = {
     "sheets_url":          SHEETS_URL,
     # Лиды — группа и шаблоны уведомлений
     "leads_group_id":      LEADS_GROUP_ID,
+    "leads_group_enabled": "0",
     "lead_notify_ru": (
         "🎯 Новый лид {lead_code}\n\n"
         "👤 {client_name}\n"
@@ -2180,9 +2184,10 @@ class SiteSettings(BaseModel):
     osago_partner_phone: str | None = None
     osago_partner_promo: str | None = None
     sheets_url:          str | None = None
-    leads_group_id:      str | None = None
-    lead_notify_ru:      str | None = None
-    lead_notify_uz:      str | None = None
+    leads_group_id:       str | None = None
+    leads_group_enabled:  str | None = None
+    lead_notify_ru:       str | None = None
+    lead_notify_uz:       str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
