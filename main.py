@@ -177,10 +177,9 @@ async def _notify_new_lead(lead: dict, staff: dict):
         "creator":      creator,
     }
 
-    if template_ru:
-        await send_tg(group_id, template_ru.format_map(vars_))
-    if template_uz and template_uz != template_ru:
-        await send_tg(group_id, template_uz.format_map(vars_))
+    text = template_ru or template_uz
+    if text:
+        await send_tg(group_id, text.format_map(vars_))
 
 
 # ══════════════════════════════════════
