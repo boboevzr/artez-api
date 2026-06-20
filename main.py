@@ -1589,7 +1589,7 @@ async def _find_site_user_for_bot(tg_id: int, phone: str | None):
 async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None):
     """Для бота: проверить статус агента по tg_id без авторизации."""
     try:
-        staff = await db.get_staff_by_tg_id(str(tg_id))
+        staff = await db.get_staff_by_tg_id(tg_id)
         if staff and staff["role"] == "agent":
             return {"ok": True, "is_agent": True, "has_site_account": True}
         site_user = await _find_site_user_for_bot(tg_id, phone)

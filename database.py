@@ -755,12 +755,18 @@ async def link_staff_to_site_user(staff_id: int, site_user_id: int):
             "UPDATE staff SET site_user_id=$2 WHERE id=$1", staff_id, site_user_id
         )
 
-async def get_staff_by_tg_id(tg_id: int):
+async def get_staff_by_tg_id(tg_id):
     if not pool: return None
     async with pool.acquire() as conn:
-        return await conn.fetchrow(
-            "SELECT * FROM staff WHERE tg_id=$1 AND active=TRUE", tg_id
-        )
+        try:
+            return await conn.fetchrow(
+                "SELECT * FROM staff WHERE tg_id=$1 AND active=TRUE", int(tg_id))
+        except Exception:
+            try:
+                return await conn.fetchrow(
+                    "SELECT * FROM staff WHERE tg_id::text=$1 AND active=TRUE", str(tg_id))
+            except Exception:
+                return None
 
 async def create_agent_from_user(user: dict, password_hash: str) -> int:
     """Создаёт staff-аккаунт агента из пользователя сайта."""
