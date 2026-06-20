@@ -1476,6 +1476,13 @@ async def delete_order_item(item_id: int) -> bool:
         res = await conn.execute("DELETE FROM order_items WHERE id=$1", item_id)
         return res == "DELETE 1"
 
+async def delete_order(order_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM order_items WHERE order_id=$1", order_id)
+        res = await conn.execute("DELETE FROM orders WHERE id=$1", order_id)
+        return res == "DELETE 1"
+
 async def get_order_by_id(order_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:

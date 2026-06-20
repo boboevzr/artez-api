@@ -817,6 +817,32 @@ async def bulk_status_leads(body: dict, staff=Depends(require_perm("leads"))):
                                note=f"Массовая смена статуса")
     return {"ok": True, "updated": len(ids)}
 
+@app.post("/api/staff/orders/bulk-status")
+async def bulk_status_orders(body: dict, staff=Depends(require_perm("orders"))):
+    status = body.get("status")
+    valid = {"new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"}
+    if status not in valid:
+        raise HTTPException(status_code=400, detail="Неверный статус")
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нет ID заказов")
+    for order_id in ids:
+        await db.update_order_status(int(order_id), status, note="Массовая смена статуса")
+    return {"ok": True, "updated": len(ids)}
+
+@app.post("/api/staff/orders/bulk-delete")
+async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
+    if not body.get("admin_password") or body["admin_password"] != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль администратора")
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нет ID заказов")
+    deleted = 0
+    for order_id in ids:
+        ok = await db.delete_order(int(order_id))
+        if ok: deleted += 1
+    return {"ok": True, "deleted": deleted}
+
 
 # ══════════════════════════════════════
 #  ЗАЯВКИ — для сотрудников
