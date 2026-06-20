@@ -597,6 +597,11 @@ async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
+    if "tg_id" in updates and updates["tg_id"] is not None:
+        try:
+            updates["tg_id"] = int(updates["tg_id"])
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=400, detail="tg_id должен быть числом")
     await db.update_staff(staff_id, **updates)
     row = await db.get_staff_by_id(staff_id)
     if not row:
