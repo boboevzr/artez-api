@@ -72,7 +72,7 @@ async def startup():
     await db.init_db()
     asyncio.create_task(_tg_reminder_worker())
 
-async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None):
+async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None):
     if not VAPID_PRIVATE or not VAPID_PUBLIC:
         return
     try:
@@ -80,7 +80,7 @@ async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = Non
         subs = await db.get_push_subscriptions(staff_id)
         for sub in subs:
             try:
-                payload = _json.dumps({"title": title, "body": body, "lead_id": lead_id})
+                payload = _json.dumps({"title": title, "body": body, "lead_id": lead_id, "phone": phone})
                 webpush(
                     subscription_info={"endpoint": sub["endpoint"],
                                        "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
@@ -133,7 +133,8 @@ async def _tg_reminder_worker():
                             r["staff_id"],
                             f"🔔 Перезвонить: {client}",
                             push_body,
-                            r["lead_id"]
+                            r["lead_id"],
+                            r["client_phone"]
                         ))
                         # Пишем в Уведомления приложения
                         try:
