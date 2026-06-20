@@ -783,6 +783,35 @@ async def delete_lead_staff(lead_id: int, body: dict, _=Depends(require_perm("le
         raise HTTPException(status_code=404, detail="Лид не найден")
     return {"ok": True}
 
+@app.post("/api/staff/leads/bulk-delete")
+async def bulk_delete_leads(body: dict, _=Depends(require_perm("leads"))):
+    if not body.get("admin_password") or body["admin_password"] != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль администратора")
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нет ID лидов")
+    deleted = 0
+    for lead_id in ids:
+        ok = await db.delete_lead(int(lead_id))
+        if ok:
+            deleted += 1
+    return {"ok": True, "deleted": deleted}
+
+@app.post("/api/staff/leads/bulk-status")
+async def bulk_status_leads(body: dict, staff=Depends(require_perm("leads"))):
+    status = body.get("status")
+    if status not in ("new","contacted","callback","converted","lost","no_answer"):
+        raise HTTPException(status_code=400, detail="Неверный статус")
+    ids = body.get("ids", [])
+    if not ids:
+        raise HTTPException(status_code=400, detail="Нет ID лидов")
+    operator_id = None if staff.get("sub") == "admin" else staff.get("id")
+    for lead_id in ids:
+        await db.update_lead_status(int(lead_id), status)
+        await db.add_lead_call(int(lead_id), operator_id, action=f"status_{status}",
+                               note=f"Массовая смена статуса")
+    return {"ok": True, "updated": len(ids)}
+
 
 # ══════════════════════════════════════
 #  ЗАЯВКИ — для сотрудников
