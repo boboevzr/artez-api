@@ -373,6 +373,22 @@ async def create_tables():
             VALUES ($1, $2, $3, $4) ON CONFLICT (status) DO NOTHING
         """, defaults)
 
+    # ── Шаг 5: фото/видео заказов ────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS order_photos (
+            id            SERIAL PRIMARY KEY,
+            order_id      INTEGER      NOT NULL,
+            tg_file_id    TEXT         NOT NULL,
+            tg_file_type  VARCHAR(20)  NOT NULL DEFAULT 'photo',
+            photo_type    VARCHAR(20)  NOT NULL DEFAULT 'before',
+            note          TEXT         DEFAULT '',
+            uploaded_by   VARCHAR(100) DEFAULT '',
+            created_at    TIMESTAMPTZ  DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos(order_id);
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1691,3 +1707,34 @@ async def delete_push_subscription(endpoint: str):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM push_subscriptions WHERE endpoint=$1", endpoint)
+
+# ── order_photos ──────────────────────────────────────────────────────────────
+
+async def get_order_photos(order_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_photos WHERE order_id=$1 ORDER BY created_at", order_id)
+        return [dict(r) for r in rows]
+
+async def save_order_photo(order_id: int, tg_file_id: str, tg_file_type: str,
+                           photo_type: str, note: str, uploaded_by: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO order_photos (order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by)
+            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
+        """, order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by)
+        return dict(row) if row else {}
+
+async def delete_order_photo(photo_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM order_photos WHERE id=$1", photo_id)
+        return res == "DELETE 1"
+
+async def get_photo_by_id(photo_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM order_photos WHERE id=$1", photo_id)
+        return dict(row) if row else {}

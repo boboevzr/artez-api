@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import json as _json
 import aiohttp
-from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request
+from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
@@ -32,6 +32,7 @@ GROUP_ID           = os.getenv("GROUP_ID", "")
 GROUP_ID_ZARAFSHAN = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID     = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
+MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
 SHEETS_URL = os.getenv("SHEETS_URL", "https://script.google.com/macros/s/AKfycbyU5a3pMuTFme3dBNEgu46qzA1sN1Ekw-Q7p39F1Pg872lnnXZEFhJPjuc4TzZNHlpObQ/exec")
 
 # ── Eskiz SMS ──
@@ -2226,6 +2227,76 @@ async def admin_delete_order_item(order_id: int, item_id: int, _=Depends(get_cur
     if not ok:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     return {"ok": True}
+
+@app.get("/api/admin/orders/{order_id}/photos")
+async def get_order_photos(order_id: int, _=Depends(get_current_staff)):
+    photos = await db.get_order_photos(order_id)
+    return {"ok": True, "photos": photos}
+
+@app.post("/api/admin/orders/{order_id}/photos")
+async def upload_order_photo(
+    order_id: int,
+    file: UploadFile,
+    photo_type: str = "before",
+    note: str = "",
+    staff=Depends(get_current_staff),
+):
+    if not BOT_TOKEN or not MEDIA_CHANNEL_ID:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    content_type = file.content_type or ""
+    if content_type.startswith("video/"):
+        tg_method, tg_field, tg_type = "sendVideo",    "video",    "video"
+    elif content_type.startswith("image/"):
+        tg_method, tg_field, tg_type = "sendPhoto",    "photo",    "photo"
+    else:
+        tg_method, tg_field, tg_type = "sendDocument", "document", "document"
+
+    file_bytes = await file.read()
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
+    form.add_field(tg_field, file_bytes, filename=file.filename, content_type=content_type)
+
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form) as r:
+            result = await r.json()
+
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+
+    msg = result["result"]
+    if tg_type == "photo":
+        file_id = msg["photo"][-1]["file_id"]
+    else:
+        file_id = msg[tg_type]["file_id"]
+
+    name = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login","")
+    photo = await db.save_order_photo(order_id, file_id, tg_type, photo_type, note, name)
+    return {"ok": True, "photo": photo}
+
+@app.delete("/api/admin/orders/{order_id}/photos/{photo_id}")
+async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current_staff)):
+    await db.delete_order_photo(photo_id)
+    return {"ok": True}
+
+@app.get("/api/media/{photo_id}")
+async def serve_order_photo(photo_id: int, _=Depends(get_current_staff)):
+    row = await db.get_photo_by_id(photo_id)
+    if not row:
+        raise HTTPException(status_code=404)
+    file_id = row["tg_file_id"]
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}") as r:
+            data = await r.json()
+    if not data.get("ok"):
+        raise HTTPException(status_code=502, detail="Не удалось получить файл")
+    file_path = data["result"]["file_path"]
+    file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    async with aiohttp.ClientSession() as s:
+        async with s.get(file_url) as r:
+            content = await r.read()
+            ct = r.headers.get("Content-Type", "application/octet-stream")
+    from fastapi.responses import Response
+    return Response(content=content, media_type=ct)
 
 @app.patch("/api/admin/orders/{order_id}/discount")
 async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
