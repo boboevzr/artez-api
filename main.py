@@ -2288,7 +2288,15 @@ async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current
     return {"ok": True}
 
 @app.get("/api/media/{photo_id}")
-async def serve_order_photo(photo_id: int, _=Depends(get_current_staff)):
+async def serve_order_photo(photo_id: int, t: str = None, authorization: str = Header(None)):
+    # Принимаем токен как ?t=TOKEN (для img src) или как Bearer заголовок
+    token = t or (authorization[7:] if authorization and authorization.startswith("Bearer ") else None)
+    if not token:
+        raise HTTPException(status_code=401)
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401)
     row = await db.get_photo_by_id(photo_id)
     if not row:
         raise HTTPException(status_code=404)
