@@ -208,6 +208,20 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_crm_clients_status ON crm_clients(status);
         """)
 
+    # ── Push subscriptions ──────────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS push_subscriptions (
+            id         SERIAL PRIMARY KEY,
+            staff_id   INTEGER NOT NULL,
+            endpoint   TEXT    NOT NULL UNIQUE,
+            p256dh     TEXT    NOT NULL,
+            auth       TEXT    NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_push_staff_id ON push_subscriptions(staff_id);
+        """)
+
     # ── Шаг 3б: таблица contacts (справочник) ───────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
@@ -1657,3 +1671,23 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
                 LIMIT $1
             """, limit)
         return [dict(r) for r in rows]
+
+async def upsert_push_subscription(staff_id: int, endpoint: str, p256dh: str, auth: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO push_subscriptions (staff_id, endpoint, p256dh, auth)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT (endpoint) DO UPDATE SET staff_id=$1, p256dh=$3, auth=$4
+        """, staff_id, endpoint, p256dh, auth)
+
+async def get_push_subscriptions(staff_id: int):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch(
+            "SELECT * FROM push_subscriptions WHERE staff_id=$1", staff_id)
+
+async def delete_push_subscription(endpoint: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM push_subscriptions WHERE endpoint=$1", endpoint)

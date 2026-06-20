@@ -5,6 +5,7 @@ import logging
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+import json as _json
 import aiohttp
 from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +24,8 @@ JWT_ALGORITHM  = "HS256"
 JWT_EXPIRE_DAYS = 30
 SMS_CODE_TTL_MIN = 5
 ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
+VAPID_PRIVATE  = os.getenv("VAPID_PRIVATE", "")
+VAPID_PUBLIC   = os.getenv("VAPID_PUBLIC", "")
 
 BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
 GROUP_ID           = os.getenv("GROUP_ID", "")
@@ -69,8 +72,36 @@ async def startup():
     await db.init_db()
     asyncio.create_task(_tg_reminder_worker())
 
+async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None):
+    if not VAPID_PRIVATE or not VAPID_PUBLIC:
+        return
+    try:
+        from pywebpush import webpush, WebPushException
+        subs = await db.get_push_subscriptions(staff_id)
+        for sub in subs:
+            try:
+                payload = _json.dumps({"title": title, "body": body, "lead_id": lead_id})
+                webpush(
+                    subscription_info={"endpoint": sub["endpoint"],
+                                       "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
+                    data=payload,
+                    vapid_private_key=VAPID_PRIVATE,
+                    vapid_claims={"sub": "mailto:admin@artez.uz"},
+                )
+            except Exception as ex:
+                resp = getattr(ex, 'response', None)
+                if resp and resp.status_code in (404, 410):
+                    await db.delete_push_subscription(sub["endpoint"])
+                else:
+                    logging.warning(f"web_push error for sub {sub['id']}: {ex}")
+    except ImportError:
+        logging.warning("pywebpush not installed, skipping web push")
+    except Exception as e:
+        logging.warning(f"send_web_push error: {e}")
+
+
 async def _tg_reminder_worker():
-    """Каждую минуту проверяет напоминания и шлёт в Telegram."""
+    """Каждую минуту проверяет напоминания и шлёт в Telegram + Web Push."""
     await asyncio.sleep(10)
     while True:
         try:
@@ -95,6 +126,14 @@ async def _tg_reminder_worker():
                                 f"📞 {r['client_phone']}\n"
                                 f"💬 {msg}")
                         await send_tg(LEADS_GROUP_ID, text)
+                    # Web Push (если сотрудник подписан)
+                    if r.get("staff_id"):
+                        asyncio.create_task(send_web_push(
+                            r["staff_id"],
+                            f"🔔 Перезвонить: {client}",
+                            f"📞 {r['client_phone']}" + (f"\n{msg}" if msg != "Запланированный звонок" else ""),
+                            r["lead_id"]
+                        ))
                     await db.mark_reminder_sent(r["id"], "tg")
         except Exception as e:
             logging.warning(f"TG reminder worker error: {e}")
@@ -794,6 +833,28 @@ async def get_due_reminders(staff=Depends(require_perm("leads"))):
         result.append(d)
         await db.mark_reminder_sent(r["id"], "browser")
     return {"ok": True, "reminders": result}
+
+@app.get("/api/push/vapid-key")
+async def get_vapid_key():
+    return {"public_key": VAPID_PUBLIC}
+
+@app.post("/api/staff/push-subscription")
+async def save_push_subscription(body: dict, staff=Depends(get_current_staff)):
+    endpoint = body.get("endpoint")
+    keys     = body.get("keys") or {}
+    p256dh   = keys.get("p256dh")
+    auth     = keys.get("auth")
+    if not endpoint or not p256dh or not auth:
+        raise HTTPException(400, "Неверные данные подписки")
+    await db.upsert_push_subscription(staff["id"], endpoint, p256dh, auth)
+    return {"ok": True}
+
+@app.delete("/api/staff/push-subscription")
+async def remove_push_subscription(body: dict, staff=Depends(get_current_staff)):
+    endpoint = body.get("endpoint")
+    if endpoint:
+        await db.delete_push_subscription(endpoint)
+    return {"ok": True}
 
 @app.delete("/api/staff/leads/{lead_id}")
 async def delete_lead_staff(lead_id: int, body: dict, _=Depends(require_perm("leads"))):
