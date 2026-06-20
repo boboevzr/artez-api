@@ -104,22 +104,35 @@ async def send_tg(chat_id, text: str):
 
 
 async def _notify_new_lead(lead: dict, staff: dict):
-    code    = lead.get("lead_code") or f"#{lead.get('id')}"
-    client  = lead.get("client_name") or "—"
-    phone   = lead.get("client_phone") or "—"
-    note    = lead.get("note") or "—"
-    branch  = lead.get("branch") or "—"
+    group_id = await _get_cfg("leads_group_id")
+    if not group_id:
+        return
+    template_ru = await _get_cfg("lead_notify_ru")
+    template_uz = await _get_cfg("lead_notify_uz")
+
     role    = staff.get("role", "")
+    source  = "🤝 Агент" if role == "agent" else "👤 Сотрудник"
     creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "—")
 
-    source = "🤝 Агент" if role == "agent" else "👤 Сотрудник"
-    text = (f"🎯 Новый лид {code}\n\n"
-            f"👤 {client}\n"
-            f"📞 {phone}\n"
-            f"🏢 Филиал: {branch}\n"
-            f"💬 {note}\n\n"
-            f"📌 {source}: {creator}")
-    await send_tg(LEADS_GROUP_ID, text)
+    vars_ = {
+        "lead_code":    lead.get("lead_code") or f"#{lead.get('id')}",
+        "client_name":  lead.get("client_name") or "—",
+        "client_phone": lead.get("client_phone") or "—",
+        "branch":       lead.get("branch") or "—",
+        "note":         lead.get("note") or "—",
+        "source":       source,
+        "creator":      creator,
+    }
+
+    parts = []
+    if template_ru:
+        parts.append(template_ru.format_map(vars_))
+    if template_uz and template_uz != template_ru:
+        parts.append(template_uz.format_map(vars_))
+
+    text = "\n\n—\n\n".join(parts) if parts else ""
+    if text:
+        await send_tg(group_id, text)
 
 
 # ══════════════════════════════════════
@@ -2039,6 +2052,24 @@ SITE_SETTINGS_DEFAULTS = {
     "osago_partner_promo": "ARTEZ",
     # Google Sheets
     "sheets_url":          SHEETS_URL,
+    # Лиды — группа и шаблоны уведомлений
+    "leads_group_id":      LEADS_GROUP_ID,
+    "lead_notify_ru": (
+        "🎯 Новый лид {lead_code}\n\n"
+        "👤 {client_name}\n"
+        "📞 {client_phone}\n"
+        "🏢 Филиал: {branch}\n"
+        "💬 {note}\n\n"
+        "📌 {source}: {creator}"
+    ),
+    "lead_notify_uz": (
+        "🎯 Yangi lid {lead_code}\n\n"
+        "👤 {client_name}\n"
+        "📞 {client_phone}\n"
+        "🏢 Filial: {branch}\n"
+        "💬 {note}\n\n"
+        "📌 {source}: {creator}"
+    ),
 }
 
 async def _get_cfg(key: str) -> str:
@@ -2090,6 +2121,9 @@ class SiteSettings(BaseModel):
     osago_partner_phone: str | None = None
     osago_partner_promo: str | None = None
     sheets_url:          str | None = None
+    leads_group_id:      str | None = None
+    lead_notify_ru:      str | None = None
+    lead_notify_uz:      str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
