@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import aiohttp
 from fastapi import FastAPI, HTTPException, Depends, Header, Body
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from passlib.context import CryptContext
@@ -1587,11 +1588,14 @@ async def _find_site_user_for_bot(tg_id: int, phone: str | None):
 @app.get("/api/agent/status-by-tg/{tg_id}")
 async def agent_status_by_tg_endpoint(tg_id: int, phone: str | None = None):
     """Для бота: проверить статус агента по tg_id без авторизации."""
-    staff = await db.get_staff_by_tg_id(str(tg_id))
-    if staff and staff["role"] == "agent":
-        return {"ok": True, "is_agent": True, "has_site_account": True}
-    site_user = await _find_site_user_for_bot(tg_id, phone)
-    return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
+    try:
+        staff = await db.get_staff_by_tg_id(str(tg_id))
+        if staff and staff["role"] == "agent":
+            return {"ok": True, "is_agent": True, "has_site_account": True}
+        site_user = await _find_site_user_for_bot(tg_id, phone)
+        return {"ok": True, "is_agent": False, "has_site_account": bool(site_user)}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
 @app.post("/api/agent/apply-by-tg")
 async def agent_apply_by_tg(req: ApplyByTgRequest):
