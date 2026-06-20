@@ -279,6 +279,8 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_lead_reminders_staff ON lead_reminders(staff_id, sent_browser);
         """)
 
+    await ensure_agent_notifications_table()
+
     # ── Шаг 4в: позиции услуг в заказах ─────────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
@@ -1045,6 +1047,58 @@ async def get_pending_tg_reminders():
             JOIN staff s  ON s.id  = r.staff_id
             WHERE r.remind_at <= NOW() AND r.sent_tg = FALSE
         """)
+
+# ── agent_notifications ───────────────────────────────────────────────
+
+async def ensure_agent_notifications_table():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS agent_notifications (
+                id         SERIAL PRIMARY KEY,
+                agent_id   INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+                lead_id    INTEGER NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+                action     VARCHAR(50) NOT NULL,
+                message    TEXT,
+                is_read    BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_notif_agent ON agent_notifications(agent_id, is_read);
+        """)
+
+async def create_agent_notification(agent_id: int, lead_id: int, action: str, message: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO agent_notifications (agent_id, lead_id, action, message)
+            VALUES ($1,$2,$3,$4)
+        """, agent_id, lead_id, action, message)
+
+async def get_agent_notifications(agent_id: int, limit: int = 50):
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT n.*, l.client_name, l.client_phone, l.lead_code
+            FROM agent_notifications n
+            JOIN leads l ON l.id = n.lead_id
+            WHERE n.agent_id = $1
+            ORDER BY n.created_at DESC LIMIT $2
+        """, agent_id, limit)
+
+async def count_unread_agent_notifications(agent_id: int) -> int:
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT COUNT(*) FROM agent_notifications WHERE agent_id=$1 AND is_read=FALSE",
+            agent_id) or 0
+
+async def mark_agent_notifications_read(agent_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE agent_notifications SET is_read=TRUE WHERE agent_id=$1 AND is_read=FALSE",
+            agent_id)
+
 
 async def convert_lead_to_order(lead_id: int, order_num: str, converted_by: int):
     if not pool: return

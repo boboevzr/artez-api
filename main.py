@@ -103,6 +103,59 @@ async def send_tg(chat_id, text: str):
         logging.warning(f"send_tg error: {e}")
 
 
+_STATUS_LABELS_RU = {
+    "new":       "🆕 Новый",
+    "contacted": "📞 Связались с клиентом",
+    "no_answer": "📵 Не дозвонились",
+    "callback":  "🔔 Перезвонить",
+    "converted": "🏆 Стал заказом!",
+    "lost":      "❌ Закрыт как потерянный",
+}
+_STATUS_LABELS_UZ = {
+    "new":       "🆕 Yangi",
+    "contacted": "📞 Mijoz bilan bog'landi",
+    "no_answer": "📵 Qo'ng'iroq qilmadi",
+    "callback":  "🔔 Qayta qo'ng'iroq",
+    "converted": "🏆 Buyurtmaga aylandi!",
+    "lost":      "❌ Yo'qotilgan deb yopildi",
+}
+
+async def _notify_agent_status(lead_id: int, status: str, note: str):
+    lead = await db.get_lead_by_id(lead_id)
+    if not lead or not lead["volunteer_id"]:
+        return
+    agent = await db.get_staff_by_id(lead["volunteer_id"])
+    if not agent:
+        return
+
+    code   = lead.get("lead_code") or f"#{lead_id}"
+    client = lead.get("client_name") or lead.get("client_phone") or "—"
+    phone  = lead.get("client_phone") or "—"
+    label_ru = _STATUS_LABELS_RU.get(status, status)
+    label_uz = _STATUS_LABELS_UZ.get(status, status)
+
+    msg_ru = (f"🎯 Обновление по вашему лиду {code}\n\n"
+              f"👤 {client}\n📞 {phone}\n\n"
+              f"Статус: {label_ru}\n"
+              + (f"💬 {note}" if note and note not in _STATUS_LABELS_RU.values() else ""))
+    msg_uz = (f"🎯 Sizning lidingiz bo'yicha yangilik {code}\n\n"
+              f"👤 {client}\n📞 {phone}\n\n"
+              f"Holat: {label_uz}\n"
+              + (f"💬 {note}" if note and note not in _STATUS_LABELS_RU.values() else ""))
+
+    # В личный кабинет (таблица)
+    await db.create_agent_notification(agent["id"], lead_id, f"status_{status}", msg_ru)
+
+    # В Telegram личку или группу
+    tg_id = agent.get("tg_id")
+    if tg_id:
+        await send_tg(tg_id, msg_ru + "\n\n" + msg_uz)
+    else:
+        leads_group = await _get_cfg("leads_group_id")
+        agent_name  = " ".join(filter(None, [agent.get("last_name"), agent.get("first_name")])) or agent.get("login", "Агент")
+        await send_tg(leads_group, f"📬 Уведомление для агента {agent_name}\n\n" + msg_ru)
+
+
 async def _notify_new_lead(lead: dict, staff: dict):
     group_id = await _get_cfg("leads_group_id")
     if not group_id:
@@ -670,6 +723,23 @@ async def update_lead_status(lead_id: int, body: dict,
     if sched and operator_id:
         await db.add_lead_reminder(lead_id, operator_id, remind_at=sched,
                                    message=f"Перезвонить клиенту — лид {lead_id}")
+    # Уведомить агента если лид агентский
+    asyncio.create_task(_notify_agent_status(lead_id, status, note))
+    return {"ok": True}
+
+@app.get("/api/staff/my-notifications")
+async def get_my_notifications(staff=Depends(get_current_staff)):
+    rows = await db.get_agent_notifications(staff["id"])
+    return {"ok": True, "notifications": [dict(r) for r in rows]}
+
+@app.get("/api/staff/my-notifications/unread-count")
+async def get_unread_count(staff=Depends(get_current_staff)):
+    count = await db.count_unread_agent_notifications(staff["id"])
+    return {"ok": True, "count": count}
+
+@app.post("/api/staff/my-notifications/read")
+async def mark_notifications_read(staff=Depends(get_current_staff)):
+    await db.mark_agent_notifications_read(staff["id"])
     return {"ok": True}
 
 @app.get("/api/staff/leads/{lead_id}/calls")
