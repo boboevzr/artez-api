@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import json as _json
 import aiohttp
-from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
@@ -2236,9 +2236,9 @@ async def get_order_photos(order_id: int, _=Depends(get_current_staff)):
 @app.post("/api/admin/orders/{order_id}/photos")
 async def upload_order_photo(
     order_id: int,
-    file: UploadFile,
-    photo_type: str = "before",
-    note: str = "",
+    file: UploadFile = File(...),
+    photo_type: str = Form("before"),
+    note: str = Form(""),
     staff=Depends(get_current_staff),
 ):
     if not BOT_TOKEN or not MEDIA_CHANNEL_ID:
