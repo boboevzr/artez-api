@@ -1025,16 +1025,18 @@ async def mark_reminder_sent(reminder_id: int, channel: str = "browser"):
         await conn.execute(f"UPDATE lead_reminders SET {col}=TRUE WHERE id=$1", reminder_id)
 
 async def get_pending_tg_reminders():
-    """Для фонового воркера — напоминания для отправки в Telegram."""
+    """Для фонового воркера — все напоминания для отправки в Telegram."""
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch("""
             SELECT r.*, l.client_name, l.client_phone, l.lead_code,
-                   s.tg_id AS staff_tg_id, s.first_name AS staff_name
+                   s.tg_id AS staff_tg_id,
+                   s.first_name AS staff_first_name,
+                   s.last_name  AS staff_last_name
             FROM lead_reminders r
             JOIN leads l  ON l.id  = r.lead_id
             JOIN staff s  ON s.id  = r.staff_id
-            WHERE r.remind_at <= NOW() AND r.sent_tg = FALSE AND s.tg_id IS NOT NULL
+            WHERE r.remind_at <= NOW() AND r.sent_tg = FALSE
         """)
 
 async def convert_lead_to_order(lead_id: int, order_num: str, converted_by: int):

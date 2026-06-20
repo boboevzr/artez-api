@@ -26,6 +26,7 @@ ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
 BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
 GROUP_ID           = os.getenv("GROUP_ID", "")
 GROUP_ID_ZARAFSHAN = os.getenv("GROUP_ID_ZARAFSHAN", "")
+LEADS_GROUP_ID     = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 SHEETS_URL = os.getenv("SHEETS_URL", "https://script.google.com/macros/s/AKfycbyU5a3pMuTFme3dBNEgu46qzA1sN1Ekw-Q7p39F1Pg872lnnXZEFhJPjuc4TzZNHlpObQ/exec")
 
@@ -63,21 +64,36 @@ async def _tg_reminder_worker():
     await asyncio.sleep(10)
     while True:
         try:
-            rows = await db.get_pending_tg_reminders()
-            for r in rows:
-                tg_id = r["staff_tg_id"]
-                lead_code = r["lead_code"] or f"#{r['lead_id']}"
-                name = r["client_name"] or r["client_phone"]
-                msg = r["message"] or "Запланированный звонок"
-                text = (f"🔔 Напоминание\n"
-                        f"Лид {lead_code} — {name}\n"
-                        f"📞 {r['client_phone']}\n"
-                        f"💬 {msg}")
-                url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-                async with aiohttp.ClientSession() as s:
-                    await s.post(url, json={"chat_id": tg_id, "text": text},
-                                 timeout=aiohttp.ClientTimeout(total=5))
-                await db.mark_reminder_sent(r["id"], "tg")
+            if BOT_TOKEN:
+                rows = await db.get_pending_tg_reminders()
+                for r in rows:
+                    lead_code = r["lead_code"] or f"#{r['lead_id']}"
+                    client    = r["client_name"] or r["client_phone"]
+                    msg       = r["message"] or "Запланированный звонок"
+                    tg_id     = r["staff_tg_id"]
+                    staff_name = " ".join(filter(None, [r.get("staff_last_name"), r.get("staff_first_name")])) or "Сотрудник"
+
+                    if tg_id:
+                        # личка сотруднику
+                        text = (f"⏰ Напоминание о звонке\n\n"
+                                f"Лид {lead_code} — {client}\n"
+                                f"📞 {r['client_phone']}\n"
+                                f"💬 {msg}")
+                        chat_id = tg_id
+                    else:
+                        # fallback в группу
+                        text = (f"⏰ Напоминание ({staff_name})\n\n"
+                                f"Лид {lead_code} — {client}\n"
+                                f"📞 {r['client_phone']}\n"
+                                f"💬 {msg}")
+                        chat_id = LEADS_GROUP_ID
+
+                    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+                    async with aiohttp.ClientSession() as s:
+                        resp = await s.post(url, json={"chat_id": chat_id, "text": text},
+                                            timeout=aiohttp.ClientTimeout(total=5))
+                        if resp.status == 200:
+                            await db.mark_reminder_sent(r["id"], "tg")
         except Exception as e:
             logging.warning(f"TG reminder worker error: {e}")
         await asyncio.sleep(60)
