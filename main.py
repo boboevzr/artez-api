@@ -6,8 +6,9 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 
 import aiohttp
-from fastapi import FastAPI, HTTPException, Depends, Header, Body
+from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from passlib.context import CryptContext
 from jose import jwt, JWTError
@@ -52,6 +53,15 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logging.error(f"Unhandled exception on {request.method} {request.url.path}: {type(exc).__name__}: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
 
 
 @app.on_event("startup")
