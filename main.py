@@ -2251,10 +2251,19 @@ async def upload_order_photo(
     else:
         tg_method, tg_field, tg_type = "sendDocument", "document", "document"
 
+    # Получаем номер заказа для подписи
+    order_row = await db.get_order_by_id(order_id)
+    order_num = order_row.get("order_num", f"#{order_id}") if order_row else f"#{order_id}"
+    type_labels = {"before": "До", "after": "После", "damage": "Повреждение"}
+    type_label  = type_labels.get(photo_type, photo_type)
+    staff_name  = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login","")
+    caption = f"📷 {type_label}\n🧾 Заказ: {order_num}\n👤 {staff_name}"
+
     file_bytes = await file.read()
     form = aiohttp.FormData()
     form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
     form.add_field(tg_field, file_bytes, filename=file.filename, content_type=content_type)
+    form.add_field("caption", caption)
 
     async with aiohttp.ClientSession() as s:
         async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form) as r:
