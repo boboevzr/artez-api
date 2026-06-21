@@ -1021,7 +1021,7 @@ async def update_lead_status(lead_id: int, status: str):
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None
-    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status"}
+    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
