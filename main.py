@@ -473,7 +473,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "callcenter": ["leads", "orders", "clients"],
     "driver":     ["orders", "status_delivery"],
     "logistics":  ["orders", "status"],
-    "washer":     ["orders_workshop", "status_wash"],
+    "washer":     ["orders", "status_wash"],
     "agent":      ["leads_own"],  # агент видит только свои лиды
 }
 
@@ -529,9 +529,6 @@ def require_perm(permission: str):
         if staff["role"] == "admin":  # admin has all permissions
             return staff
         perms = ROLE_PERMISSIONS.get(staff["role"], [])
-        # orders_workshop даёт доступ к эндпоинту orders (но с фильтрацией)
-        if permission == "orders" and "orders_workshop" in perms:
-            return staff
         if permission not in perms:
             raise HTTPException(status_code=403, detail="Нет доступа")
         return staff
@@ -587,6 +584,7 @@ def _staff_public(s: dict) -> dict:
         "can_edit_items":      s.get("can_edit_items", True),
         "can_measure":         s.get("can_measure", False),
         "can_approve_measure": s.get("can_approve_measure", False),
+        "order_stages":        s.get("order_stages") or None,
         "plain_password": s.get("plain_password"),
     }
 
@@ -943,18 +941,29 @@ async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
 # ══════════════════════════════════════
 #  ЗАЯВКИ — для сотрудников
 # ══════════════════════════════════════
-_WORKSHOP_STATUSES = {"received", "washing", "drying", "packing", "ready"}
+
+# Какие статусы видит сотрудник в зависимости от этапа
+_STAGE_STATUSES = {
+    "pickup":  {"new", "confirmed", "pickup"},
+    "wash":    {"received", "washing"},
+    "dry":     {"washing", "drying"},
+    "pack":    {"drying", "packing", "ready"},
+    "deliver": {"ready", "delivery", "delivered"},
+}
 
 @app.get("/api/staff/orders")
 async def staff_orders(status: str = None, branch: str = None,
                        staff=Depends(require_perm("orders"))):
     rows = await db.get_admin_orders(status=status, limit=200)
     result = [dict(r) for r in rows]
-    # Если у сотрудника разрешение orders_workshop — показывать только мастерские статусы
-    role  = staff.get("role", "")
-    perms = ROLE_PERMISSIONS.get(role, []) + (staff.get("extra_permissions") or [])
-    if "orders_workshop" in perms and "orders" not in perms:
-        result = [o for o in result if o.get("status") in _WORKSHOP_STATUSES]
+    # Фильтр по этапам: если order_stages заданы — показывать только нужные статусы
+    stages_raw = staff.get("order_stages") or ""
+    stages = [s.strip() for s in stages_raw.split(",") if s.strip()]
+    if stages:
+        visible = set()
+        for stage in stages:
+            visible |= _STAGE_STATUSES.get(stage, set())
+        result = [o for o in result if o.get("status") in visible]
     if branch:
         result = [o for o in result if o.get("branch") == branch]
     return {"ok": True, "orders": result}
@@ -2534,13 +2543,15 @@ async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),
 async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_edit_items:      bool = Body(True,  embed=True),
     can_measure:         bool = Body(False, embed=True),
-    can_approve_measure: bool = Body(False, embed=True)):
+    can_approve_measure: bool = Body(False, embed=True),
+    order_stages:        str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            """UPDATE staff SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4
-               WHERE id=$1 RETURNING id, can_edit_items, can_measure, can_approve_measure""",
-            staff_id, can_edit_items, can_measure, can_approve_measure)
+            """UPDATE staff
+               SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4, order_stages=$5
+               WHERE id=$1 RETURNING id, can_edit_items, can_measure, can_approve_measure, order_stages""",
+            staff_id, can_edit_items, can_measure, can_approve_measure, order_stages or None)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
