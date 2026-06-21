@@ -242,29 +242,63 @@ async def _notify_new_lead(lead: dict, staff: dict):
     enabled = await _get_cfg("leads_group_enabled")
     if enabled not in ("1", "true"):
         return
-    group_id = await _get_cfg("leads_group_id")
+
+    # Роутинг по филиалу: своя группа или общая fallback
+    branch = lead.get("branch", "") or ""
+    if branch in ("zarafshan", "Зарафшан"):
+        group_id = await _get_cfg("leads_group_zarafshan") or await _get_cfg("leads_group_id")
+    elif branch in ("navoi", "Навои"):
+        group_id = await _get_cfg("leads_group_navoi") or await _get_cfg("leads_group_id")
+    else:
+        group_id = await _get_cfg("leads_group_id")
+
     if not group_id:
         return
-    template_ru = await _get_cfg("lead_notify_ru")
-    template_uz = await _get_cfg("lead_notify_uz")
+
+    template = await _get_cfg("lead_notify_ru")
 
     role    = staff.get("role", "")
-    source  = "🤝 Агент" if role == "agent" else "👤 Сотрудник"
+    if role == "agent":   source = "🤝 Агент"
+    elif role == "site":  source = "🌐 Сайт"
+    else:                 source = "👤 Сотрудник"
     creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "—")
 
     vars_ = {
         "lead_code":    lead.get("lead_code") or f"#{lead.get('id')}",
         "client_name":  lead.get("client_name") or "—",
         "client_phone": lead.get("client_phone") or "—",
-        "branch":       lead.get("branch") or "—",
+        "branch":       branch_ru(branch) if branch else "—",
         "note":         lead.get("note") or "—",
         "source":       source,
         "creator":      creator,
     }
 
-    text = template_ru or template_uz
-    if text:
-        await send_tg(group_id, text.format_map(vars_))
+    text = template
+    if not text:
+        return
+
+    try:
+        msg_text = text.format_map(vars_)
+    except Exception:
+        msg_text = text
+
+    # Кнопка "Взять лид" — только если лид не занят
+    lead_id  = lead.get("id")
+    keyboard = None
+    if lead_id and not lead.get("assigned_to"):
+        keyboard = {"inline_keyboard": [[
+            {"text": "✋ Взять лид", "callback_data": f"take_lead_{lead_id}"}
+        ]]}
+
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": str(group_id), "text": msg_text}
+        if keyboard:
+            payload["reply_markup"] = keyboard
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
+    except Exception as e:
+        logging.warning(f"_notify_new_lead error: {e}")
 
 
 # ══════════════════════════════════════
@@ -2776,8 +2810,10 @@ SITE_SETTINGS_DEFAULTS = {
     "osago_partner_promo": "ARTEZ",
     # Google Sheets
     "sheets_url":          SHEETS_URL,
-    # Лиды — группа и шаблоны уведомлений
-    "leads_group_id":      LEADS_GROUP_ID,
+    # Лиды — группы и шаблон уведомлений
+    "leads_group_id":          LEADS_GROUP_ID,
+    "leads_group_zarafshan":   "",
+    "leads_group_navoi":       "",
     "leads_group_enabled": "0",
     "lead_notify_ru": (
         "🎯 Новый лид {lead_code}\n\n"
@@ -2846,10 +2882,11 @@ class SiteSettings(BaseModel):
     osago_partner_phone: str | None = None
     osago_partner_promo: str | None = None
     sheets_url:          str | None = None
-    leads_group_id:       str | None = None
-    leads_group_enabled:  str | None = None
-    lead_notify_ru:       str | None = None
-    lead_notify_uz:       str | None = None
+    leads_group_id:          str | None = None
+    leads_group_zarafshan:   str | None = None
+    leads_group_navoi:       str | None = None
+    leads_group_enabled:     str | None = None
+    lead_notify_ru:          str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
@@ -2923,8 +2960,8 @@ async def create_order_from_site(order: OrderRequest):
         await db.add_lead_call(lead["id"], None, action="created",
                                note=f"Лид создан с сайта ({lead_code})")
 
-    lead_id = lead["id"] if lead else None
-    asyncio.create_task(_notify_group_site_lead(lead_code, order, lead_id=lead_id))
+    site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
+    asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
     await notify_sheets_new_order(lead_code, order)
 
     await db.upsert_crm_client(
