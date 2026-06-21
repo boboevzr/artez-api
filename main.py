@@ -734,7 +734,9 @@ async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"
     return {"ok": True, "staff": _staff_public(dict(row))}
 
 @app.delete("/api/admin/staff/{staff_id}")
-async def delete_staff(staff_id: int, _=Depends(get_admin)):
+async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     if not db.pool:
         raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
