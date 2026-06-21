@@ -1554,8 +1554,8 @@ async def create_empty_items(order_id: int, count: int) -> list:
     async with pool.acquire() as conn:
         for _ in range(count):
             row = await conn.fetchrow("""
-                INSERT INTO order_items (order_id, service, sqm, price_per_sqm, total_sum)
-                VALUES ($1, '', 0, 0, 0) RETURNING *
+                INSERT INTO order_items (order_id, service, sqm, price_per_sqm)
+                VALUES ($1, '', 0, 0) RETURNING *
             """, order_id)
             if row:
                 result.append(dict(row))
