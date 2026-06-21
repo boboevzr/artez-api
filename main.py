@@ -2208,6 +2208,14 @@ async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depend
         width_cm=req.width_cm, length_cm=req.length_cm)
     return {"ok": True, "item": item}
 
+@app.post("/api/admin/orders/{order_id}/items/bulk")
+async def admin_bulk_create_items(order_id: int, count: int = Body(..., embed=True),
+                                   _=Depends(get_current_staff)):
+    if count < 1 or count > 50:
+        raise HTTPException(status_code=400, detail="Количество от 1 до 50")
+    items = await db.create_empty_items(order_id, count)
+    return {"ok": True, "items": items, "count": len(items)}
+
 @app.put("/api/admin/orders/{order_id}/items/{item_id}")
 async def admin_update_order_item(order_id: int, item_id: int,
                                    req: OrderItemRequest, _=Depends(get_current_staff)):

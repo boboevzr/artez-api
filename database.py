@@ -1548,6 +1548,16 @@ async def create_order_item(order_id: int, service: str, sqm: float,
         """, order_id, service, width_cm, length_cm, sqm, price_per_sqm)
         return dict(row) if row else {}
 
+async def create_empty_items(order_id: int, count: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            INSERT INTO order_items (order_id, service, sqm, price_per_sqm, total_sum)
+            SELECT $1, '', 0, 0, 0 FROM generate_series(1, $2)
+            RETURNING *
+        """, order_id, count)
+        return [dict(r) for r in rows]
+
 async def update_order_item(item_id: int, **kwargs) -> dict:
     if not pool: return {}
     allowed = {"service", "width_cm", "length_cm", "sqm", "price_per_sqm"}
