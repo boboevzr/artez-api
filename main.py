@@ -625,6 +625,7 @@ class StaffCreateRequest(BaseModel):
     salary_rate: float | None = None
     hire_date: str | None = None
     note: str | None = None
+    gender: str = "M"
 
 def _staff_public(s: dict) -> dict:
     return {
@@ -646,6 +647,7 @@ def _staff_public(s: dict) -> dict:
         "can_create_order":    s.get("can_create_order", True),
         "can_confirm_order":   s.get("can_confirm_order", True),
         "order_stages":        s.get("order_stages") or None,
+        "gender":              s.get("gender", "M"),
         "plain_password": s.get("plain_password"),
     }
 
@@ -709,7 +711,7 @@ async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))
 
 @app.patch("/api/staff/{staff_id}")
 async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"))):
-    allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username"}
+    allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
@@ -988,6 +990,7 @@ async def telegram_webhook(request: Request):
 
     staff_id   = staff["id"]
     staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get("login","")
+    took_verb  = "Взяла" if staff.get("gender") == "F" else "Взял"
 
     if not db.pool:
         await _tg_answer_callback(cq_id, "❌ Ошибка базы данных", alert=True)
@@ -1022,7 +1025,7 @@ async def telegram_webhook(request: Request):
     await _tg_answer_callback(cq_id, f"✅ Лид взят! Откройте приложение.")
 
     # Редактируем сообщение — убираем кнопку, добавляем кто взял
-    new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ Взял: {staff_name}"
+    new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {took_verb}: {staff_name}"
     await _tg_edit_message(chat_id, message_id, new_text)
 
     return {"ok": True}

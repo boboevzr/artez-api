@@ -112,6 +112,7 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS order_stages        VARCHAR(100) DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_create_order   BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS assigned_to        INTEGER REFERENCES staff(id) DEFAULT NULL",
         # Заполнить lead_code для лидов у которых он NULL
         """UPDATE leads SET lead_code = 'L-' || LPAD(id::text, 4, '0')
@@ -915,8 +916,8 @@ async def create_staff(data: dict) -> int:
         return await conn.fetchval("""
             INSERT INTO staff (first_name, last_name, middle_name, phone, login, password_hash,
                                plain_password, role, position, branch, tg_id, tg_username,
-                               salary_type, salary_rate, hire_date, note)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                               salary_type, salary_rate, hire_date, note, gender)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
             RETURNING id
         """, data["first_name"], data.get("last_name"), data.get("middle_name"),
             data.get("phone"), data["login"], data["password_hash"],
@@ -924,13 +925,13 @@ async def create_staff(data: dict) -> int:
             data.get("role","callcenter"), data.get("position"), data.get("branch"),
             data.get("tg_id"), data.get("tg_username"),
             data.get("salary_type"), data.get("salary_rate"),
-            data.get("hire_date"), data.get("note"))
+            data.get("hire_date"), data.get("note"), data.get("gender","M"))
 
 async def update_staff(staff_id: int, **kwargs):
     if not pool or not kwargs: return
     allowed = {"first_name","last_name","middle_name","phone","login","role","position",
                "branch","tg_id","tg_username","salary_type","salary_rate","hire_date",
-               "note","active","is_active"}
+               "note","active","is_active","gender"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if "is_active" in fields:
         fields["active"] = fields.pop("is_active")
