@@ -1606,17 +1606,17 @@ async def confirm_item_measure(item_id: int) -> dict:
             "UPDATE order_items SET measure_status='confirmed' WHERE id=$1 RETURNING *", item_id)
         return dict(row) if row else {}
 
-async def correct_item_measure(item_id: int, actual_width_cm: float, actual_length_cm: float) -> dict:
+async def save_measure_dims(item_id: int, width_cm: float, length_cm: float) -> dict:
     if not pool: return {}
-    actual_sqm = round(actual_width_cm * actual_length_cm / 10000, 3)
+    sqm = round(width_cm * length_cm / 10000, 3)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_items
-            SET actual_width_cm=$2, actual_length_cm=$3, actual_sqm=$4,
-                actual_total_sum=ROUND($4 * price_per_sqm, 2),
-                measure_status='corrected'
-            WHERE id=$1 RETURNING *
-        """, item_id, actual_width_cm, actual_length_cm, actual_sqm)
+            SET width_cm=$2, length_cm=$3, sqm=$4,
+                total_sum=ROUND($4 * price_per_sqm, 2)
+            WHERE id=$1 AND measure_status != 'approved'
+            RETURNING *
+        """, item_id, width_cm, length_cm, sqm)
         return dict(row) if row else {}
 
 async def update_item_washer(item_id: int, washer_login: str) -> dict:
@@ -1954,7 +1954,7 @@ async def submit_item_measure(item_id: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_items SET measure_status='submitted', reject_note=NULL
-            WHERE id=$1 AND actual_width_cm IS NOT NULL AND actual_length_cm IS NOT NULL
+            WHERE id=$1 AND width_cm IS NOT NULL AND length_cm IS NOT NULL
             RETURNING *
         """, item_id)
         return dict(row) if row else {}

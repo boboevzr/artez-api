@@ -2416,16 +2416,10 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                               actual_width_cm: float = Body(None, embed=True),
                               actual_length_cm: float = Body(None, embed=True),
                               note: str = Body("", embed=True)):
-    if action == "confirm":
-        item = await db.confirm_item_measure(item_id)
-    elif action == "correct":
-        if not actual_width_cm or not actual_length_cm:
-            raise HTTPException(status_code=400, detail="Укажите фактические размеры")
-        item = await db.correct_item_measure(item_id, actual_width_cm, actual_length_cm)
-    elif action == "submit":
+    if action == "submit":
         if not actual_width_cm or not actual_length_cm:
             raise HTTPException(status_code=400, detail="Укажите ширину и длину")
-        await db.correct_item_measure(item_id, actual_width_cm, actual_length_cm)
+        await db.save_measure_dims(item_id, actual_width_cm, actual_length_cm)
         media = await db.get_item_media(item_id)
         if not media:
             raise HTTPException(status_code=400, detail="Добавьте фото или видео замера")
