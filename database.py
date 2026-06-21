@@ -113,6 +113,9 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_create_order   BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS assigned_to        INTEGER REFERENCES staff(id) DEFAULT NULL",
+        # Заполнить lead_code для лидов у которых он NULL
+        """UPDATE leads SET lead_code = 'L-' || LPAD(id::text, 4, '0')
+           WHERE lead_code IS NULL""",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS plain_password   VARCHAR(100) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login   VARCHAR(50)  DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_width_cm  NUMERIC(8,1) DEFAULT NULL",
@@ -961,12 +964,12 @@ async def create_lead(data: dict) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO leads (lead_num, client_name, client_phone, service, branch,
+            INSERT INTO leads (lead_num, lead_code, client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
                                created_by, volunteer_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             RETURNING *
-        """, data["lead_num"], data.get("client_name"), data["client_phone"],
+        """, data["lead_num"], data.get("lead_code"), data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
