@@ -127,20 +127,20 @@ async def _tg_reminder_worker():
                                 f"📞 {r['client_phone']}\n"
                                 f"💬 {msg}")
                         await send_tg(LEADS_GROUP_ID, text)
-                    # Web Push + уведомление в приложении
-                    if r.get("staff_id"):
+                    # Web Push + уведомление — только тому, кто взял лид (target_staff_id)
+                    target_id = r.get("target_staff_id") or r.get("staff_id")
+                    if target_id:
                         push_body = f"📞 {r['client_phone']}" + (f"\n{msg}" if msg != "Запланированный звонок" else "")
                         asyncio.create_task(send_web_push(
-                            r["staff_id"],
+                            target_id,
                             f"🔔 Перезвонить: {client}",
                             push_body,
                             r["lead_id"],
                             r["client_phone"]
                         ))
-                        # Пишем в Уведомления приложения
                         try:
                             await db.create_agent_notification(
-                                r["staff_id"], r["lead_id"],
+                                target_id, r["lead_id"],
                                 "callback",
                                 f"Пора перезвонить: {client} — {r['client_phone']}"
                                 + (f". {msg}" if msg != "Запланированный звонок" else "")

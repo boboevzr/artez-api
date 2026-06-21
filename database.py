@@ -1146,17 +1146,21 @@ async def mark_reminder_sent(reminder_id: int, channel: str = "browser"):
         await conn.execute(f"UPDATE lead_reminders SET {col}=TRUE WHERE id=$1", reminder_id)
 
 async def get_pending_tg_reminders():
-    """Для фонового воркера — все напоминания для отправки в Telegram."""
+    """Для фонового воркера — все напоминания для отправки в Telegram.
+    Получатель = assigned_to (кто взял лид), если взят; иначе staff_id (кто поставил напоминание)."""
     if not pool: return []
     async with pool.acquire() as conn:
         return await conn.fetch("""
             SELECT r.*, l.client_name, l.client_phone, l.lead_code,
-                   s.tg_id AS staff_tg_id,
-                   s.first_name AS staff_first_name,
-                   s.last_name  AS staff_last_name
+                   -- целевой получатель: assigned_to имеет приоритет
+                   COALESCE(l.assigned_to, r.staff_id) AS target_staff_id,
+                   tgt.tg_id AS staff_tg_id,
+                   tgt.first_name AS staff_first_name,
+                   tgt.last_name  AS staff_last_name
             FROM lead_reminders r
-            JOIN leads l  ON l.id  = r.lead_id
-            JOIN staff s  ON s.id  = r.staff_id
+            JOIN leads l ON l.id = r.lead_id
+            -- joined на фактического получателя
+            JOIN staff tgt ON tgt.id = COALESCE(l.assigned_to, r.staff_id)
             WHERE r.remind_at <= NOW() AND r.sent_tg = FALSE
         """)
 
