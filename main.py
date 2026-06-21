@@ -720,7 +720,14 @@ async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"
             updates["tg_id"] = int(updates["tg_id"])
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="tg_id должен быть числом")
-    await db.update_staff(staff_id, **updates)
+    try:
+        await db.update_staff(staff_id, **updates)
+    except Exception as e:
+        err = str(e)
+        if "unique" in err.lower() or "duplicate" in err.lower():
+            raise HTTPException(status_code=409, detail="Логин или tg_id уже занят другим сотрудником")
+        logging.error(f"update_staff error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка БД: {err}")
     row = await db.get_staff_by_id(staff_id)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
