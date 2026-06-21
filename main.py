@@ -2786,28 +2786,42 @@ async def get_tg_clients(search: str = "", _=Depends(get_admin)):
 
 
 @app.post("/api/orders")
-async def create_order(order: OrderRequest):
-    order_num = await db.get_next_order_num()
-    await db.save_site_order({
-        "order_num":    order_num,
-        "first_name":   order.first_name,
-        "last_name":    order.last_name,
-        "phone":        order.phone,
-        "branch":       order.branch,
-        "city":         order.city,
-        "address":      order.address,
-        "location":     order.location,
-        "service":      order.service,
-        "pickup_date":  order.pickup_date,
-        "pickup_time":  order.pickup_time,
-        "note":         f"Тип услуги: {order.service_type}" if order.service_type else "",
-        "total_price":  order.total_price,
+async def create_order_from_site(order: OrderRequest):
+    """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
+    lead_num  = await db.get_next_lead_num()
+    lead_code = await db.generate_lead_code()
+
+    full_name = f"{order.first_name} {order.last_name}".strip()
+    note_parts = []
+    if order.service_type: note_parts.append(f"Тип: {order.service_type}")
+    if order.pickup_date:  note_parts.append(f"Дата: {order.pickup_date}")
+    if order.pickup_time:  note_parts.append(f"Время: {order.pickup_time}")
+    if order.is_quick:     note_parts.append("Быстрая заявка")
+    if order.total_price:  note_parts.append(f"Расчёт: {order.total_price:,} сум")
+    note = " · ".join(note_parts) if note_parts else None
+
+    lead = await db.create_lead({
+        "lead_num":      lead_num,
+        "lead_code":     lead_code,
+        "client_name":   full_name,
+        "client_phone":  order.phone,
+        "service":       order.service,
+        "branch":        order.branch,
+        "city":          order.city,
+        "address":       order.address,
+        "short_address": order.address,
+        "note":          note,
+        "status":        "new",
+        "created_by":    None,
+        "volunteer_id":  None,
     })
+    if lead:
+        await db.add_lead_call(lead["id"], None, action="created",
+                               note=f"Лид создан с сайта ({lead_code})")
 
-    await notify_group_new_order(order_num, order)
-    await notify_sheets_new_order(order_num, order)
+    asyncio.create_task(_notify_group_site_lead(lead_code, order))
+    await notify_sheets_new_order(lead_code, order)
 
-    # Авто-регистрация клиента в CRM
     await db.upsert_crm_client(
         phone=order.phone,
         first_name=order.first_name,
@@ -2816,4 +2830,51 @@ async def create_order(order: OrderRequest):
     )
     await db.refresh_crm_client_stats(order.phone)
 
-    return {"ok": True, "order_num": order_num}
+    return {"ok": True, "order_num": lead_code}
+
+
+async def _notify_group_site_lead(lead_code: str, data: "OrderRequest"):
+    """Telegram: новый лид с сайта — без кнопок, сотрудники берут через приложение."""
+    if not BOT_TOKEN:
+        return
+    chat_id = await _group_id_for_branch(data.branch or "")
+    if not chat_id:
+        return
+
+    def he(s):
+        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;") if s else "—"
+
+    full_name = f"{data.first_name} {data.last_name}".strip()
+
+    if data.is_quick:
+        text = (
+            f"🎯 Новый лид <b>{lead_code}</b> — быстрая заявка (сайт)\n"
+            f"━━━━━━━━━━\n"
+            f"👤 {he(full_name)}\n"
+            f"📞 {he(data.phone)}\n"
+            f"━━━━━━━━━━\n"
+            f"Откройте приложение и возьмите лид"
+        )
+    else:
+        lines = [
+            f"🎯 Новый лид <b>{lead_code}</b> (сайт)",
+            f"━━━━━━━━━━",
+            f"👤 {he(full_name)}",
+            f"📞 {he(data.phone)}",
+        ]
+        if data.branch:   lines.append(f"🏢 {he(branch_ru(data.branch))}")
+        if data.city:     lines.append(f"📍 {he(data.city)}")
+        if data.address:  lines.append(f"🏠 {he(data.address)}")
+        if data.service:  lines.append(f"🧺 {he(data.service)}")
+        if data.pickup_date: lines.append(f"📅 {he(data.pickup_date)} {he(data.pickup_time)}".rstrip())
+        lines += ["━━━━━━━━━━", "Откройте приложение и возьмите лид"]
+        text = "\n".join(lines)
+
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        async with aiohttp.ClientSession() as s:
+            await s.post(url,
+                json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
+                timeout=aiohttp.ClientTimeout(total=8))
+    except Exception as e:
+        logging.warning(f"_notify_group_site_lead error: {e}")
