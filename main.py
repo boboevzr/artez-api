@@ -2384,18 +2384,79 @@ async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staf
 async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_current_staff),
                               action: str = Body(..., embed=True),
                               actual_width_cm: float = Body(None, embed=True),
-                              actual_length_cm: float = Body(None, embed=True)):
+                              actual_length_cm: float = Body(None, embed=True),
+                              note: str = Body("", embed=True)):
     if action == "confirm":
         item = await db.confirm_item_measure(item_id)
     elif action == "correct":
         if not actual_width_cm or not actual_length_cm:
             raise HTTPException(status_code=400, detail="Укажите фактические размеры")
         item = await db.correct_item_measure(item_id, actual_width_cm, actual_length_cm)
+    elif action == "submit":
+        media = await db.get_item_media(item_id)
+        if not media:
+            raise HTTPException(status_code=400, detail="Добавьте фото или видео замера")
+        item = await db.submit_item_measure(item_id)
+        if not item:
+            raise HTTPException(status_code=400, detail="Сначала введите фактические размеры")
+    elif action == "approve":
+        item = await db.approve_item_measure(item_id)
+    elif action == "reject":
+        if not note:
+            raise HTTPException(status_code=400, detail="Укажите причину отклонения")
+        item = await db.reject_item_measure(item_id, note)
     else:
-        raise HTTPException(status_code=400, detail="action: confirm или correct")
+        raise HTTPException(status_code=400, detail="Неверное действие")
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     return {"ok": True, "item": item}
+
+@app.get("/api/admin/orders/{order_id}/items/{item_id}/media")
+async def get_item_media(order_id: int, item_id: int, _=Depends(get_current_staff)):
+    media = await db.get_item_media(item_id)
+    return {"ok": True, "media": media}
+
+@app.post("/api/admin/orders/{order_id}/items/{item_id}/media")
+async def upload_item_media(
+    order_id: int, item_id: int,
+    file: UploadFile = File(...),
+    staff=Depends(get_current_staff),
+):
+    if not BOT_TOKEN or not MEDIA_CHANNEL_ID:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    content_type = file.content_type or ""
+    if content_type.startswith("video/"):
+        tg_method, tg_field, tg_type = "sendVideo", "video", "video"
+    else:
+        tg_method, tg_field, tg_type = "sendPhoto", "photo", "photo"
+
+    order_row = await db.get_order_by_id(order_id)
+    order_num = order_row.get("order_num", f"#{order_id}") if order_row else f"#{order_id}"
+    staff_name = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "")
+    caption = f"📐 Замер\n🧾 Заказ: {order_num} | Позиция #{item_id}\n👤 {staff_name}"
+
+    file_bytes = await file.read()
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
+    form.add_field(tg_field, file_bytes, filename=file.filename, content_type=content_type)
+    form.add_field("caption", caption)
+
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form) as r:
+            result = await r.json()
+
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+
+    msg = result["result"]
+    file_id = msg["photo"][-1]["file_id"] if tg_type == "photo" else msg[tg_type]["file_id"]
+    row = await db.add_item_media(item_id, order_id, file_id, tg_type, staff_name)
+    return {"ok": True, "media": row}
+
+@app.delete("/api/admin/orders/{order_id}/items/{item_id}/media/{media_id}")
+async def delete_item_media(order_id: int, item_id: int, media_id: int, _=Depends(get_current_staff)):
+    await db.delete_item_media(media_id)
+    return {"ok": True}
 
 @app.patch("/api/admin/orders/{order_id}/items/{item_id}/washer")
 async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_current_staff),

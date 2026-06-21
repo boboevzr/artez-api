@@ -137,6 +137,8 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS location_address TEXT DEFAULT ''",
         # Orders: дедлайн (дата готовности)
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS deadline DATE DEFAULT NULL",
+        # Замеры: причина отклонения
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS reject_note TEXT DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -410,6 +412,18 @@ async def create_tables():
         );
         CREATE INDEX IF NOT EXISTS idx_order_payments_order ON order_payments(order_id);
         ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS purpose VARCHAR(50) DEFAULT 'payment';
+        """)
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS order_item_media (
+            id           SERIAL PRIMARY KEY,
+            item_id      INTEGER       NOT NULL,
+            order_id     INTEGER       NOT NULL,
+            tg_file_id   VARCHAR(200)  NOT NULL,
+            tg_file_type VARCHAR(20)   DEFAULT 'photo',
+            created_by   VARCHAR(100)  DEFAULT '',
+            created_at   TIMESTAMPTZ   DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_item_media_item ON order_item_media(item_id);
         """)
         await c.execute("""
         CREATE TABLE IF NOT EXISTS cash_shifts (
@@ -1908,3 +1922,55 @@ async def delete_order_payment(payment_id: int) -> bool:
             await conn.execute(
                 "UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
         return True
+
+# ── order_item_media (замеры) ─────────────────────────────────────────────────
+
+async def get_item_media(item_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_item_media WHERE item_id=$1 ORDER BY created_at", item_id)
+        return [dict(r) for r in rows]
+
+async def add_item_media(item_id: int, order_id: int, tg_file_id: str, tg_file_type: str, created_by: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO order_item_media (item_id, order_id, tg_file_id, tg_file_type, created_by)
+            VALUES ($1,$2,$3,$4,$5) RETURNING *
+        """, item_id, order_id, tg_file_id, tg_file_type, created_by)
+        return dict(row) if row else {}
+
+async def delete_item_media(media_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM order_item_media WHERE id=$1", media_id)
+        return True
+
+async def submit_item_measure(item_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items SET measure_status='submitted', reject_note=NULL
+            WHERE id=$1 AND actual_width_cm IS NOT NULL AND actual_length_cm IS NOT NULL
+            RETURNING *
+        """, item_id)
+        return dict(row) if row else {}
+
+async def approve_item_measure(item_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items SET measure_status='approved', reject_note=NULL
+            WHERE id=$1 RETURNING *
+        """, item_id)
+        return dict(row) if row else {}
+
+async def reject_item_measure(item_id: int, note: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items SET measure_status='rejected', reject_note=$2
+            WHERE id=$1 RETURNING *
+        """, item_id, note or '')
+        return dict(row) if row else {}
