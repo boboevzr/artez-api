@@ -473,7 +473,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "callcenter": ["leads", "orders", "clients"],
     "driver":     ["orders", "status_delivery"],
     "logistics":  ["orders", "status"],
-    "washer":     ["orders", "status_wash"],
+    "washer":     ["orders_workshop", "status_wash"],
     "agent":      ["leads_own"],  # агент видит только свои лиды
 }
 
@@ -529,6 +529,9 @@ def require_perm(permission: str):
         if staff["role"] == "admin":  # admin has all permissions
             return staff
         perms = ROLE_PERMISSIONS.get(staff["role"], [])
+        # orders_workshop даёт доступ к эндпоинту orders (но с фильтрацией)
+        if permission == "orders" and "orders_workshop" in perms:
+            return staff
         if permission not in perms:
             raise HTTPException(status_code=403, detail="Нет доступа")
         return staff
@@ -940,11 +943,18 @@ async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
 # ══════════════════════════════════════
 #  ЗАЯВКИ — для сотрудников
 # ══════════════════════════════════════
+_WORKSHOP_STATUSES = {"received", "washing", "drying", "packing", "ready"}
+
 @app.get("/api/staff/orders")
 async def staff_orders(status: str = None, branch: str = None,
                        staff=Depends(require_perm("orders"))):
     rows = await db.get_admin_orders(status=status, limit=200)
     result = [dict(r) for r in rows]
+    # Если у сотрудника разрешение orders_workshop — показывать только мастерские статусы
+    role  = staff.get("role", "")
+    perms = ROLE_PERMISSIONS.get(role, []) + (staff.get("extra_permissions") or [])
+    if "orders_workshop" in perms and "orders" not in perms:
+        result = [o for o in result if o.get("status") in _WORKSHOP_STATUSES]
     if branch:
         result = [o for o in result if o.get("branch") == branch]
     return {"ok": True, "orders": result}
