@@ -2150,7 +2150,14 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             if pending:
                 raise HTTPException(status_code=400, detail=f"Не все позиции замерены: осталось {len(pending)}")
     elif "status" not in ROLE_PERMISSIONS.get(role, []) and role != "admin":
-        raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
+        # Колл-центр и любой с orders может подтвердить заказ (new → confirmed)
+        perms = ROLE_PERMISSIONS.get(role, [])
+        if "orders" in perms and status == "confirmed":
+            order = await db.get_order_by_id(order_id)
+            if not order or order.get("status") != "new":
+                raise HTTPException(status_code=403, detail="Можно подтвердить только новый заказ")
+        else:
+            raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
     if status not in ALL_ORDER_STATUSES:
         raise HTTPException(status_code=400, detail="Неизвестный статус")
     order = await db.update_order_status(order_id, status,
