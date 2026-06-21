@@ -733,6 +733,24 @@ async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, "staff": _staff_public(dict(row))}
 
+@app.delete("/api/admin/staff/{staff_id}")
+async def delete_staff(staff_id: int, _=Depends(get_admin)):
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT id, first_name, last_name FROM staff WHERE id=$1", staff_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Сотрудник не найден")
+        try:
+            await conn.execute("DELETE FROM staff WHERE id=$1", staff_id)
+        except Exception as e:
+            err = str(e)
+            if "foreign key" in err.lower() or "violates" in err.lower():
+                raise HTTPException(status_code=409,
+                    detail="Нельзя удалить: у сотрудника есть связанные заказы или лиды. Деактивируйте его.")
+            raise HTTPException(status_code=500, detail=f"Ошибка БД: {err}")
+    return {"ok": True}
+
 @app.put("/api/staff/{staff_id}/password")
 async def staff_change_password(staff_id: int, body: dict, me=Depends(get_current_staff)):
     if me["role"] != "admin" and me["id"] != staff_id:
