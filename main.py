@@ -732,8 +732,15 @@ async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))
     return {"ok": True, "id": sid}
 
 @app.patch("/api/staff/{staff_id}")
-async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"))):
-    allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
+async def staff_update(staff_id: int, body: dict, me=Depends(get_current_staff)):
+    is_admin = me.get("role") == "admin"
+    is_self  = me.get("id") == staff_id
+    if not is_admin and not is_self:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    if is_admin:
+        allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
+    else:
+        allowed = {"gender","birth_date","branch"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
