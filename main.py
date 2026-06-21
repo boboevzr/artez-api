@@ -756,14 +756,18 @@ async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"
     return {"ok": True, "staff": _staff_public(dict(row))}
 
 @app.get("/api/admin/staff/{staff_id}/personal")
-async def get_staff_personal(staff_id: int, _=Depends(get_admin)):
+async def get_staff_personal_ep(staff_id: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     data = await db.get_staff_personal(staff_id)
     if data and data.get("spouse_birth_date"):
         data["spouse_birth_date"] = str(data["spouse_birth_date"])
     return {"ok": True, "personal": data or {}}
 
 @app.put("/api/admin/staff/{staff_id}/personal")
-async def save_staff_personal(staff_id: int, body: dict, _=Depends(get_admin)):
+async def save_staff_personal_ep(staff_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     from datetime import date as _date
     if body.get("spouse_birth_date"):
         try: body["spouse_birth_date"] = _date.fromisoformat(body["spouse_birth_date"])
