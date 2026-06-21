@@ -866,6 +866,65 @@ async def update_route_stop(route_id: int, order_id: int, body: dict, me=Depends
     await db.update_route_stop(route_id, order_id, body)
     return {"ok": True}
 
+@app.post("/api/admin/routes/{route_id}/send-to-driver")
+async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin", "logistics", "manager"):
+        raise HTTPException(status_code=403)
+    route = await db.get_route(route_id)
+    if not route:
+        raise HTTPException(status_code=404, detail="Маршрут не найден")
+    if not route.get("driver_id"):
+        raise HTTPException(status_code=400, detail="Водитель не назначен")
+
+    # Получить tg_id водителя
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        driver = await conn.fetchrow(
+            "SELECT first_name, last_name, tg_id FROM staff WHERE id=$1",
+            route["driver_id"]
+        )
+    if not driver or not driver["tg_id"]:
+        raise HTTPException(status_code=400, detail="У водителя не указан Telegram ID")
+
+    stops = route.get("stops", [])
+    branch_label = "Зарафшан" if route.get("branch") == "zarafshan" else "Навои" if route.get("branch") == "navoi" else ""
+
+    type_map = {"pickup": "Забор", "delivery": "Доставка", "mixed": "Смешанный"}
+    type_label = type_map.get(route.get("type", ""), "")
+
+    lines = [
+        f"🚗 Маршрут: {route['name']}",
+        f"📅 {route.get('date', '')}  {branch_label}  {type_label}".strip(),
+        "",
+    ]
+
+    import json as _json
+    for i, s in enumerate(stops, 1):
+        client = f"{s.get('client_first_name', '')} {s.get('client_last_name', '')}".strip()
+        addr = s.get("address") or s.get("location_address") or "—"
+        line = f"{i}. {s.get('order_num', '')} — {client}\n   📍 {addr}"
+        # Google Maps ссылка если есть геометка
+        if s.get("location"):
+            try:
+                loc = _json.loads(s["location"])
+                if loc.get("lat") and loc.get("lon"):
+                    line += f"\n   🗺 https://maps.google.com/?q={loc['lat']},{loc['lon']}"
+            except Exception:
+                pass
+        if s.get("client_phone"):
+            line += f"\n   📞 {s['client_phone']}"
+        lines.append(line)
+
+    lines += ["", f"Всего точек: {len(stops)}"]
+    if route.get("note"):
+        lines += ["", f"📝 {route['note']}"]
+
+    text = "\n".join(lines)
+    await send_tg(driver["tg_id"], text)
+    return {"ok": True, "sent_to": driver["tg_id"]}
+
+
 @app.delete("/api/admin/staff/{staff_id}")
 async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
     if me.get("role") != "admin":
