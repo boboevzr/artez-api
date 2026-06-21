@@ -268,7 +268,8 @@ async def _notify_new_lead(lead: dict, staff: dict):
         parts = loc.split(",")
         try:
             lat, lon = parts[0].strip(), parts[1].strip()
-            location_link = f"https://yandex.uz/maps/?pt={lon},{lat}&z=16"
+            map_url = f"https://yandex.uz/maps/?pt={lon},{lat}&z=16"
+            location_link = f'<a href="{map_url}">📍 Локация</a>'
         except Exception:
             location_link = ""
     else:
@@ -304,7 +305,12 @@ async def _notify_new_lead(lead: dict, staff: dict):
 
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": str(group_id), "text": msg_text}
+        payload = {
+            "chat_id": str(group_id),
+            "text": msg_text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
         if keyboard:
             payload["reply_markup"] = keyboard
         async with aiohttp.ClientSession() as s:
