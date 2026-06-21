@@ -263,14 +263,26 @@ async def _notify_new_lead(lead: dict, staff: dict):
     else:                 source = "👤 Сотрудник"
     creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "—")
 
+    loc = (lead.get("location") or "").strip()
+    if loc:
+        parts = loc.split(",")
+        try:
+            lat, lon = parts[0].strip(), parts[1].strip()
+            location_link = f"https://yandex.uz/maps/?pt={lon},{lat}&z=16"
+        except Exception:
+            location_link = ""
+    else:
+        location_link = ""
+
     vars_ = {
-        "lead_code":    lead.get("lead_code") or f"#{lead.get('id')}",
-        "client_name":  lead.get("client_name") or "—",
-        "client_phone": lead.get("client_phone") or "—",
-        "branch":       branch_ru(branch) if branch else "—",
-        "note":         lead.get("note") or "—",
-        "source":       source,
-        "creator":      creator,
+        "lead_code":     lead.get("lead_code") or f"#{lead.get('id')}",
+        "client_name":   lead.get("client_name") or "—",
+        "client_phone":  lead.get("client_phone") or "—",
+        "branch":        branch_ru(branch) if branch else "—",
+        "note":          lead.get("note") or "—",
+        "source":        source,
+        "creator":       creator,
+        "location_link": location_link,
     }
 
     text = template
@@ -2864,7 +2876,8 @@ SITE_SETTINGS_DEFAULTS = {
         "👤 {client_name}\n"
         "📞 {client_phone}\n"
         "🏢 {branch}\n"
-        "💬 {note}\n\n"
+        "💬 {note}\n"
+        "📍 {location_link}\n\n"
         "📌 {source}: {creator}"
     ),
     "lead_notify_uz": (
