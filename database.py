@@ -1974,3 +1974,9 @@ async def reject_item_measure(item_id: int, note: str) -> dict:
             WHERE id=$1 RETURNING *
         """, item_id, note or '')
         return dict(row) if row else {}
+
+async def get_item_media_by_id(media_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM order_item_media WHERE id=$1", media_id)
+        return dict(row) if row else {}

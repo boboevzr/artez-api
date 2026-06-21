@@ -2369,6 +2369,34 @@ async def serve_order_photo(
     file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
     return RedirectResponse(url=file_url)
 
+@app.get("/api/item-media/{media_id}")
+async def serve_item_media(
+    media_id: int,
+    t: str = None,
+    authorization: str = Header(None),
+):
+    token = t or (authorization[7:] if authorization and authorization.startswith("Bearer ") else None)
+    if not token:
+        raise HTTPException(status_code=401)
+    try:
+        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401)
+
+    row = await db.get_item_media_by_id(media_id)
+    if not row:
+        raise HTTPException(status_code=404)
+
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={row['tg_file_id']}") as r:
+            data = await r.json()
+    if not data.get("ok"):
+        raise HTTPException(status_code=502, detail="Не удалось получить файл")
+
+    from fastapi.responses import RedirectResponse
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
+    return RedirectResponse(url=file_url)
+
 @app.patch("/api/admin/orders/{order_id}/discount")
 async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
                                     discount_sum: float = Body(0, embed=True)):
@@ -2393,12 +2421,15 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
             raise HTTPException(status_code=400, detail="Укажите фактические размеры")
         item = await db.correct_item_measure(item_id, actual_width_cm, actual_length_cm)
     elif action == "submit":
+        if not actual_width_cm or not actual_length_cm:
+            raise HTTPException(status_code=400, detail="Укажите ширину и длину")
+        await db.correct_item_measure(item_id, actual_width_cm, actual_length_cm)
         media = await db.get_item_media(item_id)
         if not media:
             raise HTTPException(status_code=400, detail="Добавьте фото или видео замера")
         item = await db.submit_item_measure(item_id)
         if not item:
-            raise HTTPException(status_code=400, detail="Сначала введите фактические размеры")
+            raise HTTPException(status_code=400, detail="Ошибка при отправке на проверку")
     elif action == "approve":
         item = await db.approve_item_measure(item_id)
     elif action == "reject":
