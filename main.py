@@ -161,6 +161,31 @@ async def send_tg(chat_id, text: str):
         async with aiohttp.ClientSession() as s:
             await s.post(url, json={"chat_id": str(chat_id), "text": text},
                          timeout=aiohttp.ClientTimeout(total=5))
+
+
+async def _tg_answer_callback(callback_query_id: str, text: str, alert: bool = False):
+    if not BOT_TOKEN: return
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery",
+                json={"callback_query_id": callback_query_id, "text": text, "show_alert": alert},
+                timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"answerCallbackQuery error: {e}")
+
+
+async def _tg_edit_message(chat_id, message_id: int, text: str):
+    if not BOT_TOKEN: return
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id": str(chat_id), "message_id": message_id,
+                      "text": text, "parse_mode": "HTML"},
+                timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"editMessageText error: {e}")
     except Exception as e:
         logging.warning(f"send_tg error: {e}")
 
@@ -884,6 +909,85 @@ async def get_due_reminders(staff=Depends(require_perm("leads"))):
 async def ack_reminder(reminder_id: int, staff=Depends(require_perm("leads"))):
     await db.mark_reminder_sent(reminder_id, "browser")
     return {"ok": True}
+
+@app.post("/api/telegram/webhook")
+async def telegram_webhook(request: Request):
+    """Обрабатывает callback_query от Telegram — нажатие кнопки 'Взять лид'."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": True}
+
+    cq = data.get("callback_query")
+    if not cq:
+        return {"ok": True}
+
+    cq_id      = cq["id"]
+    cq_data    = cq.get("data", "")
+    tg_user_id = cq["from"]["id"]
+    message    = cq.get("message", {})
+    chat_id    = message.get("chat", {}).get("id")
+    message_id = message.get("message_id")
+    orig_text  = message.get("text", "")
+
+    if not cq_data.startswith("take_lead_"):
+        return {"ok": True}
+
+    try:
+        lead_id = int(cq_data.split("_")[2])
+    except (IndexError, ValueError):
+        await _tg_answer_callback(cq_id, "❌ Ошибка: неверный формат данных")
+        return {"ok": True}
+
+    # Проверяем — сотрудник ли нажавший
+    staff = await db.get_staff_by_tg_id(tg_user_id)
+    if not staff:
+        await _tg_answer_callback(cq_id,
+            "❌ Вы не зарегистрированы как сотрудник ARTEZ.\n"
+            "Обратитесь к администратору чтобы привязать Telegram.", alert=True)
+        return {"ok": True}
+
+    staff_id   = staff["id"]
+    staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get("login","")
+
+    if not db.pool:
+        await _tg_answer_callback(cq_id, "❌ Ошибка базы данных", alert=True)
+        return {"ok": True}
+
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT assigned_to, lead_code FROM leads WHERE id=$1", lead_id)
+        if not row:
+            await _tg_answer_callback(cq_id, "❌ Лид не найден", alert=True)
+            return {"ok": True}
+
+        if row["assigned_to"] and row["assigned_to"] != staff_id:
+            taker = await db.get_staff_by_id(row["assigned_to"])
+            taker_name = ""
+            if taker:
+                taker_name = f"{taker.get('first_name','')} {taker.get('last_name','')}".strip()
+            await _tg_answer_callback(cq_id,
+                f"❌ Лид уже взят: {taker_name or 'другой сотрудник'}", alert=True)
+            return {"ok": True}
+
+        if row["assigned_to"] == staff_id:
+            await _tg_answer_callback(cq_id, "✅ Этот лид уже ваш!")
+            return {"ok": True}
+
+        await conn.execute(
+            "UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
+
+    await db.add_lead_call(lead_id, staff_id, action="note",
+                           note=f"Лид взят через Telegram: {staff_name}")
+
+    await _tg_answer_callback(cq_id, f"✅ Лид взят! Откройте приложение.")
+
+    # Редактируем сообщение — убираем кнопку, добавляем кто взял
+    new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ Взял: {staff_name}"
+    await _tg_edit_message(chat_id, message_id, new_text)
+
+    return {"ok": True}
+
 
 @app.get("/api/push/vapid-key")
 async def get_vapid_key():
@@ -2819,7 +2923,8 @@ async def create_order_from_site(order: OrderRequest):
         await db.add_lead_call(lead["id"], None, action="created",
                                note=f"Лид создан с сайта ({lead_code})")
 
-    asyncio.create_task(_notify_group_site_lead(lead_code, order))
+    lead_id = lead["id"] if lead else None
+    asyncio.create_task(_notify_group_site_lead(lead_code, order, lead_id=lead_id))
     await notify_sheets_new_order(lead_code, order)
 
     await db.upsert_crm_client(
@@ -2833,8 +2938,8 @@ async def create_order_from_site(order: OrderRequest):
     return {"ok": True, "order_num": lead_code}
 
 
-async def _notify_group_site_lead(lead_code: str, data: "OrderRequest"):
-    """Telegram: новый лид с сайта — без кнопок, сотрудники берут через приложение."""
+async def _notify_group_site_lead(lead_code: str, data: "OrderRequest", lead_id: int = None):
+    """Telegram: новый лид с сайта — кнопка Взять лид прямо в группе."""
     if not BOT_TOKEN:
         return
     chat_id = await _group_id_for_branch(data.branch or "")
@@ -2852,8 +2957,7 @@ async def _notify_group_site_lead(lead_code: str, data: "OrderRequest"):
             f"━━━━━━━━━━\n"
             f"👤 {he(full_name)}\n"
             f"📞 {he(data.phone)}\n"
-            f"━━━━━━━━━━\n"
-            f"Откройте приложение и возьмите лид"
+            f"━━━━━━━━━━"
         )
     else:
         lines = [
@@ -2862,19 +2966,26 @@ async def _notify_group_site_lead(lead_code: str, data: "OrderRequest"):
             f"👤 {he(full_name)}",
             f"📞 {he(data.phone)}",
         ]
-        if data.branch:   lines.append(f"🏢 {he(branch_ru(data.branch))}")
-        if data.city:     lines.append(f"📍 {he(data.city)}")
-        if data.address:  lines.append(f"🏠 {he(data.address)}")
-        if data.service:  lines.append(f"🧺 {he(data.service)}")
+        if data.branch:      lines.append(f"🏢 {he(branch_ru(data.branch))}")
+        if data.city:        lines.append(f"📍 {he(data.city)}")
+        if data.address:     lines.append(f"🏠 {he(data.address)}")
+        if data.service:     lines.append(f"🧺 {he(data.service)}")
         if data.pickup_date: lines.append(f"📅 {he(data.pickup_date)} {he(data.pickup_time)}".rstrip())
-        lines += ["━━━━━━━━━━", "Откройте приложение и возьмите лид"]
+        lines.append("━━━━━━━━━━")
         text = "\n".join(lines)
+
+    keyboard = None
+    if lead_id:
+        keyboard = {"inline_keyboard": [[
+            {"text": "✋ Взять лид", "callback_data": f"take_lead_{lead_id}"}
+        ]]}
 
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+        if keyboard:
+            payload["reply_markup"] = keyboard
         async with aiohttp.ClientSession() as s:
-            await s.post(url,
-                json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
-                timeout=aiohttp.ClientTimeout(total=8))
+            await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
     except Exception as e:
         logging.warning(f"_notify_group_site_lead error: {e}")
