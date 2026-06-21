@@ -2051,6 +2051,13 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
+    # asyncpg требует объект date, а не строку
+    if "deadline" in updates and isinstance(updates["deadline"], str):
+        from datetime import date
+        try:
+            updates["deadline"] = date.fromisoformat(updates["deadline"])
+        except ValueError:
+            updates["deadline"] = None
     try:
         updated = await db.update_order(order_id, **updates)
         return {"ok": True, "order": {k: str(v) if hasattr(v, 'isoformat') else v
