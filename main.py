@@ -1006,10 +1006,14 @@ async def telegram_webhook(request: Request):
         if row["assigned_to"] and row["assigned_to"] != staff_id:
             taker = await db.get_staff_by_id(row["assigned_to"])
             taker_name = ""
+            taker_verb = "Взяла" if taker and taker.get("gender") == "F" else "Взял"
             if taker:
                 taker_name = f"{taker.get('first_name','')} {taker.get('last_name','')}".strip()
             await _tg_answer_callback(cq_id,
                 f"❌ Лид уже взят: {taker_name or 'другой сотрудник'}", alert=True)
+            # Убираем кнопку из сообщения — лид уже не свободен
+            new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {taker_verb}: {taker_name or 'другой сотрудник'}"
+            await _tg_edit_message(chat_id, message_id, new_text)
             return {"ok": True}
 
         if row["assigned_to"] == staff_id:
