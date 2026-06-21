@@ -244,10 +244,10 @@ async def _notify_new_lead(lead: dict, staff: dict):
         return
 
     # Роутинг по филиалу: своя группа или общая fallback
-    branch = lead.get("branch", "") or ""
-    if branch in ("zarafshan", "Зарафшан"):
+    branch = (lead.get("branch", "") or "").lower().replace("📍", "").strip()
+    if branch in ("zarafshan", "зарафшан", "zarafshon"):
         group_id = await _get_cfg("leads_group_zarafshan") or await _get_cfg("leads_group_id")
-    elif branch in ("navoi", "Навои"):
+    elif branch in ("navoi", "навои", "navoiy"):
         group_id = await _get_cfg("leads_group_navoi") or await _get_cfg("leads_group_id")
     else:
         group_id = await _get_cfg("leads_group_id")
