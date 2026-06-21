@@ -112,6 +112,7 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS order_stages        VARCHAR(100) DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_create_order   BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS assigned_to        INTEGER REFERENCES staff(id) DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS plain_password   VARCHAR(100) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login   VARCHAR(50)  DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_width_cm  NUMERIC(8,1) DEFAULT NULL",
@@ -993,10 +994,13 @@ async def get_leads(status: str = None, branch: str = None,
                        s.phone        AS creator_phone,
                        vol.first_name AS volunteer_first_name,
                        vol.last_name  AS volunteer_last_name,
-                       vol.phone      AS volunteer_phone
+                       vol.phone      AS volunteer_phone,
+                       asgn.first_name AS assigned_first_name,
+                       asgn.last_name  AS assigned_last_name
                 FROM leads l
-                LEFT JOIN staff s   ON s.id   = l.created_by
-                LEFT JOIN staff vol ON vol.id = l.volunteer_id
+                LEFT JOIN staff s    ON s.id    = l.created_by
+                LEFT JOIN staff vol  ON vol.id  = l.volunteer_id
+                LEFT JOIN staff asgn ON asgn.id = l.assigned_to
                 WHERE {' AND '.join(filters)}
                 ORDER BY l.created_at DESC LIMIT ${len(args)}""", *args
         )

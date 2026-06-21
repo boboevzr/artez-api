@@ -471,9 +471,9 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "admin":      ["leads", "orders", "clients", "status", "staff", "reports", "settings"],
     "manager":    ["leads", "orders", "clients", "status", "reports"],
     "callcenter": ["leads", "orders", "clients"],
-    "driver":     ["orders", "status_delivery"],
-    "logistics":  ["orders", "status"],
-    "washer":     ["orders", "status_wash"],
+    "driver":     ["leads", "orders", "status_delivery"],
+    "logistics":  ["leads", "orders", "status"],
+    "washer":     ["leads", "orders", "status_wash"],
     "agent":      ["leads_own"],  # агент видит только свои лиды
 }
 
@@ -767,6 +767,36 @@ async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("lead
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
     await db.add_lead_call(lead_id, operator_id, action="edited", note="Лид отредактирован")
     return {"ok": True, "lead": lead}
+
+@app.patch("/api/staff/leads/{lead_id}/assign")
+async def assign_lead(lead_id: int, body: dict = Body({}),
+                      staff=Depends(require_perm("leads"))):
+    """Взять или освободить лид. assign=true — взять, assign=false — освободить."""
+    take = body.get("assign", True)
+    staff_id = staff.get("id")
+    if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        if take:
+            # Взять только если свободен
+            row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Лид не найден")
+            if row["assigned_to"] and row["assigned_to"] != staff_id:
+                raise HTTPException(status_code=409, detail="Лид уже взят другим сотрудником")
+            await conn.execute("UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
+            note = f"Лид взят: {staff.get('first_name','')} {staff.get('last_name','')}".strip()
+        else:
+            # Освободить только свой
+            row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
+            if not row:
+                raise HTTPException(status_code=404, detail="Лид не найден")
+            if row["assigned_to"] != staff_id:
+                raise HTTPException(status_code=403, detail="Можно освободить только свой лид")
+            await conn.execute("UPDATE leads SET assigned_to=NULL WHERE id=$1", lead_id)
+            note = f"Лид освобождён: {staff.get('first_name','')} {staff.get('last_name','')}".strip()
+        await db.add_lead_call(lead_id, staff_id, action="note", note=note)
+    lead = await db.get_lead_by_id(lead_id)
+    return {"ok": True, "lead": dict(lead) if lead else {}}
 
 @app.patch("/api/staff/leads/{lead_id}/status")
 async def update_lead_status(lead_id: int, body: dict,
