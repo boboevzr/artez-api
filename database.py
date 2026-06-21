@@ -114,6 +114,22 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS birth_date        DATE DEFAULT NULL",
+        """CREATE TABLE IF NOT EXISTS staff_personal (
+            staff_id         INTEGER PRIMARY KEY REFERENCES staff(id) ON DELETE CASCADE,
+            passport_series  VARCHAR(10),
+            passport_number  VARCHAR(20),
+            pinfl            VARCHAR(20),
+            home_address     TEXT,
+            extra_phone      VARCHAR(20),
+            children_count   INTEGER DEFAULT 0,
+            marital_status   VARCHAR(20) DEFAULT 'single',
+            spouse_name      VARCHAR(200),
+            spouse_birth_date DATE,
+            spouse_phone     VARCHAR(20),
+            spouse_workplace VARCHAR(200),
+            spouse_position  VARCHAR(200),
+            updated_at       TIMESTAMPTZ DEFAULT NOW()
+        )""",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location           TEXT DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location_address   TEXT DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS callback_at        TIMESTAMPTZ DEFAULT NULL",
@@ -947,6 +963,29 @@ async def update_staff(staff_id: int, **kwargs):
         await conn.execute(
             f"UPDATE staff SET {sets}, updated_at=NOW() WHERE id=$1",
             staff_id, *vals
+        )
+
+async def get_staff_personal(staff_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM staff_personal WHERE staff_id=$1", staff_id)
+        return dict(row) if row else {}
+
+async def upsert_staff_personal(staff_id: int, data: dict) -> None:
+    if not pool: return
+    fields = ["passport_series","passport_number","pinfl","home_address","extra_phone",
+              "children_count","marital_status","spouse_name","spouse_birth_date",
+              "spouse_phone","spouse_workplace","spouse_position"]
+    filtered = {k: data.get(k) for k in fields}
+    cols = ", ".join(filtered.keys())
+    placeholders = ", ".join(f"${i+2}" for i in range(len(filtered)))
+    updates = ", ".join(f"{k}=${i+2}" for i, k in enumerate(filtered))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"""INSERT INTO staff_personal (staff_id, {cols}, updated_at)
+                VALUES ($1, {placeholders}, NOW())
+                ON CONFLICT (staff_id) DO UPDATE SET {updates}, updated_at=NOW()""",
+            staff_id, *list(filtered.values())
         )
 
 async def update_staff_password(staff_id: int, password_hash: str, plain: str = None):

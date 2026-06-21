@@ -755,6 +755,27 @@ async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, "staff": _staff_public(dict(row))}
 
+@app.get("/api/admin/staff/{staff_id}/personal")
+async def get_staff_personal(staff_id: int, _=Depends(get_admin)):
+    data = await db.get_staff_personal(staff_id)
+    if data and data.get("spouse_birth_date"):
+        data["spouse_birth_date"] = str(data["spouse_birth_date"])
+    return {"ok": True, "personal": data or {}}
+
+@app.put("/api/admin/staff/{staff_id}/personal")
+async def save_staff_personal(staff_id: int, body: dict, _=Depends(get_admin)):
+    from datetime import date as _date
+    if body.get("spouse_birth_date"):
+        try: body["spouse_birth_date"] = _date.fromisoformat(body["spouse_birth_date"])
+        except: body["spouse_birth_date"] = None
+    else:
+        body["spouse_birth_date"] = None
+    if body.get("children_count") is not None:
+        try: body["children_count"] = int(body["children_count"])
+        except: body["children_count"] = 0
+    await db.upsert_staff_personal(staff_id, body)
+    return {"ok": True}
+
 @app.delete("/api/admin/staff/{staff_id}")
 async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
     if me.get("role") != "admin":
