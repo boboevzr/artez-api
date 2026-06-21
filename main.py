@@ -1748,12 +1748,14 @@ def md_escape(text):
 
 
 BRANCH_RU = {
-    "zarafshan": "Зарафшан",
-    "navoi":     "Навои",
+    "zarafshan": "Зарафшан", "зарафшан": "Зарафшан", "zarafshon": "Зарафшан",
+    "navoi":     "Навои",    "навои":    "Навои",    "navoiy":    "Навои",
 }
 
 def branch_ru(branch: str) -> str:
-    return BRANCH_RU.get(branch, branch) if branch else "—"
+    if not branch: return "—"
+    key = branch.lower().replace("📍", "").strip()
+    return BRANCH_RU.get(key, branch.strip("📍 ").strip())
 
 async def _group_id_for_branch(branch: str) -> str:
     """Возвращает chat_id группы для указанного филиала (из БД или env)."""
@@ -2858,7 +2860,7 @@ SITE_SETTINGS_DEFAULTS = {
         "🎯 Новый лид {lead_code}\n\n"
         "👤 {client_name}\n"
         "📞 {client_phone}\n"
-        "🏢 Филиал: {branch}\n"
+        "🏢 {branch}\n"
         "💬 {note}\n\n"
         "📌 {source}: {creator}"
     ),
