@@ -973,12 +973,17 @@ async def telegram_webhook(request: Request):
         await _tg_answer_callback(cq_id, "❌ Ошибка: неверный формат данных")
         return {"ok": True}
 
-    # Проверяем — сотрудник ли нажавший
+    # Проверяем — сотрудник ли нажавший (не агент)
     staff = await db.get_staff_by_tg_id(tg_user_id)
     if not staff:
         await _tg_answer_callback(cq_id,
-            "❌ Вы не зарегистрированы как сотрудник ARTEZ.\n"
-            "Обратитесь к администратору чтобы привязать Telegram.", alert=True)
+            "❌ Ваш Telegram не привязан к аккаунту сотрудника ARTEZ.\n"
+            "Обратитесь к администратору.", alert=True)
+        return {"ok": True}
+    if staff.get("role") == "agent":
+        await _tg_answer_callback(cq_id,
+            "❌ Агенты не могут брать лиды через Telegram.\n"
+            "Лиды берут только сотрудники.", alert=True)
         return {"ok": True}
 
     staff_id   = staff["id"]
