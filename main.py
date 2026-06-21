@@ -778,6 +778,8 @@ class LeadCreateRequest(BaseModel):
     note: str | None = None
     assigned_to: int | None = None
     volunteer_id: int | None = None
+    location: str | None = None
+    location_address: str | None = None
 
 @app.get("/api/staff/search")
 async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)):
@@ -826,6 +828,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
         "short_address": req.short_address, "note": req.note,
         "assigned_to": req.assigned_to, "created_by": creator_id,
         "volunteer_id": agent_id, "lead_code": lead_code,
+        "location": req.location, "location_address": req.location_address,
     })
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
@@ -849,7 +852,7 @@ async def get_leads(status: str = None, branch: str = None,
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
-    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id"}
+    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id","location","location_address"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
@@ -2996,6 +2999,8 @@ async def create_order_from_site(order: OrderRequest):
         "status":        "new",
         "created_by":    None,
         "volunteer_id":  None,
+        "location":      order.location,
+        "location_address": order.location_address,
     })
     if lead:
         await db.add_lead_call(lead["id"], None, action="created",

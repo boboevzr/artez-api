@@ -113,6 +113,8 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_create_order   BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location           TEXT DEFAULT NULL",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location_address   TEXT DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS assigned_to        INTEGER REFERENCES staff(id) DEFAULT NULL",
         # Заполнить lead_code для лидов у которых он NULL
         """UPDATE leads SET lead_code = 'L-' || LPAD(id::text, 4, '0')
@@ -967,14 +969,14 @@ async def create_lead(data: dict) -> dict:
         row = await conn.fetchrow("""
             INSERT INTO leads (lead_num, lead_code, client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
-                               created_by, volunteer_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                               created_by, volunteer_id, location, location_address)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
             RETURNING *
         """, data["lead_num"], data.get("lead_code"), data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
-            data.get("volunteer_id"))
+            data.get("volunteer_id"), data.get("location"), data.get("location_address"))
         return dict(row)
 
 async def get_leads(status: str = None, branch: str = None,
