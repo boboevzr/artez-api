@@ -1875,7 +1875,7 @@ ADMIN_TOKEN_PREFIX = "admin:"
 def create_admin_token() -> str:
     payload = {
         "sub": "admin",
-        "exp": datetime.now(timezone.utc) + timedelta(days=1),
+        "exp": datetime.now(timezone.utc) + timedelta(days=30),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
