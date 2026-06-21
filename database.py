@@ -996,7 +996,8 @@ async def get_leads(status: str = None, branch: str = None,
                        vol.last_name  AS volunteer_last_name,
                        vol.phone      AS volunteer_phone,
                        asgn.first_name AS assigned_first_name,
-                       asgn.last_name  AS assigned_last_name
+                       asgn.last_name  AS assigned_last_name,
+                       asgn.phone      AS assigned_phone
                 FROM leads l
                 LEFT JOIN staff s    ON s.id    = l.created_by
                 LEFT JOIN staff vol  ON vol.id  = l.volunteer_id
@@ -1046,10 +1047,14 @@ async def get_leads_by_agent(agent_id: int, status: str = None):
                        s.phone        AS creator_phone,
                        vol.first_name AS volunteer_first_name,
                        vol.last_name  AS volunteer_last_name,
-                       vol.phone      AS volunteer_phone
+                       vol.phone      AS volunteer_phone,
+                       asgn.first_name AS assigned_first_name,
+                       asgn.last_name  AS assigned_last_name,
+                       asgn.phone      AS assigned_phone
                 FROM leads l
-                LEFT JOIN staff s   ON s.id  = l.created_by
-                LEFT JOIN staff vol ON vol.id = l.volunteer_id
+                LEFT JOIN staff s    ON s.id    = l.created_by
+                LEFT JOIN staff vol  ON vol.id  = l.volunteer_id
+                LEFT JOIN staff asgn ON asgn.id = l.assigned_to
                 WHERE {' AND '.join(filters)} ORDER BY l.created_at DESC LIMIT 200""", *args)
 
 async def generate_lead_code() -> str:
@@ -1075,13 +1080,17 @@ async def get_lead_by_id(lead_id: int):
                    s.phone       AS creator_phone,
                    vol.first_name AS volunteer_first_name,
                    vol.last_name  AS volunteer_last_name,
-                   vol.phone     AS volunteer_phone,
+                   vol.phone      AS volunteer_phone,
                    conv.first_name AS converted_first_name,
-                   conv.last_name  AS converted_last_name
+                   conv.last_name  AS converted_last_name,
+                   asgn.first_name AS assigned_first_name,
+                   asgn.last_name  AS assigned_last_name,
+                   asgn.phone      AS assigned_phone
             FROM leads l
-            LEFT JOIN staff s    ON s.id   = l.created_by
-            LEFT JOIN staff vol  ON vol.id = l.volunteer_id
+            LEFT JOIN staff s    ON s.id    = l.created_by
+            LEFT JOIN staff vol  ON vol.id  = l.volunteer_id
             LEFT JOIN staff conv ON conv.id = l.converted_by
+            LEFT JOIN staff asgn ON asgn.id = l.assigned_to
             WHERE l.id = $1
         """, lead_id)
 

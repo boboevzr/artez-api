@@ -775,22 +775,24 @@ async def assign_lead(lead_id: int, body: dict = Body({}),
     take = body.get("assign", True)
     staff_id = staff.get("id")
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
+    role = staff.get("role", "")
+    is_admin = role in ("admin", "manager")
     async with db.pool.acquire() as conn:
         if take:
-            # Взять только если свободен
             row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
             if not row:
                 raise HTTPException(status_code=404, detail="Лид не найден")
-            if row["assigned_to"] and row["assigned_to"] != staff_id:
+            # Обычный сотрудник не может взять лид занятый другим; admin/manager могут
+            if row["assigned_to"] and row["assigned_to"] != staff_id and not is_admin:
                 raise HTTPException(status_code=409, detail="Лид уже взят другим сотрудником")
             await conn.execute("UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
             note = f"Лид взят: {staff.get('first_name','')} {staff.get('last_name','')}".strip()
         else:
-            # Освободить только свой
             row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
             if not row:
                 raise HTTPException(status_code=404, detail="Лид не найден")
-            if row["assigned_to"] != staff_id:
+            # Освободить можно свой лид, или admin/manager любой
+            if row["assigned_to"] != staff_id and not is_admin:
                 raise HTTPException(status_code=403, detail="Можно освободить только свой лид")
             await conn.execute("UPDATE leads SET assigned_to=NULL WHERE id=$1", lead_id)
             note = f"Лид освобождён: {staff.get('first_name','')} {staff.get('last_name','')}".strip()
