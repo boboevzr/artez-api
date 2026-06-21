@@ -749,6 +749,14 @@ async def staff_update(staff_id: int, body: dict, me=Depends(get_current_staff))
             updates["tg_id"] = int(updates["tg_id"])
         except (ValueError, TypeError):
             raise HTTPException(status_code=400, detail="tg_id должен быть числом")
+    if "birth_date" in updates and updates["birth_date"]:
+        from datetime import date as _date
+        try: updates["birth_date"] = _date.fromisoformat(str(updates["birth_date"]))
+        except: updates["birth_date"] = None
+    if "hire_date" in updates and updates["hire_date"]:
+        from datetime import date as _date
+        try: updates["hire_date"] = _date.fromisoformat(str(updates["hire_date"]))
+        except: updates["hire_date"] = None
     try:
         await db.update_staff(staff_id, **updates)
     except Exception as e:
