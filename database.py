@@ -113,6 +113,7 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_create_order   BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS birth_date        DATE DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location           TEXT DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location_address   TEXT DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS callback_at        TIMESTAMPTZ DEFAULT NULL",
@@ -919,8 +920,8 @@ async def create_staff(data: dict) -> int:
         return await conn.fetchval("""
             INSERT INTO staff (first_name, last_name, middle_name, phone, login, password_hash,
                                plain_password, role, position, branch, tg_id, tg_username,
-                               salary_type, salary_rate, hire_date, note, gender)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+                               salary_type, salary_rate, hire_date, note, gender, birth_date)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             RETURNING id
         """, data["first_name"], data.get("last_name"), data.get("middle_name"),
             data.get("phone"), data["login"], data["password_hash"],
@@ -928,13 +929,14 @@ async def create_staff(data: dict) -> int:
             data.get("role","callcenter"), data.get("position"), data.get("branch"),
             data.get("tg_id"), data.get("tg_username"),
             data.get("salary_type"), data.get("salary_rate"),
-            data.get("hire_date"), data.get("note"), data.get("gender","M"))
+            data.get("hire_date"), data.get("note"), data.get("gender","M"),
+            data.get("birth_date"))
 
 async def update_staff(staff_id: int, **kwargs):
     if not pool or not kwargs: return
     allowed = {"first_name","last_name","middle_name","phone","login","role","position",
                "branch","tg_id","tg_username","salary_type","salary_rate","hire_date",
-               "note","active","is_active","gender"}
+               "note","active","is_active","gender","birth_date"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if "is_active" in fields:
         fields["active"] = fields.pop("is_active")

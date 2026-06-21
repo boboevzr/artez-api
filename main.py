@@ -644,6 +644,7 @@ class StaffCreateRequest(BaseModel):
     hire_date: str | None = None
     note: str | None = None
     gender: str = "M"
+    birth_date: str | None = None
 
 def _staff_public(s: dict) -> dict:
     return {
@@ -666,6 +667,7 @@ def _staff_public(s: dict) -> dict:
         "can_confirm_order":   s.get("can_confirm_order", True),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
+        "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
         "plain_password": s.get("plain_password"),
     }
 
@@ -722,6 +724,8 @@ async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))
             "tg_id": req.tg_id, "tg_username": req.tg_username,
             "salary_type": req.salary_type, "salary_rate": req.salary_rate,
             "hire_date": hire, "note": req.note,
+            "gender": req.gender,
+            "birth_date": date_type.fromisoformat(req.birth_date) if req.birth_date else None,
         })
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"DB error: {type(e).__name__}: {e}")
@@ -729,7 +733,7 @@ async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))
 
 @app.patch("/api/staff/{staff_id}")
 async def staff_update(staff_id: int, body: dict, _=Depends(require_perm("staff"))):
-    allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender"}
+    allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
