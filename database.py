@@ -1725,8 +1725,7 @@ async def save_measure_dims(item_id: int, width_cm: float, length_cm: float) -> 
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_items
-            SET width_cm=$2, length_cm=$3, sqm=$4,
-                total_sum=ROUND($4 * price_per_sqm, 2)
+            SET width_cm=$2, length_cm=$3, sqm=$4
             WHERE id=$1 AND measure_status != 'approved'
             RETURNING *
         """, item_id, width_cm, length_cm, sqm)
