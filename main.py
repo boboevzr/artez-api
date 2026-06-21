@@ -161,6 +161,8 @@ async def send_tg(chat_id, text: str):
         async with aiohttp.ClientSession() as s:
             await s.post(url, json={"chat_id": str(chat_id), "text": text},
                          timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"send_tg error: {e}")
 
 
 async def _tg_answer_callback(callback_query_id: str, text: str, alert: bool = False):
@@ -186,8 +188,6 @@ async def _tg_edit_message(chat_id, message_id: int, text: str):
                 timeout=aiohttp.ClientTimeout(total=5))
     except Exception as e:
         logging.warning(f"editMessageText error: {e}")
-    except Exception as e:
-        logging.warning(f"send_tg error: {e}")
 
 
 _STATUS_LABELS_RU = {
