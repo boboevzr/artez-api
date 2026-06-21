@@ -169,6 +169,29 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS deadline DATE DEFAULT NULL",
         # Замеры: причина отклонения
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS reject_note TEXT DEFAULT NULL",
+        # Маршруты логистики
+        """CREATE TABLE IF NOT EXISTS routes (
+            id          SERIAL PRIMARY KEY,
+            name        VARCHAR(200) NOT NULL,
+            date        DATE NOT NULL,
+            driver_id   INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            branch      VARCHAR(50),
+            type        VARCHAR(20) DEFAULT 'mixed',
+            status      VARCHAR(20) DEFAULT 'planned',
+            note        TEXT,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            updated_at  TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS route_orders (
+            id          SERIAL PRIMARY KEY,
+            route_id    INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
+            order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+            sort_order  INTEGER DEFAULT 0,
+            stop_status VARCHAR(20) DEFAULT 'pending',
+            note        TEXT,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(route_id, order_id)
+        )""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -2070,3 +2093,120 @@ async def get_item_media_by_id(media_id: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT * FROM order_item_media WHERE id=$1", media_id)
         return dict(row) if row else {}
+
+# ── МАРШРУТЫ (routes) ────────────────────────────────────────────────────────
+
+async def get_routes(date: str | None = None, driver_id: int | None = None,
+                     branch: str | None = None, status: str | None = None) -> list:
+    if not pool: return []
+    filters, vals, i = [], [], 1
+    if date:      filters.append(f"r.date=${ i}"); vals.append(date); i+=1
+    if driver_id: filters.append(f"r.driver_id=${i}"); vals.append(driver_id); i+=1
+    if branch:    filters.append(f"r.branch=${i}"); vals.append(branch); i+=1
+    if status:    filters.append(f"r.status=${i}"); vals.append(status); i+=1
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT r.*,
+                   s.first_name || ' ' || s.last_name AS driver_name,
+                   COUNT(ro.id) AS order_count
+            FROM routes r
+            LEFT JOIN staff s ON s.id = r.driver_id
+            LEFT JOIN route_orders ro ON ro.route_id = r.id
+            {where}
+            GROUP BY r.id, s.first_name, s.last_name
+            ORDER BY r.date DESC, r.id DESC
+        """, *vals)
+        return [dict(r) for r in rows]
+
+async def create_route(data: dict) -> dict:
+    if not pool: return {}
+    from datetime import date as _date
+    d = _date.fromisoformat(data["date"]) if isinstance(data.get("date"), str) else data.get("date")
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO routes (name, date, driver_id, branch, type, status, note)
+            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, data.get("name",""), d, data.get("driver_id"),
+             data.get("branch"), data.get("type","mixed"),
+             data.get("status","planned"), data.get("note"))
+        return dict(row) if row else {}
+
+async def get_route(route_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT r.*, s.first_name || ' ' || s.last_name AS driver_name
+            FROM routes r LEFT JOIN staff s ON s.id=r.driver_id WHERE r.id=$1
+        """, route_id)
+        if not row: return None
+        route = dict(row)
+        stops = await conn.fetch("""
+            SELECT ro.*, o.order_num, o.client_first_name, o.client_last_name,
+                   o.client_phone, o.address, o.short_address,
+                   o.location, o.location_address, o.status AS order_status,
+                   o.service, o.branch
+            FROM route_orders ro
+            JOIN orders o ON o.id=ro.order_id
+            WHERE ro.route_id=$1
+            ORDER BY ro.sort_order, ro.id
+        """, route_id)
+        route["stops"] = [dict(s) for s in stops]
+        return route
+
+async def update_route(route_id: int, data: dict) -> dict:
+    if not pool: return {}
+    allowed = {"name","date","driver_id","branch","type","status","note"}
+    fields = {k: v for k, v in data.items() if k in allowed and v is not None}
+    if "date" in fields and isinstance(fields["date"], str):
+        from datetime import date as _date
+        fields["date"] = _date.fromisoformat(fields["date"])
+    if not fields: return {}
+    sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE routes SET {sets}, updated_at=NOW() WHERE id=$1 RETURNING *",
+            route_id, *fields.values())
+        return dict(row) if row else {}
+
+async def delete_route(route_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM routes WHERE id=$1", route_id)
+        return True
+
+async def add_orders_to_route(route_id: int, order_ids: list[int]) -> int:
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        cur_max = await conn.fetchval(
+            "SELECT COALESCE(MAX(sort_order),0) FROM route_orders WHERE route_id=$1", route_id)
+        count = 0
+        for i, oid in enumerate(order_ids):
+            try:
+                await conn.execute("""
+                    INSERT INTO route_orders (route_id, order_id, sort_order)
+                    VALUES ($1,$2,$3) ON CONFLICT DO NOTHING
+                """, route_id, oid, (cur_max or 0) + i + 1)
+                count += 1
+            except Exception:
+                pass
+        return count
+
+async def remove_order_from_route(route_id: int, order_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM route_orders WHERE route_id=$1 AND order_id=$2", route_id, order_id)
+        return True
+
+async def update_route_stop(route_id: int, order_id: int, data: dict) -> bool:
+    if not pool: return False
+    allowed = {"sort_order","stop_status","note"}
+    fields = {k: v for k, v in data.items() if k in allowed}
+    if not fields: return False
+    sets = ", ".join(f"{k}=${i+3}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE route_orders SET {sets} WHERE route_id=$1 AND order_id=$2",
+            route_id, order_id, *fields.values())
+        return True

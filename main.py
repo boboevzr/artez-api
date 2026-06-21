@@ -795,6 +795,77 @@ async def save_staff_personal_ep(staff_id: int, body: dict, me=Depends(get_curre
     await db.upsert_staff_personal(staff_id, body)
     return {"ok": True}
 
+# ══════════════════════════════════════
+#  МАРШРУТЫ (routes)
+# ══════════════════════════════════════
+
+@app.get("/api/admin/routes")
+async def list_routes(date: str | None = None, driver_id: int | None = None,
+                      branch: str | None = None, status: str | None = None,
+                      me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager"):
+        raise HTTPException(status_code=403)
+    rows = await db.get_routes(date=date, driver_id=driver_id, branch=branch, status=status)
+    for r in rows:
+        if r.get("date"): r["date"] = str(r["date"])
+        if r.get("created_at"): r["created_at"] = r["created_at"].isoformat()
+        if r.get("updated_at"): r["updated_at"] = r["updated_at"].isoformat()
+    return {"ok": True, "routes": rows}
+
+@app.post("/api/admin/routes")
+async def create_route(body: dict, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager"):
+        raise HTTPException(status_code=403)
+    row = await db.create_route(body)
+    if row.get("date"): row["date"] = str(row["date"])
+    return {"ok": True, "route": row}
+
+@app.get("/api/admin/routes/{route_id}")
+async def get_route(route_id: int, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager","driver"):
+        raise HTTPException(status_code=403)
+    route = await db.get_route(route_id)
+    if not route: raise HTTPException(status_code=404)
+    if route.get("date"): route["date"] = str(route["date"])
+    for s in route.get("stops", []):
+        if s.get("created_at"): s["created_at"] = s["created_at"].isoformat()
+    return {"ok": True, "route": route}
+
+@app.patch("/api/admin/routes/{route_id}")
+async def update_route(route_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager"):
+        raise HTTPException(status_code=403)
+    row = await db.update_route(route_id, body)
+    if row.get("date"): row["date"] = str(row["date"])
+    return {"ok": True, "route": row}
+
+@app.delete("/api/admin/routes/{route_id}")
+async def delete_route(route_id: int, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics"):
+        raise HTTPException(status_code=403)
+    await db.delete_route(route_id)
+    return {"ok": True}
+
+@app.post("/api/admin/routes/{route_id}/orders")
+async def add_route_orders(route_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager"):
+        raise HTTPException(status_code=403)
+    order_ids = body.get("order_ids", [])
+    count = await db.add_orders_to_route(route_id, order_ids)
+    return {"ok": True, "added": count}
+
+@app.delete("/api/admin/routes/{route_id}/orders/{order_id}")
+async def remove_route_order(route_id: int, order_id: int, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager"):
+        raise HTTPException(status_code=403)
+    await db.remove_order_from_route(route_id, order_id)
+    return {"ok": True}
+
+@app.patch("/api/admin/routes/{route_id}/orders/{order_id}")
+async def update_route_stop(route_id: int, order_id: int, body: dict, me=Depends(get_current_staff)):
+    await db.update_route_stop(route_id, order_id, body)
+    return {"ok": True}
+
 @app.delete("/api/admin/staff/{staff_id}")
 async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
     if me.get("role") != "admin":
