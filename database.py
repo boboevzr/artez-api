@@ -115,6 +115,7 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location           TEXT DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS location_address   TEXT DEFAULT NULL",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS callback_at        TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS assigned_to        INTEGER REFERENCES staff(id) DEFAULT NULL",
         # Заполнить lead_code для лидов у которых он NULL
         """UPDATE leads SET lead_code = 'L-' || LPAD(id::text, 4, '0')
@@ -1012,12 +1013,19 @@ async def get_leads(status: str = None, branch: str = None,
                 ORDER BY l.created_at DESC LIMIT ${len(args)}""", *args
         )
 
-async def update_lead_status(lead_id: int, status: str):
+async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
     if not pool: return
     async with pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE leads SET status=$2, updated_at=NOW() WHERE id=$1", lead_id, status
-        )
+        if status == "callback" and scheduled_at:
+            await conn.execute(
+                "UPDATE leads SET status=$2, callback_at=$3, updated_at=NOW() WHERE id=$1",
+                lead_id, status, scheduled_at
+            )
+        else:
+            await conn.execute(
+                "UPDATE leads SET status=$2, callback_at=NULL, updated_at=NOW() WHERE id=$1",
+                lead_id, status
+            )
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None

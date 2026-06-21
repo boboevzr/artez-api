@@ -920,7 +920,10 @@ async def update_lead_status(lead_id: int, body: dict,
     if status == "converted" and order_num:
         await db.convert_lead_to_order(lead_id, order_num, operator_id or 0)
     else:
-        await db.update_lead_status(lead_id, status)
+        scheduled_at_pre = body.get("scheduled_at")
+        from datetime import datetime as _dt
+        sched_pre = _dt.fromisoformat(scheduled_at_pre) if scheduled_at_pre and status == "callback" else None
+        await db.update_lead_status(lead_id, status, scheduled_at=sched_pre)
     # лог
     action_labels = {
         "new": "Сменил статус на «Новый»",
@@ -2894,6 +2897,7 @@ SITE_SETTINGS_DEFAULTS = {
         "💬 {note}\n\n"
         "📌 {source}: {creator}"
     ),
+    "callback_overdue_minutes": "10",
 }
 
 async def _get_cfg(key: str) -> str:
@@ -2948,8 +2952,9 @@ class SiteSettings(BaseModel):
     leads_group_id:          str | None = None
     leads_group_zarafshan:   str | None = None
     leads_group_navoi:       str | None = None
-    leads_group_enabled:     str | None = None
-    lead_notify_ru:          str | None = None
+    leads_group_enabled:         str | None = None
+    lead_notify_ru:              str | None = None
+    callback_overdue_minutes:    str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
