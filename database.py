@@ -110,6 +110,8 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_measure         BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_approve_measure BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS order_stages        VARCHAR(100) DEFAULT NULL",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_create_order   BOOLEAN DEFAULT TRUE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order  BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS plain_password   VARCHAR(100) DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS washer_login   VARCHAR(50)  DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS actual_width_cm  NUMERIC(8,1) DEFAULT NULL",

@@ -584,6 +584,8 @@ def _staff_public(s: dict) -> dict:
         "can_edit_items":      s.get("can_edit_items", True),
         "can_measure":         s.get("can_measure", False),
         "can_approve_measure": s.get("can_approve_measure", False),
+        "can_create_order":    s.get("can_create_order", True),
+        "can_confirm_order":   s.get("can_confirm_order", True),
         "order_stages":        s.get("order_stages") or None,
         "plain_password": s.get("plain_password"),
     }
@@ -977,6 +979,8 @@ async def staff_own_orders(staff=Depends(get_current_staff)):
 
 @app.post("/api/staff/orders/create")
 async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm("orders"))):
+    if not staff.get("can_create_order", True):
+        raise HTTPException(status_code=403, detail="Нет права создавать заказы")
     try:
         order_num = await db.get_next_order_num()
         first_name = staff.get("first_name") or ""
@@ -2150,9 +2154,11 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             if pending:
                 raise HTTPException(status_code=400, detail=f"Не все позиции замерены: осталось {len(pending)}")
     elif "status" not in ROLE_PERMISSIONS.get(role, []) and role != "admin":
-        # Колл-центр и любой с orders может подтвердить заказ (new → confirmed)
+        # Любой с orders может подтвердить заказ (new → confirmed), если есть can_confirm_order
         perms = ROLE_PERMISSIONS.get(role, [])
         if "orders" in perms and status == "confirmed":
+            if not staff.get("can_confirm_order", True):
+                raise HTTPException(status_code=403, detail="Нет права подтверждать заказы")
             order = await db.get_order_by_id(order_id)
             if not order or order.get("status") != "new":
                 raise HTTPException(status_code=403, detail="Можно подтвердить только новый заказ")
@@ -2551,14 +2557,20 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_edit_items:      bool = Body(True,  embed=True),
     can_measure:         bool = Body(False, embed=True),
     can_approve_measure: bool = Body(False, embed=True),
+    can_create_order:    bool = Body(True,  embed=True),
+    can_confirm_order:   bool = Body(True,  embed=True),
     order_stages:        str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE staff
-               SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4, order_stages=$5
-               WHERE id=$1 RETURNING id, can_edit_items, can_measure, can_approve_measure, order_stages""",
-            staff_id, can_edit_items, can_measure, can_approve_measure, order_stages or None)
+               SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4,
+                   can_create_order=$5, can_confirm_order=$6, order_stages=$7
+               WHERE id=$1
+               RETURNING id, can_edit_items, can_measure, can_approve_measure,
+                         can_create_order, can_confirm_order, order_stages""",
+            staff_id, can_edit_items, can_measure, can_approve_measure,
+            can_create_order, can_confirm_order, order_stages or None)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
