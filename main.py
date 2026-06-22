@@ -3049,6 +3049,26 @@ async def claim_position_request(order_id: int, staff=Depends(get_current_staff)
         ))
     return {"ok": True}
 
+@app.post("/api/staff/orders/{order_id}/notify-washer")
+async def notify_washer_new_item(
+    order_id: int,
+    washer_id: int = Body(..., embed=True),
+    item_id: int   = Body(None, embed=True),
+    staff=Depends(get_current_staff),
+):
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    order_num  = order.get("order_number") or f"#{order_id}"
+    sender     = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Менеджер")
+    title = f"📋 Новая позиция — {order_num}"
+    body  = f"Добавлена позиция. {sender} назначает вас."
+    asyncio.create_task(send_web_push(
+        washer_id, title, body,
+        order_id=order_id, push_type="new_item"
+    ))
+    return {"ok": True}
+
 @app.get("/api/admin/orders/{order_id}/items/{item_id}/media")
 async def get_item_media(order_id: int, item_id: int, _=Depends(get_current_staff)):
     media = await db.get_item_media(item_id)
