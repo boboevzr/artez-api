@@ -2934,6 +2934,9 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         if not actual_width_cm or not actual_length_cm:
             raise HTTPException(status_code=400, detail="Укажите ширину и длину")
         await db.save_measure_dims(item_id, actual_width_cm, actual_length_cm)
+        media = await db.get_item_media(item_id)
+        if not media:
+            raise HTTPException(status_code=400, detail="Добавьте фото или видео замера")
         item = await db.submit_item_measure(item_id)
         if not item:
             raise HTTPException(status_code=400, detail="Ошибка при отправке на проверку")
