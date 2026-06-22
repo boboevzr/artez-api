@@ -2988,6 +2988,24 @@ async def get_pending_reviews(staff=Depends(get_current_staff)):
     visible = [r for r in reviews if not r["review_claimed_by"] or r["review_claimed_by"] == my_id]
     return {"ok": True, "reviews": visible}
 
+@app.post("/api/staff/orders/{order_id}/request-position")
+async def request_position(order_id: int, note: str = Body(..., embed=True), staff=Depends(get_current_staff)):
+    """Мойщик просит добавить позицию — пуш всем с can_approve_measure."""
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    washer_name = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Мойщик")
+    order_num   = order.get("order_number") or f"#{order_id}"
+    title = f"📋 Запрос позиции — {order_num}"
+    body  = f"{washer_name}: {note}" if note else washer_name
+    approvers = await db.get_all_approvers()
+    for a in approvers:
+        asyncio.create_task(send_web_push(
+            a["id"], title, body,
+            order_id=order_id, push_type="position_request"
+        ))
+    return {"ok": True}
+
 @app.get("/api/admin/orders/{order_id}/items/{item_id}/media")
 async def get_item_media(order_id: int, item_id: int, _=Depends(get_current_staff)):
     media = await db.get_item_media(item_id)
