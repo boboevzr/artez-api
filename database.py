@@ -114,6 +114,8 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order    BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_confirmed   BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_send_pickup      BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS review_claimed_by    INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS review_claimed_at    TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS birth_date        DATE DEFAULT NULL",
         """CREATE TABLE IF NOT EXISTS staff_personal (
@@ -2060,6 +2062,44 @@ async def delete_item_media(media_id: int) -> bool:
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM order_item_media WHERE id=$1", media_id)
         return True
+
+async def claim_measure_review(item_id: int, staff_id: int) -> dict:
+    """Пометить замер как «принят на проверку» конкретным сотрудником."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items
+            SET review_claimed_by=$2, review_claimed_at=NOW()
+            WHERE id=$1 AND measure_status='submitted'
+            RETURNING *
+        """, item_id, staff_id)
+        return dict(row) if row else {}
+
+async def get_pending_measure_reviews() -> list:
+    """Все замеры со статусом 'submitted' с информацией о заказе и кто принял."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT oi.id AS item_id, oi.order_id, oi.service, oi.review_claimed_by,
+                   oi.review_claimed_at, oi.submitted_at,
+                   o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
+                   s.first_name AS claimer_first, s.last_name AS claimer_last
+            FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            LEFT JOIN staff s ON s.id = oi.review_claimed_by
+            WHERE oi.measure_status = 'submitted'
+            ORDER BY oi.id ASC
+        """)
+        return [dict(r) for r in rows]
+
+async def get_all_approvers() -> list:
+    """Все сотрудники у которых can_approve_measure = true."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM staff WHERE can_approve_measure=TRUE AND active=TRUE"
+        )
+        return [dict(r) for r in rows]
 
 async def submit_item_measure(item_id: int) -> dict:
     if not pool: return {}

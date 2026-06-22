@@ -72,8 +72,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup():
     await db.init_db()
     asyncio.create_task(_tg_reminder_worker())
+    asyncio.create_task(_measure_review_worker())
 
-async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None):
+async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None,
+                        order_id: int = None, item_id: int = None, push_type: str = None):
     if not VAPID_PRIVATE or not VAPID_PUBLIC:
         return
     try:
@@ -81,7 +83,8 @@ async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = Non
         subs = await db.get_push_subscriptions(staff_id)
         for sub in subs:
             try:
-                payload = _json.dumps({"title": title, "body": body, "lead_id": lead_id, "phone": phone})
+                payload = _json.dumps({"title": title, "body": body, "lead_id": lead_id, "phone": phone,
+                                       "order_id": order_id, "item_id": item_id, "type": push_type})
                 webpush(
                     subscription_info={"endpoint": sub["endpoint"],
                                        "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
@@ -151,6 +154,42 @@ async def _tg_reminder_worker():
         except Exception as e:
             logging.warning(f"TG reminder worker error: {e}")
         await asyncio.sleep(60)
+
+
+async def _measure_review_worker():
+    """Каждые 5 минут: push-уведомления о неутверждённых замерах."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            from datetime import datetime, timezone
+            reviews   = await db.get_pending_measure_reviews()
+            approvers = await db.get_all_approvers()
+            now = datetime.now(timezone.utc)
+            for rev in reviews:
+                order_num  = rev.get("order_num") or f"#{rev['order_id']}"
+                service    = rev.get("service") or "позиция"
+                item_id    = rev["item_id"]
+                order_id   = rev["order_id"]
+                title      = f"📐 Проверить замер — {order_num}"
+                body       = f"Замер «{service}» ожидает утверждения"
+                claimed_by = rev.get("review_claimed_by")
+                claimed_at = rev.get("review_claimed_at")
+                if claimed_by and claimed_at:
+                    elapsed = (now - claimed_at.replace(tzinfo=timezone.utc)).total_seconds()
+                    if elapsed > 300:
+                        asyncio.create_task(send_web_push(
+                            claimed_by, f"⏰ Не забудь проверить — {order_num}", body,
+                            order_id=order_id, item_id=item_id, push_type="measure"
+                        ))
+                else:
+                    for approver in approvers:
+                        asyncio.create_task(send_web_push(
+                            approver["id"], title, body,
+                            order_id=order_id, item_id=item_id, push_type="measure"
+                        ))
+        except Exception as e:
+            logging.warning(f"measure_review_worker error: {e}")
+        await asyncio.sleep(300)
 
 
 async def send_tg(chat_id, text: str):
@@ -2884,6 +2923,21 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         item = await db.submit_item_measure(item_id)
         if not item:
             raise HTTPException(status_code=400, detail="Ошибка при отправке на проверку")
+        # Push всем кто может проверять замеры
+        try:
+            approvers = await db.get_all_approvers()
+            order_row = await db.get_order(order_id)
+            order_num = (order_row or {}).get("order_num") or f"#{order_id}"
+            svc       = item.get("service") or "позиция"
+            for ap in approvers:
+                asyncio.create_task(send_web_push(
+                    ap["id"],
+                    f"📐 Новый замер — {order_num}",
+                    f"Замер «{svc}» ожидает вашего утверждения",
+                    order_id=order_id, item_id=item_id, push_type="measure"
+                ))
+        except Exception as _pe:
+            logging.warning(f"measure push error: {_pe}")
     elif action == "approve":
         item = await db.approve_item_measure(item_id)
     elif action == "reject":
@@ -2895,6 +2949,25 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     return {"ok": True, "item": item}
+
+@app.post("/api/admin/orders/{order_id}/items/{item_id}/measure/claim")
+async def claim_measure_review(order_id: int, item_id: int, staff=Depends(get_current_staff)):
+    if not staff.get("can_approve_measure"):
+        raise HTTPException(status_code=403, detail="Нет прав для проверки замеров")
+    item = await db.claim_measure_review(item_id, staff["id"])
+    if not item:
+        raise HTTPException(status_code=404, detail="Замер не найден или уже утверждён")
+    return {"ok": True, "item": item}
+
+@app.get("/api/staff/pending-reviews")
+async def get_pending_reviews(staff=Depends(get_current_staff)):
+    if not staff.get("can_approve_measure"):
+        return {"ok": True, "reviews": []}
+    reviews = await db.get_pending_measure_reviews()
+    # Вернуть только те, которые не приняты другим сотрудником (или приняты мной)
+    my_id = staff["id"]
+    visible = [r for r in reviews if not r["review_claimed_by"] or r["review_claimed_by"] == my_id]
+    return {"ok": True, "reviews": visible}
 
 @app.get("/api/admin/orders/{order_id}/items/{item_id}/media")
 async def get_item_media(order_id: int, item_id: int, _=Depends(get_current_staff)):
