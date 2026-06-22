@@ -2997,16 +2997,39 @@ async def request_position(
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(404, "Заказ не найден")
-    washer_name = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Мойщик")
-    order_num   = order.get("order_number") or f"#{order_id}"
-    count_str   = f"нужно добавить {count} поз." if count > 1 else "нужно добавить позицию"
-    title = f"📋 {order_num} — {count_str}"
+    washer_name  = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Мойщик")
+    order_num    = order.get("order_number") or f"#{order_id}"
+    items        = await db.get_order_items(order_id)
+    current_cnt  = len(items)
+    add_str      = f"+{count}" if count > 1 else "+1"
+    title = f"📋 {order_num} — сейчас {current_cnt} поз., нужно {add_str}"
     body  = f"{washer_name}: {note}" if note else washer_name
     approvers = await db.get_all_approvers()
     for a in approvers:
         asyncio.create_task(send_web_push(
             a["id"], title, body,
             order_id=order_id, push_type="position_request"
+        ))
+    return {"ok": True}
+
+@app.post("/api/staff/orders/{order_id}/claim-position-request")
+async def claim_position_request(order_id: int, staff=Depends(get_current_staff)):
+    """Менеджер принимает запрос — уведомляем остальных чтобы не дублировали."""
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(404, "Заказ не найден")
+    my_id       = staff["id"]
+    order_num   = order.get("order_number") or f"#{order_id}"
+    my_name     = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
+    title = f"✅ {order_num} — принято"
+    body  = f"{my_name} принял запрос на добавление позиции"
+    approvers = await db.get_all_approvers()
+    for a in approvers:
+        if a["id"] == my_id:
+            continue
+        asyncio.create_task(send_web_push(
+            a["id"], title, body,
+            order_id=order_id, push_type="position_claimed"
         ))
     return {"ok": True}
 
