@@ -3472,3 +3472,42 @@ async def _notify_group_site_lead(lead_code: str, data: "OrderRequest", lead_id:
             await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
     except Exception as e:
         logging.warning(f"_notify_group_site_lead error: {e}")
+
+
+# ── ОБСЛУЖИВАНИЕ БД ──────────────────────────────────────────────────────────
+@app.post("/api/admin/db-maintenance")
+async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin)):
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        if op == "purge_deleted_history":
+            result = await conn.execute("""
+                DELETE FROM order_status_history
+                WHERE order_num NOT IN (
+                    SELECT order_num FROM orders WHERE order_num IS NOT NULL
+                )
+            """)
+            count = result.split()[-1] if result else "0"
+            return {"ok": True, "message": f"Удалено {count} записей истории удалённых заказов"}
+
+        elif op == "truncate_history":
+            await conn.execute("TRUNCATE TABLE order_status_history")
+            return {"ok": True, "message": "Таблица order_status_history очищена"}
+
+        elif op == "vacuum":
+            await conn.execute("VACUUM ANALYZE orders")
+            await conn.execute("VACUUM ANALYZE order_items")
+            await conn.execute("VACUUM ANALYZE order_status_history")
+            return {"ok": True, "message": "VACUUM ANALYZE выполнен для orders, order_items, order_status_history"}
+
+        elif op == "purge_old_leads":
+            result = await conn.execute("""
+                DELETE FROM leads
+                WHERE status IN ('closed','cancelled')
+                  AND created_at < NOW() - INTERVAL '90 days'
+            """)
+            count = result.split()[-1] if result else "0"
+            return {"ok": True, "message": f"Удалено {count} старых лидов"}
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Неизвестная операция: {op}")
