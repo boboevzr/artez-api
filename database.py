@@ -497,6 +497,12 @@ async def create_tables():
         );
         """)
 
+    # ── Шаг 7: тип заказа (стандарт/экспресс) ───────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS service_type VARCHAR(20) DEFAULT 'standard';
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -747,13 +753,13 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             INSERT INTO orders (
                 order_num, source,
                 client_tg_id, client_first_name, client_last_name, client_phone,
-                branch, city, address, short_address, location, service, pickup_date, pickup_time, note,
+                branch, city, address, short_address, location, service, service_type, pickup_date, pickup_time, note,
                 total_price, status
             ) VALUES (
                 $1, $2,
                 NULL, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                $15, 'new'
+                $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                $16, 'new'
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
@@ -768,6 +774,7 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             data.get("short_address", ""),
             data.get("location"),
             data.get("service"),
+            data.get("service_type") or "standard",
             data.get("pickup_date"),
             data.get("pickup_time"),
             data.get("note"),

@@ -479,6 +479,7 @@ class StaffOrderRequest(BaseModel):
     first_name: str
     phone: str
     service: str = ""
+    service_type: str = "standard"
     branch: str = ""
     address: str = ""
     short_address: str = ""
@@ -1470,7 +1471,8 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "address":       req.address or "",
             "short_address": req.short_address or "",
             "location":      location,
-            "service":     req.service,
+            "service":      req.service,
+            "service_type": req.service_type or "standard",
             "pickup_date": "",
             "pickup_time": "",
             "note":        note_full,
@@ -2539,7 +2541,7 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
     if staff.get("sub") != "admin" and order.get("status") not in _ORDER_EDITABLE_STATUSES:
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone",
-               "branch","address","short_address","location","location_address","note","deadline"}
+               "branch","address","short_address","location","location_address","note","deadline","service_type"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
