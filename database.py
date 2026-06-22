@@ -1704,7 +1704,7 @@ async def get_order_by_id(order_id: int) -> dict:
 async def update_order(order_id: int, **kwargs) -> dict:
     if not pool: return {}
     allowed = {"client_first_name", "client_last_name", "client_phone",
-               "branch", "address", "short_address", "location", "location_address", "note", "deadline"}
+               "branch", "address", "short_address", "location", "location_address", "note", "deadline", "service_type"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
