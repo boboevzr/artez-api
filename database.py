@@ -2081,7 +2081,7 @@ async def get_pending_measure_reviews() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT oi.id AS item_id, oi.order_id, oi.service, oi.review_claimed_by,
-                   oi.review_claimed_at, oi.submitted_at,
+                   oi.review_claimed_at,
                    o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
                    s.first_name AS claimer_first, s.last_name AS claimer_last
             FROM order_items oi

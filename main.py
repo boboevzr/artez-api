@@ -2926,7 +2926,7 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         # Push всем кто может проверять замеры
         try:
             approvers = await db.get_all_approvers()
-            order_row = await db.get_order(order_id)
+            order_row = await db.get_order_by_id(order_id)
             order_num = (order_row or {}).get("order_num") or f"#{order_id}"
             svc       = item.get("service") or "позиция"
             for ap in approvers:
