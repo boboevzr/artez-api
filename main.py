@@ -2979,6 +2979,22 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         if not note:
             raise HTTPException(status_code=400, detail="Укажите причину отклонения")
         item = await db.reject_item_measure(item_id, note)
+        try:
+            washer_login = item.get("washer_login")
+            if washer_login:
+                washer = await db.get_staff_by_login(washer_login)
+                if washer:
+                    order_row = await db.get_order_by_id(order_id)
+                    order_num = (order_row or {}).get("order_num") or f"#{order_id}"
+                    svc = item.get("service") or "позиция"
+                    asyncio.create_task(send_web_push(
+                        washer["id"],
+                        f"❌ Замер отклонён — {order_num}",
+                        f"«{svc}» — {note}",
+                        order_id=order_id, item_id=item_id, push_type="measure_rejected"
+                    ))
+        except Exception as _pe:
+            logging.warning(f"measure reject push error: {_pe}")
     else:
         raise HTTPException(status_code=400, detail="Неверное действие")
     if not item:
