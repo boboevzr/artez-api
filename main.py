@@ -2708,8 +2708,6 @@ async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depend
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
-    if not sqm or sqm <= 0:
-        raise HTTPException(status_code=400, detail="Укажите площадь или ширину и длину")
     item = await db.create_order_item(
         order_id=order_id, service=req.service, sqm=sqm,
         price_per_sqm=req.price_per_sqm,
