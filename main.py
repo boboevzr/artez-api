@@ -3059,10 +3059,12 @@ async def notify_washer_new_item(
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(404, "Заказ не найден")
-    order_num = order.get("order_number") or f"#{order_id}"
-    sender    = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Менеджер")
+    order_num   = order.get("order_num") or f"#{order_id}"
+    items       = await db.get_order_items(order_id)
+    item_count  = len(items)
+    sender      = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Менеджер")
     title = f"📋 Новая позиция — {order_num}"
-    body  = f"Добавлена позиция. {sender} назначает вас."
+    body  = f"Сейчас {item_count} поз. в заказе {order_num}. {sender} добавил позицию."
 
     if washer_id:
         target_ids = [washer_id]
