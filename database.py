@@ -2082,7 +2082,8 @@ async def get_pending_measure_reviews() -> list:
         rows = await conn.fetch("""
             SELECT oi.id AS item_id, oi.order_id, oi.service, oi.review_claimed_by,
                    oi.review_claimed_at,
-                   o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
+                   o.order_num, o.status AS order_status,
+                   o.client_first_name, o.client_last_name, o.client_phone,
                    s.first_name AS claimer_first, s.last_name AS claimer_last
             FROM order_items oi
             JOIN orders o ON o.id = oi.order_id
