@@ -2991,7 +2991,11 @@ async def upload_item_media(
     order_row = await db.get_order_by_id(order_id)
     order_num = order_row.get("order_num", f"#{order_id}") if order_row else f"#{order_id}"
     staff_name = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "")
-    caption = f"📐 Замер\n🧾 Заказ: {order_num} | Позиция #{item_id}\n👤 {staff_name}"
+    # Порядковый номер позиции внутри заказа (1-based)
+    order_items = await db.get_order_items(order_id)
+    item_ids = [i["id"] for i in order_items]
+    item_pos = item_ids.index(item_id) + 1 if item_id in item_ids else item_id
+    caption = f"📐 Замер\n🧾 Заказ: {order_num} | Позиция #{item_pos}\n👤 {staff_name}"
 
     file_bytes = await file.read()
     form = aiohttp.FormData()
