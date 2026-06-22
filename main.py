@@ -157,36 +157,55 @@ async def _tg_reminder_worker():
 
 
 async def _measure_review_worker():
-    """Каждые 5 минут: push-уведомления о неутверждённых замерах."""
+    """Каждые 5 минут: один сводный push на каждого проверяющего."""
     await asyncio.sleep(30)
     while True:
         try:
             from datetime import datetime, timezone
             reviews   = await db.get_pending_measure_reviews()
             approvers = await db.get_all_approvers()
+            if not reviews:
+                await asyncio.sleep(300)
+                continue
             now = datetime.now(timezone.utc)
+
+            # Замеры которые принял кто-то и прошло > 5 мин — напомнить именно ему
+            reminded_claimer = set()
             for rev in reviews:
-                order_num  = rev.get("order_num") or f"#{rev['order_id']}"
-                service    = rev.get("service") or "позиция"
-                item_id    = rev["item_id"]
-                order_id   = rev["order_id"]
-                title      = f"📐 Проверить замер — {order_num}"
-                body       = f"Замер «{service}» ожидает утверждения"
                 claimed_by = rev.get("review_claimed_by")
                 claimed_at = rev.get("review_claimed_at")
-                if claimed_by and claimed_at:
+                if claimed_by and claimed_at and claimed_by not in reminded_claimer:
                     elapsed = (now - claimed_at.replace(tzinfo=timezone.utc)).total_seconds()
                     if elapsed > 300:
+                        order_num = rev.get("order_num") or f"#{rev['order_id']}"
                         asyncio.create_task(send_web_push(
-                            claimed_by, f"⏰ Не забудь проверить — {order_num}", body,
-                            order_id=order_id, item_id=item_id, push_type="measure"
+                            claimed_by, "⏰ Не забудь проверить замеры",
+                            f"Принятые замеры ждут утверждения (заказ {order_num})",
+                            order_id=rev["order_id"], item_id=rev["item_id"], push_type="measure"
                         ))
+                        reminded_claimer.add(claimed_by)
+
+            # Незаклеймленные — один сводный пуш на каждого проверяющего
+            unclaimed = [r for r in reviews if not r.get("review_claimed_by")]
+            if unclaimed:
+                cnt = len(unclaimed)
+                if cnt == 1:
+                    r = unclaimed[0]
+                    title = f"📐 Замер на проверку — {r.get('order_num') or '#'+str(r['order_id'])}"
+                    body  = f"«{r.get('service') or 'позиция'}» ожидает утверждения"
+                    first_order_id = r["order_id"]
+                    first_item_id  = r["item_id"]
                 else:
-                    for approver in approvers:
-                        asyncio.create_task(send_web_push(
-                            approver["id"], title, body,
-                            order_id=order_id, item_id=item_id, push_type="measure"
-                        ))
+                    orders = list({r["order_id"] for r in unclaimed})
+                    title = f"📐 {cnt} замеров ожидают проверки"
+                    body  = f"Заказов: {len(orders)} · Нажмите для просмотра"
+                    first_order_id = unclaimed[0]["order_id"]
+                    first_item_id  = unclaimed[0]["item_id"]
+                for approver in approvers:
+                    asyncio.create_task(send_web_push(
+                        approver["id"], title, body,
+                        order_id=first_order_id, item_id=first_item_id, push_type="measure"
+                    ))
         except Exception as e:
             logging.warning(f"measure_review_worker error: {e}")
         await asyncio.sleep(300)
