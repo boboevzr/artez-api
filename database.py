@@ -1691,7 +1691,23 @@ async def delete_order_item(item_id: int) -> bool:
 async def delete_order(order_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
+        # Получаем order_num до удаления (нужен для history)
+        row = await conn.fetchrow("SELECT order_num FROM orders WHERE id=$1", order_id)
+        order_num = dict(row).get("order_num") if row else None
+        # Удаляем медиафайлы позиций
+        await conn.execute("DELETE FROM order_item_media WHERE order_id=$1", order_id)
+        # Удаляем позиции
         await conn.execute("DELETE FROM order_items WHERE order_id=$1", order_id)
+        # Удаляем фото заказа
+        await conn.execute("DELETE FROM order_photos WHERE order_id=$1", order_id)
+        # Удаляем платежи
+        await conn.execute("DELETE FROM order_payments WHERE order_id=$1", order_id)
+        # Удаляем из маршрутов
+        await conn.execute("DELETE FROM route_orders WHERE order_id=$1", order_id)
+        # Удаляем историю статусов
+        if order_num:
+            await conn.execute("DELETE FROM order_status_history WHERE order_num=$1", order_num)
+        # Удаляем сам заказ
         res = await conn.execute("DELETE FROM orders WHERE id=$1", order_id)
         return res == "DELETE 1"
 
