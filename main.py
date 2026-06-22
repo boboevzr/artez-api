@@ -2709,7 +2709,7 @@ async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depend
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
     item = await db.create_order_item(
-        order_id=order_id, service=req.service, sqm=sqm,
+        order_id=order_id, service=req.service, sqm=sqm or 0,
         price_per_sqm=req.price_per_sqm,
         width_cm=req.width_cm, length_cm=req.length_cm)
     return {"ok": True, "item": item}
