@@ -2899,6 +2899,186 @@ async def create_cash_handover(
     row = await db.add_cash_handover(from_staff_id, to_staff_id, amount, note)
     return {"ok": True, "handover": row}
 
+
+async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None):
+    """Отправить сообщение (или фото) в ТГ-канал кассы."""
+    if not BOT_TOKEN or not chat_id: return
+    try:
+        async with aiohttp.ClientSession() as s:
+            if photo_bytes:
+                form = aiohttp.FormData()
+                form.add_field("chat_id", str(chat_id))
+                form.add_field("photo", photo_bytes, filename=filename or "receipt.jpg", content_type="image/jpeg")
+                form.add_field("caption", text)
+                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
+                             timeout=aiohttp.ClientTimeout(total=10))
+            else:
+                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                             json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
+                             timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"_send_tg_cash error: {e}")
+
+
+# ── Передача наличных (staff → ответственный) ─────────────────────────────────
+
+@app.post("/api/admin/cash/staff-handover")
+async def staff_cash_handover(
+    to_staff_id: int   = Body(..., embed=True),
+    amount:      float = Body(..., embed=True),
+    note:        str   = Body("", embed=True),
+    staff=Depends(get_current_staff),
+):
+    from_name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    row = await db.add_cash_handover(staff["id"], to_staff_id, amount, note)
+    handover_id = row["id"]
+
+    # Пуш получателю
+    asyncio.create_task(send_web_push(
+        to_staff_id,
+        title="💵 Сдача наличных",
+        body=f"{from_name} сдаёт {int(amount):,} сум",
+        extra={"type": "cash_handover", "handover_id": handover_id},
+    ))
+
+    # ТГ канал кассы
+    ch = await db.get_cash_tg_channel()
+    to_staff = await db.get_staff_by_id(to_staff_id)
+    to_name = " ".join(filter(None,[to_staff.get("last_name",""),to_staff.get("first_name","")])).strip() if to_staff else f"#{to_staff_id}"
+    text = (f"💵 <b>Передача наличных</b>\n"
+            f"От: {from_name}\n"
+            f"Кому: {to_name}\n"
+            f"Сумма: <b>{int(amount):,} сум</b>"
+            + (f"\nПримечание: {note}" if note else ""))
+    asyncio.create_task(_send_tg_cash(ch, text))
+
+    return {"ok": True, "handover": row}
+
+
+@app.post("/api/admin/cash/staff-handover/{handover_id}/confirm")
+async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_staff)):
+    row = await db.confirm_cash_handover(handover_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    confirmer_name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    amount = int(float(row.get("amount", 0)))
+
+    # Пуш отправителю
+    asyncio.create_task(send_web_push(
+        row["from_staff_id"],
+        title="✅ Наличные получены",
+        body=f"{confirmer_name} подтвердил получение {amount:,} сум",
+        extra={"type": "cash_confirmed", "handover_id": handover_id},
+    ))
+
+    # ТГ канал кассы
+    ch = await db.get_cash_tg_channel()
+    text = f"✅ <b>Наличные получены</b>\nПолучил: {confirmer_name}\nСумма: <b>{amount:,} сум</b>"
+    asyncio.create_task(_send_tg_cash(ch, text))
+
+    return {"ok": True, "handover": row}
+
+
+@app.get("/api/admin/cash/pending-handovers")
+async def get_pending_handovers(staff=Depends(get_current_staff)):
+    rows = await db.get_pending_handovers_for(staff["id"])
+    return {"ok": True, "handovers": rows}
+
+
+# ── Подтверждение оплат картой/переводом ──────────────────────────────────────
+
+@app.get("/api/admin/cash/unconfirmed-payments")
+async def get_unconfirmed_payments(_=Depends(get_current_staff)):
+    rows = await db.get_unconfirmed_payments()
+    return {"ok": True, "payments": rows}
+
+
+@app.post("/api/admin/orders/{order_id}/payments/{payment_id}/confirm")
+async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_current_staff)):
+    if staff.get("sub") != "admin" and not staff.get("can_manage_cash"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.confirm_payment(payment_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
+    details = f"Подтверждён платёж: {int(float(row['amount'])):,} сум ({mLabel.get(row['method'],'')})"
+    await db.add_order_activity(order_id, staff["id"], name, "payment_confirmed", details)
+    ch = await db.get_cash_tg_channel()
+    text = (f"✅ <b>Платёж подтверждён</b> #{order_id}\n"
+            f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
+            f"Подтвердил: {name}")
+    asyncio.create_task(_send_tg_cash(ch, text))
+    return {"ok": True, "payment": row}
+
+
+@app.post("/api/admin/orders/{order_id}/payments/{payment_id}/receipt")
+async def upload_payment_receipt(
+    order_id:   int,
+    payment_id: int,
+    file: UploadFile = File(...),
+    staff=Depends(get_current_staff),
+):
+    content = await file.read()
+    # Сохраняем в медиа-канал ТГ и используем file_id как ссылку
+    receipt_url = None
+    if BOT_TOKEN:
+        try:
+            async with aiohttp.ClientSession() as s:
+                form = aiohttp.FormData()
+                form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
+                ct = file.content_type or "image/jpeg"
+                tg_method = "sendDocument" if not ct.startswith("image/") else "sendPhoto"
+                field = "document" if tg_method == "sendDocument" else "photo"
+                form.add_field(field, content, filename=file.filename or "receipt.jpg", content_type=ct)
+                form.add_field("caption", f"Чек оплаты · заказ #{order_id} · платёж #{payment_id}")
+                async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form,
+                                  timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    res = await r.json()
+                if res.get("ok"):
+                    msg = res["result"]
+                    if tg_method == "sendPhoto":
+                        receipt_url = msg["photo"][-1]["file_id"]
+                    else:
+                        receipt_url = msg["document"]["file_id"]
+        except Exception as e:
+            logging.warning(f"receipt upload error: {e}")
+
+    row = await db.save_payment_receipt(payment_id, receipt_url or file.filename)
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+
+    # Отправить фото в ТГ канал кассы
+    ch = await db.get_cash_tg_channel()
+    caption = f"🧾 Чек к заказу #{order_id} · {name}"
+    if ch and BOT_TOKEN and receipt_url:
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                             json={"chat_id": str(ch), "photo": receipt_url, "caption": caption},
+                             timeout=aiohttp.ClientTimeout(total=5))
+        except Exception as e:
+            logging.warning(f"receipt tg_cash error: {e}")
+    elif ch and BOT_TOKEN:
+        asyncio.create_task(_send_tg_cash(ch, f"🧾 {caption} (файл загружен)"))
+
+    return {"ok": True, "receipt_url": receipt_url}
+
+
+# ── Настройки кассы (admin) ───────────────────────────────────────────────────
+
+@app.get("/api/admin/settings/cash-channel")
+async def get_cash_channel(_=Depends(_get_admin)):
+    ch = await db.get_cash_tg_channel()
+    return {"ok": True, "cash_tg_channel_id": ch}
+
+@app.put("/api/admin/settings/cash-channel")
+async def set_cash_channel(cash_tg_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
+    if not db.pool: raise HTTPException(503)
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE settings SET cash_tg_channel_id=$1", cash_tg_channel_id)
+    return {"ok": True}
+
+
 @app.get("/api/admin/cash/my-balance")
 async def get_my_cash_balance(staff=Depends(get_current_staff)):
     """Баланс наличных текущего сотрудника."""

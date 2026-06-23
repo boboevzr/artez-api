@@ -228,6 +228,17 @@ async def create_tables():
              AND p.created_by IS NOT NULL
              AND p.created_by <> ''
              AND TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) = TRIM(p.created_by)""",
+        # Касса: статус передачи наличных
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'pending'",
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        # Платежи: подтверждение и фото чека
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS receipt_url TEXT DEFAULT NULL",
+        # Настройки: ТГ канал кассы
+        "ALTER TABLE settings ADD COLUMN IF NOT EXISTS cash_tg_channel_id VARCHAR(50) DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -2449,11 +2460,72 @@ async def get_cash_handovers(limit: int = 50) -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT ch.*,
-                   sf.first_name || ' ' || sf.last_name AS from_name,
-                   st.first_name || ' ' || st.last_name AS to_name
+                   TRIM(COALESCE(sf.last_name,'') || ' ' || COALESCE(sf.first_name,'')) AS from_name,
+                   TRIM(COALESCE(st.last_name,'') || ' ' || COALESCE(st.first_name,'')) AS to_name
             FROM cash_handovers ch
             LEFT JOIN staff sf ON sf.id = ch.from_staff_id
             LEFT JOIN staff st ON st.id = ch.to_staff_id
             ORDER BY ch.created_at DESC LIMIT $1
         """, limit)
         return [dict(r) for r in rows]
+
+async def confirm_cash_handover(handover_id: int, confirmed_by: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE cash_handovers SET status='confirmed', confirmed_at=NOW(), confirmed_by=$2
+            WHERE id=$1 RETURNING *
+        """, handover_id, confirmed_by)
+        return dict(row) if row else {}
+
+async def get_pending_handovers_for(staff_id: int) -> list:
+    """Входящие неподтверждённые передачи для данного сотрудника."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ch.*,
+                   TRIM(COALESCE(sf.last_name,'') || ' ' || COALESCE(sf.first_name,'')) AS from_name
+            FROM cash_handovers ch
+            LEFT JOIN staff sf ON sf.id = ch.from_staff_id
+            WHERE ch.to_staff_id=$1 AND ch.status='pending'
+            ORDER BY ch.created_at DESC
+        """, staff_id)
+        return [dict(r) for r in rows]
+
+async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_payments SET confirmed=TRUE, confirmed_by=$2, confirmed_at=NOW()
+            WHERE id=$1 RETURNING *
+        """, payment_id, confirmed_by)
+        return dict(row) if row else {}
+
+async def save_payment_receipt(payment_id: int, receipt_url: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE order_payments SET receipt_url=$2 WHERE id=$1 RETURNING *",
+            payment_id, receipt_url)
+        return dict(row) if row else {}
+
+async def get_unconfirmed_payments() -> list:
+    """Неподтверждённые платежи картой/переводом."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT p.*, o.client_first_name, o.client_last_name,
+                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS staff_name
+            FROM order_payments p
+            LEFT JOIN orders o ON o.id = p.order_id
+            LEFT JOIN staff s ON s.id = p.created_by_staff_id
+            WHERE p.method IN ('card','transfer') AND p.confirmed=FALSE
+            ORDER BY p.created_at DESC
+        """)
+        return [dict(r) for r in rows]
+
+async def get_cash_tg_channel() -> str:
+    if not pool: return ""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT cash_tg_channel_id FROM settings LIMIT 1")
+        return (row['cash_tg_channel_id'] or "") if row else ""
