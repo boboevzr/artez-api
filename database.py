@@ -2583,3 +2583,52 @@ async def get_media_channel_id() -> str:
             return (row['media_channel_id'] or "") if row else ""
     except Exception:
         return ""
+
+# ── plans (roadmap) ──────────────────────────────────────────────────────────
+
+async def ensure_plans_table():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS plans (
+                id          SERIAL PRIMARY KEY,
+                title       VARCHAR(500) NOT NULL,
+                description TEXT         DEFAULT '',
+                status      VARCHAR(20)  DEFAULT 'pending',
+                priority    VARCHAR(20)  DEFAULT 'normal',
+                created_at  TIMESTAMPTZ  DEFAULT NOW(),
+                done_at     TIMESTAMPTZ  DEFAULT NULL
+            )
+        """)
+
+async def get_plans():
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM plans ORDER BY status, priority DESC, created_at DESC")
+    return [dict(r) for r in rows]
+
+async def create_plan(title: str, description: str, priority: str):
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO plans(title,description,priority) VALUES($1,$2,$3) RETURNING *",
+            title, description, priority
+        )
+    return dict(row)
+
+async def update_plan(plan_id: int, **kwargs):
+    if not pool: return None
+    fields = {k: v for k, v in kwargs.items() if k in ('title','description','status','priority','done_at')}
+    if not fields: return None
+    sets   = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    values = list(fields.values())
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE plans SET {sets} WHERE id=$1 RETURNING *", plan_id, *values
+        )
+    return dict(row) if row else None
+
+async def delete_plan(plan_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM plans WHERE id=$1", plan_id)

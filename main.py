@@ -76,6 +76,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.on_event("startup")
 async def startup():
     await db.init_db()
+    await db.ensure_plans_table()
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_measure_review_worker())
     if BOT_TOKEN and APP_URL:
@@ -3267,6 +3268,44 @@ async def upload_payment_receipt(
     row = await db.save_payment_receipt(payment_id, receipt_url or file.filename)
     return {"ok": True, "receipt_url": receipt_url}
 
+
+# ── Plans (roadmap) ─────────────────────────────────────────────────────────
+
+class PlanBody(BaseModel):
+    title: str
+    description: str = ""
+    priority: str = "normal"
+
+class PlanUpdateBody(BaseModel):
+    title: str | None = None
+    description: str | None = None
+    priority: str | None = None
+    status: str | None = None
+
+@app.get("/api/admin/plans")
+async def list_plans(_=Depends(_get_admin)):
+    return {"plans": await db.get_plans()}
+
+@app.post("/api/admin/plans")
+async def create_plan(body: PlanBody, _=Depends(_get_admin)):
+    plan = await db.create_plan(body.title, body.description, body.priority)
+    return {"ok": True, "plan": plan}
+
+@app.put("/api/admin/plans/{plan_id}")
+async def update_plan(plan_id: int, body: PlanUpdateBody, _=Depends(_get_admin)):
+    from datetime import datetime, timezone
+    kwargs = {k: v for k, v in body.model_dump().items() if v is not None}
+    if kwargs.get("status") == "done" and "done_at" not in kwargs:
+        kwargs["done_at"] = datetime.now(timezone.utc)
+    if kwargs.get("status") == "pending":
+        kwargs["done_at"] = None
+    plan = await db.update_plan(plan_id, **kwargs)
+    return {"ok": True, "plan": plan}
+
+@app.delete("/api/admin/plans/{plan_id}")
+async def delete_plan(plan_id: int, _=Depends(_get_admin)):
+    await db.delete_plan(plan_id)
+    return {"ok": True}
 
 # ── TEMP: чистка БД от мусора (удалить группу после чистки) ─────────────────
 _TEMP_TABLES = {
