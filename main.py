@@ -3516,7 +3516,14 @@ async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin))
     if not db.pool:
         raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
-        if op == "purge_deleted_history":
+        if op == "purge_deleted_leads_data":
+            r1 = await conn.execute("DELETE FROM agent_notifications WHERE lead_id NOT IN (SELECT id FROM leads)")
+            r2 = await conn.execute("DELETE FROM lead_reminders       WHERE lead_id NOT IN (SELECT id FROM leads)")
+            r3 = await conn.execute("DELETE FROM lead_calls           WHERE lead_id NOT IN (SELECT id FROM leads)")
+            total = sum(int(r.split()[-1]) for r in [r1, r2, r3] if r)
+            return {"ok": True, "message": f"Удалено {total} записей (уведомления: {r1.split()[-1]}, напоминания: {r2.split()[-1]}, журнал: {r3.split()[-1]})"}
+
+        elif op == "purge_deleted_history":
             result = await conn.execute("""
                 DELETE FROM order_status_history
                 WHERE order_num NOT IN (
