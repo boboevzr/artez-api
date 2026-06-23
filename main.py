@@ -2930,17 +2930,15 @@ async def create_cash_handover(
     return {"ok": True, "handover": row}
 
 
-async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None, phone: str = None, call_label: str = "📞 Позвонить"):
+async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None, phone: str = None, call_label: str = None):
     """Отправить сообщение (или фото) в ТГ-канал кассы."""
     if not BOT_TOKEN or not chat_id:
         logging.warning(f"_send_tg_cash skip: BOT_TOKEN={bool(BOT_TOKEN)} chat_id={repr(chat_id)}")
         return
-    phone_clean = (phone or "").strip().replace(" ", "").replace("-", "")
-    reply_markup = None
+    # Телефон добавляем в текст — tel: URL не поддерживается в TG кнопках
+    phone_clean = (phone or "").strip()
     if phone_clean:
-        if not phone_clean.startswith("+"):
-            phone_clean = "+" + phone_clean
-        reply_markup = {"inline_keyboard": [[{"text": call_label, "url": f"tel:{phone_clean}"}]]}
+        text += f"\n📞 {phone_clean}"
     try:
         async with aiohttp.ClientSession() as s:
             if photo_bytes:
@@ -2948,18 +2946,13 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
                 form.add_field("chat_id", str(chat_id))
                 form.add_field("photo", photo_bytes, filename=filename or "receipt.jpg", content_type="image/jpeg")
                 form.add_field("caption", text)
-                if reply_markup:
-                    import json as _json
-                    form.add_field("reply_markup", _json.dumps(reply_markup))
                 r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
                              timeout=aiohttp.ClientTimeout(total=10))
                 logging.info(f"_send_tg_cash photo → {r.status}")
             else:
-                payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
-                if reply_markup:
-                    payload["reply_markup"] = reply_markup
                 r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                             json=payload, timeout=aiohttp.ClientTimeout(total=5))
+                             json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
+                             timeout=aiohttp.ClientTimeout(total=5))
                 body = await r.json()
                 logging.info(f"_send_tg_cash msg → {r.status} {body.get('description','')}")
     except Exception as e:
