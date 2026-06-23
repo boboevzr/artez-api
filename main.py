@@ -2855,6 +2855,14 @@ async def add_order_payment(
     pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
     details = f"{pLabel.get(purpose,purpose)}: {int(amount):,} сум ({mLabel.get(method,method)})"
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_added", details)
+    # Уведомление в канал кассы
+    ch = await db.get_cash_tg_channel()
+    if ch:
+        text = (f"💰 <b>Новый платёж</b> · Заказ #{order_id}\n"
+                f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
+                f"<b>{int(amount):,} сум</b>\n"
+                f"👤 {name}")
+        asyncio.create_task(_send_tg_cash(ch, text))
     return {"ok": True, "payment": row}
 
 
@@ -2881,6 +2889,13 @@ async def edit_order_payment(
     pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
     details = f"Изменён платёж: {int(amount):,} сум ({mLabel.get(method,method)}, {pLabel.get(purpose,purpose)})"
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_edited", details)
+    ch = await db.get_cash_tg_channel()
+    if ch:
+        text = (f"✏️ <b>Платёж изменён</b> · Заказ #{order_id}\n"
+                f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
+                f"<b>{int(amount):,} сум</b>\n"
+                f"👤 {name}")
+        asyncio.create_task(_send_tg_cash(ch, text))
     return {"ok": True, "payment": row}
 
 
@@ -3154,8 +3169,17 @@ async def delete_order_payment(
     deleted = await db.delete_order_payment(payment_id)
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
-    details = f"Удалён платёж: {int(float(deleted.get('amount',0))):,} сум ({mLabel.get(deleted.get('method',''),'')}) — Причина: {reason or '—'}"
+    amt = int(float(deleted.get('amount', 0)))
+    mth = deleted.get('method', '')
+    details = f"Удалён платёж: {amt:,} сум ({mLabel.get(mth,'')}) — Причина: {reason or '—'}"
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_deleted", details)
+    ch = await db.get_cash_tg_channel()
+    if ch:
+        text = (f"🗑 <b>Платёж удалён</b> · Заказ #{order_id}\n"
+                f"{mLabel.get(mth, mth)} · <b>{amt:,} сум</b>\n"
+                f"Причина: {reason or '—'}\n"
+                f"👤 {name}")
+        asyncio.create_task(_send_tg_cash(ch, text))
     return {"ok": True}
 
 
