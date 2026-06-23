@@ -3168,17 +3168,26 @@ async def get_receipt_file(order_id: int, payment_id: int, staff=Depends(get_cur
     if not BOT_TOKEN:
         raise HTTPException(status_code=503, detail="Бот не настроен")
     try:
+        from fastapi.responses import StreamingResponse
         async with aiohttp.ClientSession() as s:
             async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
                              params={"file_id": file_id},
                              timeout=aiohttp.ClientTimeout(total=10)) as r:
                 data = await r.json()
-        if not data.get("ok"):
-            raise HTTPException(status_code=404, detail="Файл не найден в TG")
-        file_path = data["result"]["file_path"]
-        file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        from fastapi.responses import RedirectResponse
-        return RedirectResponse(url=file_url)
+            if not data.get("ok"):
+                raise HTTPException(status_code=404, detail="Файл не найден в TG")
+            file_path = data["result"]["file_path"]
+            file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            # Проксируем содержимое — браузер не может напрямую читать TG-файлы (CORS)
+            ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+            ctype = ("video/mp4" if ext in ("mp4","mov","avi") else
+                     "image/jpeg" if ext in ("jpg","jpeg") else
+                     "image/png"  if ext == "png" else
+                     "application/octet-stream")
+            async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
+                content = await fr.read()
+        return StreamingResponse(iter([content]), media_type=ctype,
+                                 headers={"Content-Disposition": "inline"})
     except HTTPException:
         raise
     except Exception as e:
