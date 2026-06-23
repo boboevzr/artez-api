@@ -3127,6 +3127,55 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
     return {"ok": True, "payment": row}
 
 
+@app.post("/api/admin/orders/{order_id}/payments/{payment_id}/reject")
+async def reject_payment(order_id: int, payment_id: int, staff=Depends(get_current_staff)):
+    if staff.get("sub") != "admin" and not staff.get("can_manage_cash"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.reject_payment(payment_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
+    details = f"Платёж отклонён: {int(float(row['amount'])):,} сум ({mLabel.get(row['method'],'')})"
+    await db.add_order_activity(order_id, staff["id"], name, "payment_rejected", details)
+    ch = await db.get_cash_tg_channel()
+    text = (f"❌ <b>Платёж отклонён</b> #{order_id}\n"
+            f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
+            f"Отклонил: {name}")
+    asyncio.create_task(_send_tg_cash(ch, text))
+    return {"ok": True, "payment": row}
+
+
+@app.get("/api/admin/orders/{order_id}/payments/{payment_id}/receipt-file")
+async def get_receipt_file(order_id: int, payment_id: int, staff=Depends(get_current_staff)):
+    """Возвращает URL для просмотра чека через TG."""
+    if not db.pool:
+        raise HTTPException(status_code=503)
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT receipt_url FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
+    if not row or not row["receipt_url"]:
+        raise HTTPException(status_code=404, detail="Чек не найден")
+    file_id = row["receipt_url"]
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="Бот не настроен")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                             params={"file_id": file_id},
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                data = await r.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=404, detail="Файл не найден в TG")
+        file_path = data["result"]["file_path"]
+        file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=file_url)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/admin/orders/{order_id}/payments/{payment_id}/receipt")
 async def upload_payment_receipt(
     order_id:   int,

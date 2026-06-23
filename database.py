@@ -2238,9 +2238,20 @@ async def get_all_cashiers_for_push() -> list:
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id FROM staff WHERE can_manage_cash=TRUE AND is_active=TRUE"
+            "SELECT id FROM staff WHERE can_manage_cash=TRUE AND active=TRUE"
         )
         return [dict(r) for r in rows]
+
+async def reject_payment(payment_id: int, rejected_by: int, note: str = "") -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_payments
+               SET confirmed=FALSE, confirmed_by=$2, confirmed_at=NOW()
+             WHERE id=$1
+             RETURNING *
+        """, payment_id, rejected_by)
+        return dict(row) if row else {}
 
 async def submit_item_measure(item_id: int) -> dict:
     if not pool: return {}
