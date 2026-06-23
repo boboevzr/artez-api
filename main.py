@@ -2829,15 +2829,44 @@ async def get_order_payments(order_id: int, _=Depends(get_current_staff)):
 @app.post("/api/admin/orders/{order_id}/payments")
 async def add_order_payment(
     order_id: int,
-    amount:              float = Body(..., embed=False),
-    method:              str   = Body(..., embed=False),
-    purpose:             str   = Body("payment", embed=False),
-    note:                str   = Body("", embed=False),
-    handed_to_staff_id:  int   = Body(None, embed=False),
+    amount:   float = Body(..., embed=False),
+    method:   str   = Body(..., embed=False),
+    purpose:  str   = Body("payment", embed=False),
+    note:     str   = Body("", embed=False),
     staff=Depends(get_current_staff),
 ):
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
-    row = await db.add_order_payment(order_id, amount, method, purpose, note, name, handed_to_staff_id, staff.get("id"))
+    row = await db.add_order_payment(order_id, amount, method, purpose, note, name, None, staff.get("id"))
+    mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
+    pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
+    details = f"{pLabel.get(purpose,purpose)}: {int(amount):,} сум ({mLabel.get(method,method)})"
+    await db.add_order_activity(order_id, staff.get("id"), name, "payment_added", details)
+    return {"ok": True, "payment": row}
+
+
+@app.patch("/api/admin/orders/{order_id}/payments/{payment_id}")
+async def edit_order_payment(
+    order_id:   int,
+    payment_id: int,
+    amount:  float = Body(..., embed=True),
+    method:  str   = Body(..., embed=True),
+    purpose: str   = Body(..., embed=True),
+    staff=Depends(get_current_staff),
+):
+    if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT * FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    # Только создатель или admin
+    if staff.get("sub") != "admin" and existing.get("created_by_staff_id") != staff.get("id"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.edit_order_payment(payment_id, amount, method, purpose)
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
+    pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
+    details = f"Изменён платёж: {int(amount):,} сум ({mLabel.get(method,method)}, {pLabel.get(purpose,purpose)})"
+    await db.add_order_activity(order_id, staff.get("id"), name, "payment_edited", details)
     return {"ok": True, "payment": row}
 
 
@@ -2894,9 +2923,31 @@ async def get_my_cash_payments(staff=Depends(get_current_staff)):
 
 
 @app.delete("/api/admin/orders/{order_id}/payments/{payment_id}")
-async def delete_order_payment(order_id: int, payment_id: int, _=Depends(get_current_staff)):
-    await db.delete_order_payment(payment_id)
+async def delete_order_payment(
+    order_id:   int,
+    payment_id: int,
+    reason: str = Body("", embed=True),
+    staff=Depends(get_current_staff),
+):
+    if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT * FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    if staff.get("sub") != "admin" and existing.get("created_by_staff_id") != staff.get("id"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    deleted = await db.delete_order_payment(payment_id)
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
+    details = f"Удалён платёж: {int(float(deleted.get('amount',0))):,} сум ({mLabel.get(deleted.get('method',''),'')}) — Причина: {reason or '—'}"
+    await db.add_order_activity(order_id, staff.get("id"), name, "payment_deleted", details)
     return {"ok": True}
+
+
+@app.get("/api/admin/orders/{order_id}/activity")
+async def get_order_activity(order_id: int, _=Depends(get_current_staff)):
+    rows = await db.get_order_activity(order_id)
+    return {"ok": True, "activity": rows}
 
 # ── Касса ─────────────────────────────────────────────────────────────────────
 
