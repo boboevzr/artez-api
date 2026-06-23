@@ -730,6 +730,7 @@ def _staff_public(s: dict) -> dict:
         "can_send_pickup":     s.get("can_send_pickup", False),
         "can_edit_delivery":   s.get("can_edit_delivery", False),
         "can_accept_payment":  s.get("can_accept_payment", False),
+        "can_manage_cash":     s.get("can_manage_cash", False),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
         "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
@@ -2836,7 +2837,7 @@ async def add_order_payment(
     staff=Depends(get_current_staff),
 ):
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
-    row = await db.add_order_payment(order_id, amount, method, purpose, note, name, handed_to_staff_id)
+    row = await db.add_order_payment(order_id, amount, method, purpose, note, name, handed_to_staff_id, staff.get("id"))
     return {"ok": True, "payment": row}
 
 
@@ -2869,14 +2870,26 @@ async def create_cash_handover(
     row = await db.add_cash_handover(from_staff_id, to_staff_id, amount, note)
     return {"ok": True, "handover": row}
 
+@app.get("/api/admin/cash/my-balance")
+async def get_my_cash_balance(staff=Depends(get_current_staff)):
+    """Баланс наличных текущего сотрудника."""
+    bal = await db.get_my_cash_balance(staff["id"])
+    return {"ok": True, **bal}
+
 @app.get("/api/admin/cash/my-payments")
 async def get_my_cash_payments(staff=Depends(get_current_staff)):
-    """Наличные платежи где текущий сотрудник указан получателем."""
+    """Наличные платежи где текущий сотрудник создал платёж или указан получателем."""
     if not db.pool: return {"ok": True, "payments": []}
+    my_id = staff["id"]
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM order_payments WHERE method='cash' AND handed_to_staff_id=$1 ORDER BY created_at DESC LIMIT 100",
-            staff["id"])
+        rows = await conn.fetch("""
+            SELECT p.*, o.client_first_name AS client_name
+            FROM order_payments p
+            LEFT JOIN orders o ON o.id = p.order_id
+            WHERE p.method='cash'
+              AND (p.created_by_staff_id=$1 OR p.handed_to_staff_id=$1)
+            ORDER BY p.created_at DESC LIMIT 100
+        """, my_id)
         return {"ok": True, "payments": [dict(r) for r in rows]}
 
 
@@ -3240,6 +3253,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_send_pickup:     bool = Body(False, embed=True),
     can_edit_delivery:   bool = Body(False, embed=True),
     can_accept_payment:  bool = Body(False, embed=True),
+    can_manage_cash:     bool = Body(False, embed=True),
     order_stages:        str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -3248,15 +3262,16 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4,
                    can_create_order=$5, can_confirm_order=$6, order_stages=$7,
                    can_edit_confirmed=$8, can_send_pickup=$9, can_edit_delivery=$10,
-                   can_accept_payment=$11
+                   can_accept_payment=$11, can_manage_cash=$12
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
-                         can_accept_payment""",
+                         can_accept_payment, can_manage_cash""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_create_order, can_confirm_order, order_stages or None,
-            can_edit_confirmed, can_send_pickup, can_edit_delivery, can_accept_payment)
+            can_edit_confirmed, can_send_pickup, can_edit_delivery,
+            can_accept_payment, can_manage_cash)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}

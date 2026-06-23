@@ -116,7 +116,10 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_send_pickup      BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_delivery    BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_accept_payment   BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_manage_cash      BOOLEAN DEFAULT FALSE",
+        "UPDATE staff SET can_manage_cash=TRUE WHERE can_accept_payment=TRUE",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS handed_to_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS created_by_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         """CREATE TABLE IF NOT EXISTS cash_handovers (
             id              SERIAL PRIMARY KEY,
             from_staff_id   INTEGER REFERENCES staff(id) ON DELETE SET NULL,
@@ -2067,13 +2070,13 @@ async def get_order_payments(order_id: int) -> list:
             "SELECT * FROM order_payments WHERE order_id=$1 ORDER BY created_at", order_id)
         return [dict(r) for r in rows]
 
-async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str, handed_to_staff_id: int = None) -> dict:
+async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str, handed_to_staff_id: int = None, created_by_staff_id: int = None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO order_payments (order_id, amount, method, purpose, note, created_by, handed_to_staff_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
-        """, order_id, amount, method, purpose, note, created_by, handed_to_staff_id)
+            INSERT INTO order_payments (order_id, amount, method, purpose, note, created_by, handed_to_staff_id, created_by_staff_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        """, order_id, amount, method, purpose, note, created_by, handed_to_staff_id, created_by_staff_id)
         # Пересчитать payment_status на orders
         total_row = await conn.fetchrow(
             "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1", order_id)
@@ -2321,41 +2324,67 @@ async def update_route_stop(route_id: int, order_id: int, data: dict) -> bool:
 # ── Касса / наличные ──────────────────────────────────────────────────────────
 
 async def get_cashiers() -> list:
-    """Сотрудники с правом приёма оплаты."""
+    """Ответственные за кассу (can_manage_cash)."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, first_name, last_name FROM staff WHERE can_accept_payment=TRUE AND is_active=TRUE ORDER BY last_name, first_name")
+            "SELECT id, first_name, last_name FROM staff WHERE can_manage_cash=TRUE AND is_active=TRUE ORDER BY last_name, first_name")
         return [dict(r) for r in rows]
 
+async def get_my_cash_balance(staff_id: int) -> dict:
+    """Баланс конкретного сотрудника: принял / сдал / на руках."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        # Принял от клиентов (я записал платёж)
+        r1 = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE created_by_staff_id=$1 AND method='cash'",
+            staff_id)
+        # Сдал сразу при записи (handed_to != me)
+        r2 = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE created_by_staff_id=$1 AND method='cash' AND handed_to_staff_id IS NOT NULL AND handed_to_staff_id!=$1",
+            staff_id, staff_id)
+        # Получил от других сотрудников через платёж (они сдали мне)
+        r3 = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id!=$1)",
+            staff_id, staff_id)
+        # Получил через ручную передачу (cash_handovers to me)
+        r4 = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE to_staff_id=$1", staff_id)
+        # Сдал через ручную передачу (cash_handovers from me)
+        r5 = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1", staff_id)
+        collected   = float(r1)
+        given_imm   = float(r2)
+        recv_others = float(r3)
+        recv_hand   = float(r4)
+        given_hand  = float(r5)
+        on_hand = collected - given_imm + recv_others + recv_hand - given_hand
+        return {
+            "collected":         collected,
+            "given_immediately": given_imm,
+            "received_from_others": recv_others + recv_hand,
+            "handed_over":       given_imm + given_hand,
+            "on_hand":           on_hand,
+        }
+
 async def get_cash_balance() -> list:
-    """Баланс наличных по каждому кассиру: получено, сдано, на руках."""
+    """Баланс наличных по всем сотрудникам (два уровня: исполнители + ответственные)."""
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
-            SELECT
-                s.id,
-                s.first_name,
-                s.last_name,
-                COALESCE(recv.total, 0) AS received,
-                COALESCE(hand.total, 0) AS handed_over,
-                COALESCE(recv.total, 0) - COALESCE(hand.total, 0) AS on_hand
-            FROM staff s
-            LEFT JOIN (
-                SELECT handed_to_staff_id, SUM(amount) AS total
-                FROM order_payments
-                WHERE method='cash' AND handed_to_staff_id IS NOT NULL
-                GROUP BY handed_to_staff_id
-            ) recv ON recv.handed_to_staff_id = s.id
-            LEFT JOIN (
-                SELECT to_staff_id, SUM(amount) AS total
-                FROM cash_handovers
-                GROUP BY to_staff_id
-            ) hand ON hand.to_staff_id = s.id
-            WHERE s.can_accept_payment = TRUE AND s.is_active = TRUE
-            ORDER BY s.last_name, s.first_name
-        """)
-        return [dict(r) for r in rows]
+        rows = await conn.fetch("SELECT id, first_name, last_name, can_manage_cash FROM staff WHERE is_active=TRUE ORDER BY can_manage_cash DESC, last_name, first_name")
+        result = []
+        for s in rows:
+            bal = await get_my_cash_balance(s['id'])
+            if bal['collected'] == 0 and bal['received_from_others'] == 0:
+                continue  # пропускаем тех у кого нет движения
+            result.append({
+                "id": s['id'],
+                "first_name": s['first_name'],
+                "last_name":  s['last_name'],
+                "can_manage_cash": s['can_manage_cash'],
+                **bal,
+            })
+        return result
 
 async def add_cash_handover(from_staff_id: int, to_staff_id: int, amount: float, note: str) -> dict:
     if not pool: return {}
