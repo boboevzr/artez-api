@@ -3564,6 +3564,13 @@ async def claim_measure_review(order_id: int, item_id: int, staff=Depends(get_cu
         raise HTTPException(status_code=404, detail="Замер не найден или уже утверждён")
     return {"ok": True, "item": item}
 
+@app.get("/api/staff/pending-payment-reviews")
+async def get_pending_payment_reviews(staff=Depends(get_current_staff)):
+    if not staff.get("can_manage_cash") and staff.get("sub") != "admin":
+        return {"ok": True, "payments": []}
+    payments = await db.get_unconfirmed_payments()
+    return {"ok": True, "payments": payments}
+
 @app.get("/api/staff/pending-reviews")
 async def get_pending_reviews(staff=Depends(get_current_staff)):
     if not staff.get("can_approve_measure"):

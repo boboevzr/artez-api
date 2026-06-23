@@ -2540,7 +2540,7 @@ async def save_payment_receipt(payment_id: int, receipt_url: str) -> dict:
         return dict(row) if row else {}
 
 async def get_unconfirmed_payments() -> list:
-    """Неподтверждённые платежи картой/переводом."""
+    """Неподтверждённые платежи картой/переводом (только ожидающие, не отклонённые)."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -2549,7 +2549,7 @@ async def get_unconfirmed_payments() -> list:
             FROM order_payments p
             LEFT JOIN orders o ON o.id = p.order_id
             LEFT JOIN staff s ON s.id = p.created_by_staff_id
-            WHERE p.method IN ('card','transfer') AND p.confirmed=FALSE
+            WHERE p.method IN ('card','transfer') AND p.confirmed=FALSE AND p.confirmed_at IS NULL
             ORDER BY p.created_at DESC
         """)
         return [dict(r) for r in rows]
