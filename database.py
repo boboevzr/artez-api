@@ -237,6 +237,7 @@ async def create_tables():
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS receipt_url TEXT DEFAULT NULL",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS reject_note TEXT DEFAULT NULL",
         # Таблица настроек (создаём если не существует + гарантируем одну строку)
         "CREATE TABLE IF NOT EXISTS settings (id SERIAL PRIMARY KEY)",
         "INSERT INTO settings DEFAULT VALUES ON CONFLICT DO NOTHING",
@@ -2256,10 +2257,10 @@ async def reject_payment(payment_id: int, rejected_by: int, note: str = "") -> d
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_payments
-               SET confirmed=FALSE, confirmed_by=$2, confirmed_at=NOW()
+               SET confirmed=FALSE, confirmed_by=$2, confirmed_at=NOW(), reject_note=$3
              WHERE id=$1
              RETURNING *
-        """, payment_id, rejected_by)
+        """, payment_id, rejected_by, note or None)
         if row:
             await _recalc_payment_status(conn, row["order_id"])
         return dict(row) if row else {}

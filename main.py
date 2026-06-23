@@ -3137,10 +3137,12 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
 
 
 @app.post("/api/admin/orders/{order_id}/payments/{payment_id}/reject")
-async def reject_payment(order_id: int, payment_id: int, staff=Depends(get_current_staff)):
+async def reject_payment(order_id: int, payment_id: int,
+                         note: str = Body("", embed=True),
+                         staff=Depends(get_current_staff)):
     if staff.get("sub") != "admin" and not staff.get("can_manage_cash"):
         raise HTTPException(status_code=403, detail="Нет доступа")
-    row = await db.reject_payment(payment_id, staff["id"])
+    row = await db.reject_payment(payment_id, staff["id"], note)
     if not row:
         raise HTTPException(status_code=404, detail="Платёж не найден")
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
@@ -3148,9 +3150,10 @@ async def reject_payment(order_id: int, payment_id: int, staff=Depends(get_curre
     details = f"Платёж отклонён: {int(float(row['amount'])):,} сум ({mLabel.get(row['method'],'')})"
     await db.add_order_activity(order_id, staff["id"], name, "payment_rejected", details)
     ch = await db.get_cash_tg_channel()
-    text = (f"❌ <b>Платёж отклонён</b> #{order_id}\n"
+    text = (f"❌ <b>Платёж отклонён</b> · Заказ #{order_id}\n"
             f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
-            f"Отклонил: {name}")
+            f"Отклонил: {name}"
+            + (f"\n📝 {note}" if note else ""))
     asyncio.create_task(_send_tg_cash(ch, text))
     return {"ok": True, "payment": row}
 
