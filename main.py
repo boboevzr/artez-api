@@ -3012,7 +3012,7 @@ async def tg_webhook(request: Request):
         parts  = cb_data.split(":")
         color  = parts[1] if len(parts) > 1 else "g"
         icon   = "🟢" if color == "g" else "🔴"
-        new_kb = {"inline_keyboard": [[{"text": f"✅ Проверено · {display}", "callback_data": "done"}]]}
+        new_kb = {"inline_keyboard": [[{"text": f"{icon} ✅ Проверено · {display}", "callback_data": "done"}]]}
         try:
             async with aiohttp.ClientSession() as s:
                 await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
