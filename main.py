@@ -727,6 +727,7 @@ def _staff_public(s: dict) -> dict:
         "can_confirm_order":   s.get("can_confirm_order", True),
         "can_edit_confirmed":  s.get("can_edit_confirmed", False),
         "can_send_pickup":     s.get("can_send_pickup", False),
+        "can_edit_delivery":   s.get("can_edit_delivery", False),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
         "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
@@ -3186,6 +3187,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_confirm_order:   bool = Body(True,  embed=True),
     can_edit_confirmed:  bool = Body(False, embed=True),
     can_send_pickup:     bool = Body(False, embed=True),
+    can_edit_delivery:   bool = Body(False, embed=True),
     order_stages:        str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -3193,14 +3195,14 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
             """UPDATE staff
                SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4,
                    can_create_order=$5, can_confirm_order=$6, order_stages=$7,
-                   can_edit_confirmed=$8, can_send_pickup=$9
+                   can_edit_confirmed=$8, can_send_pickup=$9, can_edit_delivery=$10
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_create_order, can_confirm_order, order_stages,
-                         can_edit_confirmed, can_send_pickup""",
+                         can_edit_confirmed, can_send_pickup, can_edit_delivery""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_create_order, can_confirm_order, order_stages or None,
-            can_edit_confirmed, can_send_pickup)
+            can_edit_confirmed, can_send_pickup, can_edit_delivery)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}

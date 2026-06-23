@@ -114,6 +114,7 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_confirm_order    BOOLEAN DEFAULT TRUE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_confirmed   BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_send_pickup      BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_delivery    BOOLEAN DEFAULT FALSE",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS review_claimed_by    INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS review_claimed_at    TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
