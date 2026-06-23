@@ -120,6 +120,16 @@ async def create_tables():
         "UPDATE staff SET can_manage_cash=TRUE WHERE can_accept_payment=TRUE",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS handed_to_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS created_by_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        """CREATE TABLE IF NOT EXISTS order_activity (
+            id          SERIAL PRIMARY KEY,
+            order_id    INTEGER NOT NULL,
+            staff_id    INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            staff_name  VARCHAR(100) DEFAULT '',
+            action      VARCHAR(50)  NOT NULL,
+            details     TEXT         DEFAULT '',
+            created_at  TIMESTAMPTZ  DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_order_activity_order ON order_activity(order_id)",
         """CREATE TABLE IF NOT EXISTS cash_handovers (
             id              SERIAL PRIMARY KEY,
             from_staff_id   INTEGER REFERENCES staff(id) ON DELETE SET NULL,
@@ -2089,23 +2099,49 @@ async def add_order_payment(order_id: int, amount: float, method: str, purpose: 
                 "UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
         return dict(row) if row else {}
 
-async def delete_order_payment(payment_id: int) -> bool:
-    if not pool: return False
+async def _recalc_payment_status(conn, order_id: int):
+    total_row = await conn.fetchrow(
+        "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1", order_id)
+    paid = float(total_row['paid'])
+    order = await conn.fetchrow("SELECT total_price, discount_sum, delivery_discount, manual_discount FROM orders WHERE id=$1", order_id)
+    if order:
+        net = float(order['total_price'] or 0) - float(order['discount_sum'] or 0) - float(order['delivery_discount'] or 0) - float(order['manual_discount'] or 0)
+        status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
+        await conn.execute("UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
+
+async def add_order_activity(order_id: int, staff_id: int, staff_name: str, action: str, details: str):
+    if not pool: return
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT order_id FROM order_payments WHERE id=$1", payment_id)
-        if not row: return False
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff_id, staff_name, action, details)
+
+async def get_order_activity(order_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_activity WHERE order_id=$1 ORDER BY created_at DESC LIMIT 100", order_id)
+        return [dict(r) for r in rows]
+
+async def delete_order_payment(payment_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM order_payments WHERE id=$1", payment_id)
+        if not row: return {}
         order_id = row['order_id']
         await conn.execute("DELETE FROM order_payments WHERE id=$1", payment_id)
-        total_row = await conn.fetchrow(
-            "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1", order_id)
-        paid = float(total_row['paid'])
-        order = await conn.fetchrow("SELECT total_price, discount_sum FROM orders WHERE id=$1", order_id)
-        if order:
-            net = float(order['total_price'] or 0) - float(order['discount_sum'] or 0)
-            status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
-            await conn.execute(
-                "UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
-        return True
+        await _recalc_payment_status(conn, order_id)
+        return dict(row)
+
+async def edit_order_payment(payment_id: int, amount: float, method: str, purpose: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE order_payments SET amount=$2, method=$3, purpose=$4 WHERE id=$1 RETURNING *",
+            payment_id, amount, method, purpose)
+        if row:
+            await _recalc_payment_status(conn, row['order_id'])
+        return dict(row) if row else {}
 
 # ── order_item_media (замеры) ─────────────────────────────────────────────────
 
