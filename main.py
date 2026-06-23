@@ -3034,48 +3034,33 @@ async def upload_payment_receipt(
     staff=Depends(get_current_staff),
 ):
     content = await file.read()
-    # Сохраняем в медиа-канал ТГ и используем file_id как ссылку
+    ct = file.content_type or "image/jpeg"
+    tg_method = "sendDocument" if not ct.startswith("image/") else "sendPhoto"
+    field     = "document" if tg_method == "sendDocument" else "photo"
+    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    caption = f"🧾 Чек оплаты\n📋 Заказ #{order_id} · Платёж #{payment_id}\n👤 {name}"
+
     receipt_url = None
-    media_ch = await _get_media_channel()
-    if BOT_TOKEN and media_ch:
+    # Загружаем чек сразу в канал кассы
+    cash_ch = await db.get_cash_tg_channel()
+    upload_ch = cash_ch or await _get_media_channel()  # fallback на медиа-канал если касса не настроена
+    if BOT_TOKEN and upload_ch:
         try:
             async with aiohttp.ClientSession() as s:
                 form = aiohttp.FormData()
-                form.add_field("chat_id", str(media_ch))
-                ct = file.content_type or "image/jpeg"
-                tg_method = "sendDocument" if not ct.startswith("image/") else "sendPhoto"
-                field = "document" if tg_method == "sendDocument" else "photo"
+                form.add_field("chat_id", str(upload_ch))
                 form.add_field(field, content, filename=file.filename or "receipt.jpg", content_type=ct)
-                form.add_field("caption", f"Чек оплаты · заказ #{order_id} · платёж #{payment_id}")
+                form.add_field("caption", caption)
                 async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form,
                                   timeout=aiohttp.ClientTimeout(total=15)) as r:
                     res = await r.json()
                 if res.get("ok"):
                     msg = res["result"]
-                    if tg_method == "sendPhoto":
-                        receipt_url = msg["photo"][-1]["file_id"]
-                    else:
-                        receipt_url = msg["document"]["file_id"]
+                    receipt_url = msg["photo"][-1]["file_id"] if tg_method == "sendPhoto" else msg["document"]["file_id"]
         except Exception as e:
             logging.warning(f"receipt upload error: {e}")
 
     row = await db.save_payment_receipt(payment_id, receipt_url or file.filename)
-    name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
-
-    # Отправить фото в ТГ канал кассы
-    ch = await db.get_cash_tg_channel()
-    caption = f"🧾 Чек к заказу #{order_id} · {name}"
-    if ch and BOT_TOKEN and receipt_url:
-        try:
-            async with aiohttp.ClientSession() as s:
-                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
-                             json={"chat_id": str(ch), "photo": receipt_url, "caption": caption},
-                             timeout=aiohttp.ClientTimeout(total=5))
-        except Exception as e:
-            logging.warning(f"receipt tg_cash error: {e}")
-    elif ch and BOT_TOKEN:
-        asyncio.create_task(_send_tg_cash(ch, f"🧾 {caption} (файл загружен)"))
-
     return {"ok": True, "receipt_url": receipt_url}
 
 
