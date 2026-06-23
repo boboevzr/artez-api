@@ -2905,6 +2905,25 @@ async def get_my_cash_balance(staff=Depends(get_current_staff)):
     bal = await db.get_my_cash_balance(staff["id"])
     return {"ok": True, **bal}
 
+@app.get("/api/admin/cash/debug")
+async def cash_debug(staff=Depends(get_current_staff)):
+    """Диагностика: что в БД по наличным для текущего сотрудника."""
+    if not db.pool: return {"ok": False}
+    sid = staff["id"]
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, order_id, amount, method, purpose, created_by, created_by_staff_id, handed_to_staff_id, created_at FROM order_payments WHERE created_by_staff_id=$1 OR handed_to_staff_id=$1 ORDER BY created_at DESC LIMIT 20",
+            sid, sid)
+        name_rows = await conn.fetch(
+            "SELECT id, order_id, amount, method, purpose, created_by, created_by_staff_id, handed_to_staff_id FROM order_payments WHERE method='cash' AND created_by_staff_id IS NULL ORDER BY created_at DESC LIMIT 10")
+        staff_row = await conn.fetchrow("SELECT id, first_name, last_name, login FROM staff WHERE id=$1", sid)
+    return {
+        "staff_id": sid,
+        "staff_name": f"{staff_row['last_name'] or ''} {staff_row['first_name'] or ''}".strip() if staff_row else None,
+        "payments_by_id": [dict(r) for r in rows],
+        "recent_null_staff_cash": [dict(r) for r in name_rows],
+    }
+
 @app.get("/api/admin/cash/my-payments")
 async def get_my_cash_payments(staff=Depends(get_current_staff)):
     """Наличные платежи где текущий сотрудник создал платёж или указан получателем."""
