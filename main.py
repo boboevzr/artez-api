@@ -33,6 +33,10 @@ GROUP_ID_ZARAFSHAN = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID     = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
+
+async def _get_media_channel() -> str:
+    ch = await db.get_media_channel_id()
+    return ch or MEDIA_CHANNEL_ID
 SHEETS_URL = os.getenv("SHEETS_URL", "https://script.google.com/macros/s/AKfycbyU5a3pMuTFme3dBNEgu46qzA1sN1Ekw-Q7p39F1Pg872lnnXZEFhJPjuc4TzZNHlpObQ/exec")
 
 # ── Eskiz SMS ──
@@ -2773,7 +2777,8 @@ async def upload_order_photo(
     note: str = Form(""),
     staff=Depends(get_current_staff),
 ):
-    if not BOT_TOKEN or not MEDIA_CHANNEL_ID:
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
         raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
     content_type = file.content_type or ""
     if content_type.startswith("video/"):
@@ -2793,7 +2798,7 @@ async def upload_order_photo(
 
     file_bytes = await file.read()
     form = aiohttp.FormData()
-    form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
+    form.add_field("chat_id", str(media_ch))
     form.add_field(tg_field, file_bytes, filename=file.filename, content_type=content_type)
     form.add_field("caption", caption)
 
@@ -3022,11 +3027,12 @@ async def upload_payment_receipt(
     content = await file.read()
     # Сохраняем в медиа-канал ТГ и используем file_id как ссылку
     receipt_url = None
-    if BOT_TOKEN:
+    media_ch = await _get_media_channel()
+    if BOT_TOKEN and media_ch:
         try:
             async with aiohttp.ClientSession() as s:
                 form = aiohttp.FormData()
-                form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
+                form.add_field("chat_id", str(media_ch))
                 ct = file.content_type or "image/jpeg"
                 tg_method = "sendDocument" if not ct.startswith("image/") else "sendPhoto"
                 field = "document" if tg_method == "sendDocument" else "photo"
@@ -3078,16 +3084,16 @@ async def set_cash_channel(cash_tg_channel_id: str = Body(..., embed=True), _=De
         await conn.execute("UPDATE settings SET cash_tg_channel_id=$1", cash_tg_channel_id)
     return {"ok": True}
 
-@app.get("/api/admin/settings/measure-channel")
-async def get_measure_channel(_=Depends(_get_admin)):
-    ch = await db.get_measure_tg_channel()
-    return {"ok": True, "measure_tg_channel_id": ch}
+@app.get("/api/admin/settings/media-channel")
+async def get_media_channel(_=Depends(_get_admin)):
+    ch = await db.get_media_channel_id()
+    return {"ok": True, "media_channel_id": ch or MEDIA_CHANNEL_ID}
 
-@app.put("/api/admin/settings/measure-channel")
-async def set_measure_channel(measure_tg_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
+@app.put("/api/admin/settings/media-channel")
+async def set_media_channel(media_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
     if not db.pool: raise HTTPException(503)
     async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE settings SET measure_tg_channel_id=$1", measure_tg_channel_id)
+        await conn.execute("UPDATE settings SET media_channel_id=$1", media_channel_id)
     return {"ok": True}
 
 
@@ -3448,7 +3454,8 @@ async def upload_item_media(
     file: UploadFile = File(...),
     staff=Depends(get_current_staff),
 ):
-    if not BOT_TOKEN or not MEDIA_CHANNEL_ID:
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
         raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
     content_type = file.content_type or ""
     if content_type.startswith("video/"):
@@ -3467,7 +3474,7 @@ async def upload_item_media(
 
     file_bytes = await file.read()
     form = aiohttp.FormData()
-    form.add_field("chat_id", str(MEDIA_CHANNEL_ID))
+    form.add_field("chat_id", str(media_ch))
     form.add_field(tg_field, file_bytes, filename=file.filename, content_type=content_type)
     form.add_field("caption", caption)
 
