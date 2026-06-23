@@ -237,6 +237,9 @@ async def create_tables():
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS receipt_url TEXT DEFAULT NULL",
+        # Таблица настроек (создаём если не существует + гарантируем одну строку)
+        "CREATE TABLE IF NOT EXISTS settings (id SERIAL PRIMARY KEY)",
+        "INSERT INTO settings DEFAULT VALUES ON CONFLICT DO NOTHING",
         # Настройки: ТГ канал кассы
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS cash_tg_channel_id VARCHAR(50) DEFAULT NULL",
         # Настройки: канал медиафайлов (замеры, чеки и т.д.)
@@ -2531,12 +2534,18 @@ async def get_unconfirmed_payments() -> list:
 
 async def get_cash_tg_channel() -> str:
     if not pool: return ""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT cash_tg_channel_id FROM settings LIMIT 1")
-        return (row['cash_tg_channel_id'] or "") if row else ""
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT cash_tg_channel_id FROM settings LIMIT 1")
+            return (row['cash_tg_channel_id'] or "") if row else ""
+    except Exception:
+        return ""
 
 async def get_media_channel_id() -> str:
     if not pool: return ""
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT media_channel_id FROM settings LIMIT 1")
-        return (row['media_channel_id'] or "") if row else ""
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT media_channel_id FROM settings LIMIT 1")
+            return (row['media_channel_id'] or "") if row else ""
+    except Exception:
+        return ""
