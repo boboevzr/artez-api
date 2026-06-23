@@ -2929,15 +2929,19 @@ async def get_my_cash_payments(staff=Depends(get_current_staff)):
     """Наличные платежи где текущий сотрудник создал платёж или указан получателем."""
     if not db.pool: return {"ok": True, "payments": []}
     my_id = staff["id"]
+    s = await db.get_staff_by_id(my_id)
+    my_name = " ".join(filter(None, [s.get("last_name",""), s.get("first_name","")])).strip() if s else ""
     async with db.pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT p.*, o.client_first_name AS client_name
             FROM order_payments p
             LEFT JOIN orders o ON o.id = p.order_id
             WHERE p.method='cash'
-              AND (p.created_by_staff_id=$1 OR p.handed_to_staff_id=$1)
+              AND (p.created_by_staff_id=$1
+                   OR p.handed_to_staff_id=$1
+                   OR (p.created_by_staff_id IS NULL AND p.created_by=$2))
             ORDER BY p.created_at DESC LIMIT 100
-        """, my_id)
+        """, my_id, my_name)
         return {"ok": True, "payments": [dict(r) for r in rows]}
 
 

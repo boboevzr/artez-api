@@ -220,6 +220,14 @@ async def create_tables():
             created_at  TIMESTAMPTZ DEFAULT NOW(),
             UNIQUE(route_id, order_id)
         )""",
+        # Заполнить created_by_staff_id для старых платежей по совпадению имени
+        """UPDATE order_payments p
+           SET created_by_staff_id = s.id
+           FROM staff s
+           WHERE p.created_by_staff_id IS NULL
+             AND p.created_by IS NOT NULL
+             AND p.created_by <> ''
+             AND TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) = TRIM(p.created_by)""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
