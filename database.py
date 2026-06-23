@@ -2371,14 +2371,19 @@ async def get_my_cash_balance(staff_id: int) -> dict:
     """Баланс конкретного сотрудника: принял / сдал / на руках."""
     if not pool: return {}
     async with pool.acquire() as conn:
-        # Принял от клиентов (я записал платёж)
+        # Имя сотрудника для совпадения со старыми записями (до created_by_staff_id)
+        staff_row = await conn.fetchrow("SELECT first_name, last_name, login FROM staff WHERE id=$1", staff_id)
+        staff_name = ""
+        if staff_row:
+            staff_name = " ".join(filter(None, [staff_row['last_name'], staff_row['first_name']])) or staff_row['login'] or ""
+        # Принял от клиентов (я записал платёж — по id или по имени для старых)
         r1 = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE created_by_staff_id=$1 AND method='cash'",
-            staff_id)
+            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE method='cash' AND (created_by_staff_id=$1 OR (created_by_staff_id IS NULL AND created_by=$2))",
+            staff_id, staff_name)
         # Сдал сразу при записи (handed_to != me)
         r2 = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE created_by_staff_id=$1 AND method='cash' AND handed_to_staff_id IS NOT NULL AND handed_to_staff_id!=$1",
-            staff_id, staff_id)
+            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE method='cash' AND handed_to_staff_id IS NOT NULL AND handed_to_staff_id!=$1 AND (created_by_staff_id=$1 OR (created_by_staff_id IS NULL AND created_by=$2))",
+            staff_id, staff_name)
         # Получил от других сотрудников через платёж (они сдали мне)
         r3 = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id!=$1)",
