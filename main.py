@@ -2858,11 +2858,20 @@ async def add_order_payment(
     pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
     details = f"{pLabel.get(purpose,purpose)}: {int(amount):,} сум ({mLabel.get(method,method)})"
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_added", details)
+    # Порядковый номер платежа в заказе
+    pay_num = row.get("id", payment_id if 'payment_id' in dir() else "?")
+    try:
+        async with db.pool.acquire() as conn:
+            pay_num = await conn.fetchval(
+                "SELECT COUNT(*) FROM order_payments WHERE order_id=$1 AND id<=$2",
+                order_id, row["id"]) or 1
+    except Exception:
+        pass
     # Уведомление в канал кассы
     ch = await db.get_cash_tg_channel()
     if ch:
         phone = staff.get("phone") or ""
-        text = (f"💰 <b>Новый платёж</b> · Заказ #{order_id}\n"
+        text = (f"💰 <b>Новый платёж</b> · Заказ #{order_id} · №{pay_num}\n"
                 f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
                 f"<b>{int(amount):,} сум</b>\n"
                 f"👤 {name}")
@@ -3188,12 +3197,44 @@ async def upload_payment_receipt(
     tg_method = "sendDocument" if not ct.startswith("image/") else "sendPhoto"
     field     = "document" if tg_method == "sendDocument" else "photo"
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
-    caption = f"🧾 Чек оплаты\n📋 Заказ #{order_id} · Платёж #{payment_id}\n👤 {name}"
+
+    # Порядковый номер платежа внутри заказа
+    pay_num = 1
+    if db.pool:
+        try:
+            async with db.pool.acquire() as conn:
+                pay_num = await conn.fetchval(
+                    "SELECT COUNT(*) FROM order_payments WHERE order_id=$1 AND id<=$2",
+                    order_id, payment_id) or 1
+        except Exception:
+            pass
+
+    mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
+    pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
+    # Получаем данные платежа для caption
+    pay_row = None
+    if db.pool:
+        try:
+            async with db.pool.acquire() as conn:
+                pay_row = await conn.fetchrow("SELECT amount, method, purpose FROM order_payments WHERE id=$1", payment_id)
+        except Exception:
+            pass
+
+    amount_str = f"{int(float(pay_row['amount'])):,} сум" if pay_row else ""
+    method_str = mLabel.get(pay_row['method'], '') if pay_row else ""
+    purpose_str = pLabel.get(pay_row['purpose'], '') if pay_row else ""
+    caption = (f"🧾 Чек · Заказ #{order_id} · Платёж №{pay_num}\n"
+               f"{purpose_str} · {method_str}\n"
+               f"💰 {amount_str}\n"
+               f"👤 {name}")
+
+    reply_markup = _json.dumps({
+        "inline_keyboard": [[{"text": "🟢 Проверить", "callback_data": f"chk:g:{order_id}"}]]
+    })
 
     receipt_url = None
-    # Загружаем чек сразу в канал кассы
     cash_ch = await db.get_cash_tg_channel()
-    upload_ch = cash_ch or await _get_media_channel()  # fallback на медиа-канал если касса не настроена
+    upload_ch = cash_ch or await _get_media_channel()
     if BOT_TOKEN and upload_ch:
         try:
             async with aiohttp.ClientSession() as s:
@@ -3201,6 +3242,7 @@ async def upload_payment_receipt(
                 form.add_field("chat_id", str(upload_ch))
                 form.add_field(field, content, filename=file.filename or "receipt.jpg", content_type=ct)
                 form.add_field("caption", caption)
+                form.add_field("reply_markup", reply_markup)
                 async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form,
                                   timeout=aiohttp.ClientTimeout(total=15)) as r:
                     res = await r.json()

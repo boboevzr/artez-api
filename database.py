@@ -2411,7 +2411,7 @@ async def get_cashiers() -> list:
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, first_name, last_name FROM staff WHERE can_manage_cash=TRUE AND is_active=TRUE ORDER BY last_name, first_name")
+            "SELECT id, first_name, last_name FROM staff WHERE can_manage_cash=TRUE AND active=TRUE ORDER BY last_name, first_name")
         return [dict(r) for r in rows]
 
 async def get_my_cash_balance(staff_id: int) -> dict:
@@ -2459,7 +2459,7 @@ async def get_cash_balance() -> list:
     """Баланс наличных по всем сотрудникам (два уровня: исполнители + ответственные)."""
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, first_name, last_name, can_manage_cash FROM staff WHERE is_active=TRUE ORDER BY can_manage_cash DESC, last_name, first_name")
+        rows = await conn.fetch("SELECT id, first_name, last_name, can_manage_cash FROM staff WHERE active=TRUE ORDER BY can_manage_cash DESC, last_name, first_name")
         result = []
         for s in rows:
             bal = await get_my_cash_balance(s['id'])
