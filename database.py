@@ -518,6 +518,14 @@ async def create_tables():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_discount NUMERIC(12,2) DEFAULT 0;
         """)
 
+    # ── Шаг 10: тип вывоза и скидка при самовывозе (из мастерской) ───────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(10) DEFAULT 'courier';
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_discount NUMERIC(12,2) DEFAULT 0;
+        ALTER TABLE leads  ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(10) DEFAULT 'courier';
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -768,13 +776,13 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             INSERT INTO orders (
                 order_num, source,
                 client_tg_id, client_first_name, client_last_name, client_phone,
-                branch, city, address, short_address, location, service, service_type, pickup_type, pickup_date, pickup_time, note,
+                branch, city, address, short_address, location, service, service_type, pickup_type, delivery_type, pickup_date, pickup_time, note,
                 total_price, status
             ) VALUES (
                 $1, $2,
                 NULL, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-                $17, 'new'
+                $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, 'new'
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
@@ -791,6 +799,7 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             data.get("service"),
             data.get("service_type") or "standard",
             data.get("pickup_type") or "courier",
+            data.get("delivery_type") or "courier",
             data.get("pickup_date"),
             data.get("pickup_time"),
             data.get("note"),
@@ -1120,7 +1129,7 @@ async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None
-    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id","pickup_type"}
+    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id","pickup_type","delivery_type"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -1741,7 +1750,8 @@ async def update_order(order_id: int, **kwargs) -> dict:
     allowed = {"client_first_name", "client_last_name", "client_phone",
                "branch", "address", "short_address", "location", "location_address", "note", "deadline",
                "service_type", "pickup_type", "self_pickup_discount",
-               "discount_sum", "manual_discount"}
+               "discount_sum", "manual_discount",
+               "delivery_type", "delivery_discount"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))

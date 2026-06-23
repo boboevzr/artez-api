@@ -481,6 +481,7 @@ class StaffOrderRequest(BaseModel):
     service: str = ""
     service_type: str = "standard"
     pickup_type: str = "courier"
+    delivery_type: str = "courier"
     branch: str = ""
     address: str = ""
     short_address: str = ""
@@ -1107,7 +1108,7 @@ async def get_leads(status: str = None, branch: str = None,
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
-    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id","location","location_address"}
+    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id","location","location_address","pickup_type","delivery_type"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
@@ -1476,6 +1477,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "service":      req.service,
             "service_type": req.service_type or "standard",
             "pickup_type":  req.pickup_type or "courier",
+            "delivery_type": req.delivery_type or "courier",
             "pickup_date": "",
             "pickup_time": "",
             "note":        note_full,
@@ -2547,7 +2549,9 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
             and not (order.get("status") == "delivery" and can_edit_delivery)):
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone",
-               "branch","address","short_address","location","location_address","note","deadline","service_type"}
+               "branch","address","short_address","location","location_address","note","deadline","service_type",
+               "pickup_type","self_pickup_discount","discount_sum","manual_discount",
+               "delivery_type","delivery_discount"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
@@ -2605,6 +2609,7 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "location":      lead.get("location", ""),
         "service":       "",
         "pickup_type":   lead.get("pickup_type", "courier"),
+        "delivery_type": lead.get("delivery_type", "courier"),
         "pickup_date":   "",
         "pickup_time":   "",
         "note":          note_text,
@@ -3255,6 +3260,22 @@ async def get_self_pickup_discount_public():
 @app.put("/api/admin/settings/self-pickup-discount")
 async def save_self_pickup_discount(discount: float = Body(..., embed=True), _=Depends(get_admin)):
     await db.set_config("self_pickup_discount", str(discount))
+    return {"ok": True, "discount": discount}
+
+# ── Скидка при самовывозе (клиент забирает) ──────────────────
+@app.get("/api/admin/settings/delivery-discount")
+async def get_delivery_discount(_=Depends(get_admin)):
+    val = await db.get_config("delivery_discount_pct")
+    return {"ok": True, "discount": float(val) if val else 0.0}
+
+@app.get("/api/settings/delivery-discount")
+async def get_delivery_discount_public():
+    val = await db.get_config("delivery_discount_pct")
+    return {"ok": True, "discount": float(val) if val else 0.0}
+
+@app.put("/api/admin/settings/delivery-discount")
+async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depends(get_admin)):
+    await db.set_config("delivery_discount_pct", str(discount))
     return {"ok": True, "discount": discount}
 
 
