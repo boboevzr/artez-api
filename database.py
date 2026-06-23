@@ -511,6 +511,12 @@ async def create_tables():
         ALTER TABLE leads  ADD COLUMN IF NOT EXISTS pickup_type VARCHAR(10) DEFAULT 'courier';
         """)
 
+    # ── Шаг 9: ручная скидка на заказ ────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS manual_discount NUMERIC(12,2) DEFAULT 0;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1733,7 +1739,8 @@ async def update_order(order_id: int, **kwargs) -> dict:
     if not pool: return {}
     allowed = {"client_first_name", "client_last_name", "client_phone",
                "branch", "address", "short_address", "location", "location_address", "note", "deadline",
-               "service_type", "pickup_type", "self_pickup_discount"}
+               "service_type", "pickup_type", "self_pickup_discount",
+               "discount_sum", "manual_discount"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
