@@ -2103,8 +2103,17 @@ async def get_cash_shifts(limit: int = 30) -> list:
 async def get_order_payments(order_id: int) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM order_payments WHERE order_id=$1 ORDER BY created_at", order_id)
+        rows = await conn.fetch("""
+            SELECT p.*,
+                   o.client_first_name, o.client_last_name, o.client_address,
+                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS staff_full_name,
+                   s.phone AS staff_phone
+            FROM order_payments p
+            LEFT JOIN orders o ON o.id = p.order_id
+            LEFT JOIN staff s ON s.id = p.created_by_staff_id
+            WHERE p.order_id=$1
+            ORDER BY p.created_at
+        """, order_id)
         return [dict(r) for r in rows]
 
 async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str, handed_to_staff_id: int = None, created_by_staff_id: int = None) -> dict:
@@ -2544,8 +2553,10 @@ async def get_unconfirmed_payments() -> list:
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT p.*, o.client_first_name, o.client_last_name,
-                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS staff_name
+            SELECT p.*,
+                   o.client_first_name, o.client_last_name, o.client_address,
+                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS staff_full_name,
+                   s.phone AS staff_phone
             FROM order_payments p
             LEFT JOIN orders o ON o.id = p.order_id
             LEFT JOIN staff s ON s.id = p.created_by_staff_id
