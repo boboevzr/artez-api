@@ -3078,6 +3078,18 @@ async def set_cash_channel(cash_tg_channel_id: str = Body(..., embed=True), _=De
         await conn.execute("UPDATE settings SET cash_tg_channel_id=$1", cash_tg_channel_id)
     return {"ok": True}
 
+@app.get("/api/admin/settings/measure-channel")
+async def get_measure_channel(_=Depends(_get_admin)):
+    ch = await db.get_measure_tg_channel()
+    return {"ok": True, "measure_tg_channel_id": ch}
+
+@app.put("/api/admin/settings/measure-channel")
+async def set_measure_channel(measure_tg_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
+    if not db.pool: raise HTTPException(503)
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE settings SET measure_tg_channel_id=$1", measure_tg_channel_id)
+    return {"ok": True}
+
 
 @app.get("/api/admin/cash/my-balance")
 async def get_my_cash_balance(staff=Depends(get_current_staff)):
