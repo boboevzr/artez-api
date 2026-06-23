@@ -3268,6 +3268,54 @@ async def upload_payment_receipt(
     return {"ok": True, "receipt_url": receipt_url}
 
 
+# ── TEMP: чистка БД от мусора (удалить группу после чистки) ─────────────────
+_TEMP_TABLES = {
+    'order_payments':   'Оплаты',
+    'order_items':      'Позиции заказов',
+    'order_activity':   'Активность / статусы',
+    'order_photos':     'Фото заказов',
+    'order_item_media': 'Медиа позиций',
+}
+
+class _TempDeleteBody(BaseModel):
+    ids: list[int]
+
+@app.get("/api/admin/temp/orphan-counts")
+async def temp_orphan_counts(_=Depends(_get_admin)):
+    if not db.pool: raise HTTPException(503)
+    result = {}
+    async with db.pool.acquire() as conn:
+        for tbl in _TEMP_TABLES:
+            result[tbl] = int(await conn.fetchval(
+                f"SELECT COUNT(*) FROM {tbl} t LEFT JOIN orders o ON o.id=t.order_id WHERE o.id IS NULL"
+            ))
+    return result
+
+@app.get("/api/admin/temp/records/{table}")
+async def temp_get_records(table: str, orphans_only: bool = True, _=Depends(_get_admin)):
+    if table not in _TEMP_TABLES: raise HTTPException(404, "Unknown table")
+    if not db.pool: raise HTTPException(503)
+    where = "WHERE o.id IS NULL" if orphans_only else ""
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT t.*, (o.id IS NULL) AS is_orphan
+            FROM {table} t
+            LEFT JOIN orders o ON o.id = t.order_id
+            {where}
+            ORDER BY t.id DESC LIMIT 1000
+        """)
+    return {"rows": [dict(r) for r in rows], "table": table, "label": _TEMP_TABLES[table]}
+
+@app.delete("/api/admin/temp/records/{table}")
+async def temp_delete_records(table: str, body: _TempDeleteBody, _=Depends(_get_admin)):
+    if table not in _TEMP_TABLES: raise HTTPException(404, "Unknown table")
+    if not body.ids: return {"ok": True, "deleted": 0}
+    if not db.pool: raise HTTPException(503)
+    async with db.pool.acquire() as conn:
+        result = await conn.execute(f"DELETE FROM {table} WHERE id = ANY($1::int[])", body.ids)
+    deleted = int(result.split()[-1]) if result else 0
+    return {"ok": True, "deleted": deleted}
+
 # ── Настройки кассы (admin) ───────────────────────────────────────────────────
 
 @app.get("/api/admin/settings/cash-channel")
