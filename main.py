@@ -2857,13 +2857,13 @@ async def add_order_payment(
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_added", details)
     # Уведомление в канал кассы
     ch = await db.get_cash_tg_channel()
-    logging.info(f"[payment_added] cash_tg_channel={repr(ch)} bot={bool(BOT_TOKEN)}")
     if ch:
+        phone = staff.get("phone") or ""
         text = (f"💰 <b>Новый платёж</b> · Заказ #{order_id}\n"
                 f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
                 f"<b>{int(amount):,} сум</b>\n"
                 f"👤 {name}")
-        asyncio.create_task(_send_tg_cash(ch, text))
+        asyncio.create_task(_send_tg_cash(ch, text, phone=phone, call_label="🟢 Позвонить"))
     return {"ok": True, "payment": row}
 
 
@@ -2930,9 +2930,15 @@ async def create_cash_handover(
     return {"ok": True, "handover": row}
 
 
-async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None):
+async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None, phone: str = None, call_label: str = "📞 Позвонить"):
     """Отправить сообщение (или фото) в ТГ-канал кассы."""
     if not BOT_TOKEN or not chat_id: return
+    phone_clean = (phone or "").strip().replace(" ", "").replace("-", "")
+    reply_markup = None
+    if phone_clean:
+        if not phone_clean.startswith("+"):
+            phone_clean = "+" + phone_clean
+        reply_markup = {"inline_keyboard": [[{"text": call_label, "url": f"tel:{phone_clean}"}]]}
     try:
         async with aiohttp.ClientSession() as s:
             if photo_bytes:
@@ -2940,12 +2946,17 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
                 form.add_field("chat_id", str(chat_id))
                 form.add_field("photo", photo_bytes, filename=filename or "receipt.jpg", content_type="image/jpeg")
                 form.add_field("caption", text)
+                if reply_markup:
+                    import json as _json
+                    form.add_field("reply_markup", _json.dumps(reply_markup))
                 await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
                              timeout=aiohttp.ClientTimeout(total=10))
             else:
+                payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
                 await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                             json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
-                             timeout=aiohttp.ClientTimeout(total=5))
+                             json=payload, timeout=aiohttp.ClientTimeout(total=5))
     except Exception as e:
         logging.warning(f"_send_tg_cash error: {e}")
 
@@ -3176,11 +3187,12 @@ async def delete_order_payment(
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_deleted", details)
     ch = await db.get_cash_tg_channel()
     if ch:
+        phone = staff.get("phone") or ""
         text = (f"🗑 <b>Платёж удалён</b> · Заказ #{order_id}\n"
                 f"{mLabel.get(mth, mth)} · <b>{amt:,} сум</b>\n"
                 f"Причина: {reason or '—'}\n"
                 f"👤 {name}")
-        asyncio.create_task(_send_tg_cash(ch, text))
+        asyncio.create_task(_send_tg_cash(ch, text, phone=phone, call_label="🔴 Позвонить"))
     return {"ok": True}
 
 
