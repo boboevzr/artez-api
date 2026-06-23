@@ -33,6 +33,7 @@ GROUP_ID_ZARAFSHAN = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID     = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
+APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
 
 async def _get_media_channel() -> str:
     ch = await db.get_media_channel_id()
@@ -77,6 +78,8 @@ async def startup():
     await db.init_db()
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_measure_review_worker())
+    if BOT_TOKEN and APP_URL:
+        asyncio.create_task(_set_tg_webhook())
 
 async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None,
                         order_id: int = None, item_id: int = None, push_type: str = None):
@@ -2863,7 +2866,8 @@ async def add_order_payment(
                 f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
                 f"<b>{int(amount):,} сум</b>\n"
                 f"👤 {name}")
-        asyncio.create_task(_send_tg_cash(ch, text, phone=phone, call_label="🟢 Позвонить"))
+        asyncio.create_task(_send_tg_cash(ch, text, phone=phone,
+                                          btn_label="🟢 Проверить", btn_cb=f"chk:g:{order_id}"))
     return {"ok": True, "payment": row}
 
 
@@ -2892,11 +2896,13 @@ async def edit_order_payment(
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_edited", details)
     ch = await db.get_cash_tg_channel()
     if ch:
+        phone = staff.get("phone") or ""
         text = (f"✏️ <b>Платёж изменён</b> · Заказ #{order_id}\n"
                 f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
                 f"<b>{int(amount):,} сум</b>\n"
                 f"👤 {name}")
-        asyncio.create_task(_send_tg_cash(ch, text))
+        asyncio.create_task(_send_tg_cash(ch, text, phone=phone,
+                                          btn_label="🟢 Проверить", btn_cb=f"chk:g:{order_id}"))
     return {"ok": True, "payment": row}
 
 
@@ -2930,15 +2936,32 @@ async def create_cash_handover(
     return {"ok": True, "handover": row}
 
 
-async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None, phone: str = None, call_label: str = None):
+async def _set_tg_webhook():
+    """Установить webhook Telegram при старте."""
+    await asyncio.sleep(3)
+    url = f"{APP_URL.rstrip('/')}/api/tg/webhook"
+    try:
+        async with aiohttp.ClientSession() as s:
+            r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook",
+                             json={"url": url}, timeout=aiohttp.ClientTimeout(total=10))
+            body = await r.json()
+            logging.info(f"setWebhook → {body.get('description','')}")
+    except Exception as e:
+        logging.warning(f"setWebhook error: {e}")
+
+
+async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None,
+                        phone: str = None, btn_label: str = None, btn_cb: str = None):
     """Отправить сообщение (или фото) в ТГ-канал кассы."""
     if not BOT_TOKEN or not chat_id:
         logging.warning(f"_send_tg_cash skip: BOT_TOKEN={bool(BOT_TOKEN)} chat_id={repr(chat_id)}")
         return
-    # Телефон добавляем в текст — tel: URL не поддерживается в TG кнопках
     phone_clean = (phone or "").strip()
     if phone_clean:
         text += f"\n📞 {phone_clean}"
+    reply_markup = None
+    if btn_label and btn_cb:
+        reply_markup = {"inline_keyboard": [[{"text": btn_label, "callback_data": btn_cb}]]}
     try:
         async with aiohttp.ClientSession() as s:
             if photo_bytes:
@@ -2946,17 +2969,61 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
                 form.add_field("chat_id", str(chat_id))
                 form.add_field("photo", photo_bytes, filename=filename or "receipt.jpg", content_type="image/jpeg")
                 form.add_field("caption", text)
+                if reply_markup:
+                    form.add_field("reply_markup", _json.dumps(reply_markup))
                 r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
-                             timeout=aiohttp.ClientTimeout(total=10))
+                                 timeout=aiohttp.ClientTimeout(total=10))
                 logging.info(f"_send_tg_cash photo → {r.status}")
             else:
+                payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
+                if reply_markup:
+                    payload["reply_markup"] = reply_markup
                 r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                             json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
-                             timeout=aiohttp.ClientTimeout(total=5))
+                                 json=payload, timeout=aiohttp.ClientTimeout(total=5))
                 body = await r.json()
                 logging.info(f"_send_tg_cash msg → {r.status} {body.get('description','')}")
     except Exception as e:
         logging.warning(f"_send_tg_cash error: {e}")
+
+
+@app.post("/api/tg/webhook")
+async def tg_webhook(request: Request):
+    """Обработчик callback-кнопок от Telegram."""
+    try:
+        data = await request.json()
+    except Exception:
+        return {"ok": True}
+    cq = data.get("callback_query")
+    if not cq:
+        return {"ok": True}
+    cq_id    = cq["id"]
+    cb_data  = cq.get("data", "")
+    msg      = cq.get("message", {})
+    chat_id  = msg.get("chat", {}).get("id")
+    msg_id   = msg.get("message_id")
+    tg_user  = cq.get("from", {})
+    uname    = tg_user.get("username")
+    fname    = tg_user.get("first_name", "")
+    lname    = tg_user.get("last_name", "")
+    display  = f"@{uname}" if uname else " ".join(filter(None, [fname, lname])) or "кто-то"
+
+    if cb_data.startswith("chk:"):
+        # chk:g:ORDER_ID или chk:r:ORDER_ID
+        parts  = cb_data.split(":")
+        color  = parts[1] if len(parts) > 1 else "g"
+        icon   = "🟢" if color == "g" else "🔴"
+        new_kb = {"inline_keyboard": [[{"text": f"✅ Проверено · {display}", "callback_data": "done"}]]}
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
+                             json={"chat_id": chat_id, "message_id": msg_id, "reply_markup": new_kb},
+                             timeout=aiohttp.ClientTimeout(total=5))
+                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery",
+                             json={"callback_query_id": cq_id, "text": "✅ Отмечено"},
+                             timeout=aiohttp.ClientTimeout(total=5))
+        except Exception as e:
+            logging.warning(f"webhook callback error: {e}")
+    return {"ok": True}
 
 
 # ── Передача наличных (staff → ответственный) ─────────────────────────────────
@@ -3198,7 +3265,8 @@ async def delete_order_payment(
                 f"{mLabel.get(mth, mth)} · <b>{amt:,} сум</b>\n"
                 f"Причина: {reason or '—'}\n"
                 f"👤 {name}")
-        asyncio.create_task(_send_tg_cash(ch, text, phone=phone, call_label="🔴 Позвонить"))
+        asyncio.create_task(_send_tg_cash(ch, text, phone=phone,
+                                          btn_label="🔴 Проверить", btn_cb=f"chk:r:{order_id}"))
     return {"ok": True}
 
 
