@@ -480,6 +480,7 @@ class StaffOrderRequest(BaseModel):
     phone: str
     service: str = ""
     service_type: str = "standard"
+    pickup_type: str = "courier"
     branch: str = ""
     address: str = ""
     short_address: str = ""
@@ -1473,6 +1474,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "location":      location,
             "service":      req.service,
             "service_type": req.service_type or "standard",
+            "pickup_type":  req.pickup_type or "courier",
             "pickup_date": "",
             "pickup_time": "",
             "note":        note_full,
@@ -2598,6 +2600,7 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "short_address": lead.get("short_address", ""),
         "location":      lead.get("location", ""),
         "service":       "",
+        "pickup_type":   lead.get("pickup_type", "courier"),
         "pickup_date":   "",
         "pickup_time":   "",
         "note":          note_text,
@@ -3231,6 +3234,23 @@ async def save_osago_settings(body: OsagoSettings, _=Depends(get_admin)):
     import json
     await db.set_config("osago_tiers", json.dumps(body.dict()))
     return {"ok": True}
+
+
+# ── Скидка при самовывозе ─────────────────────────────────────
+@app.get("/api/admin/settings/self-pickup-discount")
+async def get_self_pickup_discount(_=Depends(get_admin)):
+    val = await db.get_config("self_pickup_discount")
+    return {"ok": True, "discount": float(val) if val else 0.0}
+
+@app.get("/api/settings/self-pickup-discount")
+async def get_self_pickup_discount_public():
+    val = await db.get_config("self_pickup_discount")
+    return {"ok": True, "discount": float(val) if val else 0.0}
+
+@app.put("/api/admin/settings/self-pickup-discount")
+async def save_self_pickup_discount(discount: float = Body(..., embed=True), _=Depends(get_admin)):
+    await db.set_config("self_pickup_discount", str(discount))
+    return {"ok": True, "discount": discount}
 
 
 # ── Настройки сайта ──────────────────────────────────────────
