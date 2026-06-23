@@ -2233,6 +2233,15 @@ async def get_all_approvers() -> list:
         )
         return [dict(r) for r in rows]
 
+async def get_all_cashiers_for_push() -> list:
+    """Все сотрудники у которых can_manage_cash = true."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM staff WHERE can_manage_cash=TRUE AND is_active=TRUE"
+        )
+        return [dict(r) for r in rows]
+
 async def submit_item_measure(item_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:

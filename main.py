@@ -2868,6 +2868,15 @@ async def add_order_payment(
                 f"👤 {name}")
         asyncio.create_task(_send_tg_cash(ch, text, phone=phone,
                                           btn_label="🟢 Проверить", btn_cb=f"chk:g:{order_id}"))
+    # Пуш-уведомление всем ответственным за кассу (только для карты/перевода)
+    if method in ("card", "transfer"):
+        cashiers = await db.get_all_cashiers_for_push()
+        push_title = "💳 Оплата на проверку"
+        push_body  = f"Заказ #{order_id} · {pLabel.get(purpose,purpose)} · {int(amount):,} сум · {name}"
+        for c in cashiers:
+            if c["id"] != staff.get("id"):
+                asyncio.create_task(send_web_push(c["id"], push_title, push_body,
+                                                  order_id=order_id, push_type="payment_review"))
     return {"ok": True, "payment": row}
 
 
