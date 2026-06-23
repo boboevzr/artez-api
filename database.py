@@ -2386,8 +2386,8 @@ async def get_my_cash_balance(staff_id: int) -> dict:
             staff_id, staff_name)
         # Получил от других сотрудников через платёж (они сдали мне)
         r3 = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id!=$1)",
-            staff_id, staff_id)
+            "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id<>$1)",
+            staff_id)
         # Получил через ручную передачу (cash_handovers to me)
         r4 = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE to_staff_id=$1", staff_id)

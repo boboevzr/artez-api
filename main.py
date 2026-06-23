@@ -2913,7 +2913,7 @@ async def cash_debug(staff=Depends(get_current_staff)):
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, order_id, amount, method, purpose, created_by, created_by_staff_id, handed_to_staff_id, created_at FROM order_payments WHERE created_by_staff_id=$1 OR handed_to_staff_id=$1 ORDER BY created_at DESC LIMIT 20",
-            sid, sid)
+            sid)
         name_rows = await conn.fetch(
             "SELECT id, order_id, amount, method, purpose, created_by, created_by_staff_id, handed_to_staff_id FROM order_payments WHERE method='cash' AND created_by_staff_id IS NULL ORDER BY created_at DESC LIMIT 10")
         staff_row = await conn.fetchrow("SELECT id, first_name, last_name, login FROM staff WHERE id=$1", sid)
