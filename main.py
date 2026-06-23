@@ -2932,7 +2932,9 @@ async def create_cash_handover(
 
 async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename: str = None, phone: str = None, call_label: str = "📞 Позвонить"):
     """Отправить сообщение (или фото) в ТГ-канал кассы."""
-    if not BOT_TOKEN or not chat_id: return
+    if not BOT_TOKEN or not chat_id:
+        logging.warning(f"_send_tg_cash skip: BOT_TOKEN={bool(BOT_TOKEN)} chat_id={repr(chat_id)}")
+        return
     phone_clean = (phone or "").strip().replace(" ", "").replace("-", "")
     reply_markup = None
     if phone_clean:
@@ -2949,14 +2951,17 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
                 if reply_markup:
                     import json as _json
                     form.add_field("reply_markup", _json.dumps(reply_markup))
-                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
+                r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
                              timeout=aiohttp.ClientTimeout(total=10))
+                logging.info(f"_send_tg_cash photo → {r.status}")
             else:
                 payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
                 if reply_markup:
                     payload["reply_markup"] = reply_markup
-                await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                r = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
                              json=payload, timeout=aiohttp.ClientTimeout(total=5))
+                body = await r.json()
+                logging.info(f"_send_tg_cash msg → {r.status} {body.get('description','')}")
     except Exception as e:
         logging.warning(f"_send_tg_cash error: {e}")
 
@@ -3101,8 +3106,7 @@ async def get_cash_channel(_=Depends(_get_admin)):
 @app.put("/api/admin/settings/cash-channel")
 async def set_cash_channel(cash_tg_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
     if not db.pool: raise HTTPException(503)
-    async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE settings SET cash_tg_channel_id=$1", cash_tg_channel_id)
+    await _upsert_setting("cash_tg_channel_id", cash_tg_channel_id)
     return {"ok": True}
 
 @app.get("/api/admin/settings/media-channel")
@@ -3113,9 +3117,18 @@ async def get_media_channel(_=Depends(_get_admin)):
 @app.put("/api/admin/settings/media-channel")
 async def set_media_channel(media_channel_id: str = Body(..., embed=True), _=Depends(_get_admin)):
     if not db.pool: raise HTTPException(503)
-    async with db.pool.acquire() as conn:
-        await conn.execute("UPDATE settings SET media_channel_id=$1", media_channel_id)
+    await _upsert_setting("media_channel_id", media_channel_id)
     return {"ok": True}
+
+async def _upsert_setting(col: str, val: str):
+    """Обновить настройку — гарантирует наличие строки в settings."""
+    async with db.pool.acquire() as conn:
+        count = await conn.fetchval("SELECT COUNT(*) FROM settings")
+        if count == 0:
+            await conn.execute(f"INSERT INTO settings({col}) VALUES($1)", val)
+        else:
+            await conn.execute(f"UPDATE settings SET {col}=$1", val)
+    logging.info(f"_upsert_setting {col}={repr(val)}")
 
 
 @app.get("/api/admin/cash/my-balance")
