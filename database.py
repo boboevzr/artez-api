@@ -523,6 +523,7 @@ async def create_tables():
         await c.execute("""
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(10) DEFAULT 'courier';
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_discount NUMERIC(12,2) DEFAULT 0;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_discount_pct NUMERIC(5,2) DEFAULT 0;
         ALTER TABLE leads  ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(10) DEFAULT 'courier';
         """)
 
@@ -1751,7 +1752,7 @@ async def update_order(order_id: int, **kwargs) -> dict:
                "branch", "address", "short_address", "location", "location_address", "note", "deadline",
                "service_type", "pickup_type", "self_pickup_discount",
                "discount_sum", "manual_discount",
-               "delivery_type", "delivery_discount"}
+               "delivery_type", "delivery_discount", "delivery_discount_pct"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))

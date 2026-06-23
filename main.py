@@ -2551,7 +2551,7 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
     allowed = {"client_first_name","client_last_name","client_phone",
                "branch","address","short_address","location","location_address","note","deadline","service_type",
                "pickup_type","self_pickup_discount","discount_sum","manual_discount",
-               "delivery_type","delivery_discount"}
+               "delivery_type","delivery_discount","delivery_discount_pct"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
