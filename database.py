@@ -1126,6 +1126,9 @@ async def update_lead(lead_id: int, **kwargs) -> dict | None:
 async def delete_lead(lead_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM agent_notifications WHERE lead_id=$1", lead_id)
+        await conn.execute("DELETE FROM lead_reminders       WHERE lead_id=$1", lead_id)
+        await conn.execute("DELETE FROM lead_calls           WHERE lead_id=$1", lead_id)
         res = await conn.execute("DELETE FROM leads WHERE id=$1", lead_id)
         return res == "DELETE 1"
 
