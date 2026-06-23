@@ -1435,11 +1435,11 @@ async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
 
 # Какие статусы видит сотрудник в зависимости от этапа
 _STAGE_STATUSES = {
-    "pickup":  {"new", "confirmed", "pickup"},
-    "wash":    {"received", "washing"},
-    "dry":     {"washing", "drying"},
-    "pack":    {"drying", "packing", "ready"},
-    "deliver": {"ready", "delivery", "delivered"},
+    "pickup":  {"new", "confirmed", "pickup", "cancelled"},
+    "wash":    {"received", "washing", "cancelled"},
+    "dry":     {"washing", "drying", "cancelled"},
+    "pack":    {"drying", "packing", "ready", "cancelled"},
+    "deliver": {"ready", "delivery", "delivered", "cancelled"},
 }
 
 @app.get("/api/staff/orders")
