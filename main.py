@@ -2541,7 +2541,10 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
-    if staff.get("sub") != "admin" and order.get("status") not in _ORDER_EDITABLE_STATUSES:
+    can_edit_delivery = staff.get("can_edit_delivery", False)
+    if (staff.get("sub") != "admin"
+            and order.get("status") not in _ORDER_EDITABLE_STATUSES
+            and not (order.get("status") == "delivery" and can_edit_delivery)):
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone",
                "branch","address","short_address","location","location_address","note","deadline","service_type"}
