@@ -2857,6 +2857,7 @@ async def add_order_payment(
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_added", details)
     # Уведомление в канал кассы
     ch = await db.get_cash_tg_channel()
+    logging.info(f"[payment_added] cash_tg_channel={repr(ch)} bot={bool(BOT_TOKEN)}")
     if ch:
         text = (f"💰 <b>Новый платёж</b> · Заказ #{order_id}\n"
                 f"{pLabel.get(purpose, purpose)} · {mLabel.get(method, method)}\n"
