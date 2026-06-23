@@ -729,6 +729,7 @@ def _staff_public(s: dict) -> dict:
         "can_edit_confirmed":  s.get("can_edit_confirmed", False),
         "can_send_pickup":     s.get("can_send_pickup", False),
         "can_edit_delivery":   s.get("can_edit_delivery", False),
+        "can_accept_payment":  s.get("can_accept_payment", False),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
         "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
@@ -2827,15 +2828,46 @@ async def get_order_payments(order_id: int, _=Depends(get_current_staff)):
 @app.post("/api/admin/orders/{order_id}/payments")
 async def add_order_payment(
     order_id: int,
-    amount:  float = Body(..., embed=False),
-    method:  str   = Body(..., embed=False),
-    purpose: str   = Body("payment", embed=False),
-    note:    str   = Body("", embed=False),
+    amount:              float = Body(..., embed=False),
+    method:              str   = Body(..., embed=False),
+    purpose:             str   = Body("payment", embed=False),
+    note:                str   = Body("", embed=False),
+    handed_to_staff_id:  int   = Body(None, embed=False),
     staff=Depends(get_current_staff),
 ):
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
-    row = await db.add_order_payment(order_id, amount, method, purpose, note, name)
+    row = await db.add_order_payment(order_id, amount, method, purpose, note, name, handed_to_staff_id)
     return {"ok": True, "payment": row}
+
+
+@app.get("/api/admin/staff/cashiers")
+async def get_cashiers(_=Depends(get_current_staff)):
+    rows = await db.get_cashiers()
+    return {"ok": True, "cashiers": rows}
+
+
+@app.get("/api/admin/cash/balance")
+async def get_cash_balance(_=Depends(_get_admin)):
+    rows = await db.get_cash_balance()
+    return {"ok": True, "balances": rows}
+
+
+@app.get("/api/admin/cash/handovers")
+async def list_cash_handovers(_=Depends(_get_admin)):
+    rows = await db.get_cash_handovers()
+    return {"ok": True, "handovers": rows}
+
+
+@app.post("/api/admin/cash/handover")
+async def create_cash_handover(
+    from_staff_id: int   = Body(..., embed=True),
+    to_staff_id:   int   = Body(..., embed=True),
+    amount:        float = Body(..., embed=True),
+    note:          str   = Body("", embed=True),
+    _=Depends(_get_admin),
+):
+    row = await db.add_cash_handover(from_staff_id, to_staff_id, amount, note)
+    return {"ok": True, "handover": row}
 
 @app.delete("/api/admin/orders/{order_id}/payments/{payment_id}")
 async def delete_order_payment(order_id: int, payment_id: int, _=Depends(get_current_staff)):
@@ -3196,6 +3228,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_edit_confirmed:  bool = Body(False, embed=True),
     can_send_pickup:     bool = Body(False, embed=True),
     can_edit_delivery:   bool = Body(False, embed=True),
+    can_accept_payment:  bool = Body(False, embed=True),
     order_stages:        str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -3203,14 +3236,16 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
             """UPDATE staff
                SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4,
                    can_create_order=$5, can_confirm_order=$6, order_stages=$7,
-                   can_edit_confirmed=$8, can_send_pickup=$9, can_edit_delivery=$10
+                   can_edit_confirmed=$8, can_send_pickup=$9, can_edit_delivery=$10,
+                   can_accept_payment=$11
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_create_order, can_confirm_order, order_stages,
-                         can_edit_confirmed, can_send_pickup, can_edit_delivery""",
+                         can_edit_confirmed, can_send_pickup, can_edit_delivery,
+                         can_accept_payment""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_create_order, can_confirm_order, order_stages or None,
-            can_edit_confirmed, can_send_pickup, can_edit_delivery)
+            can_edit_confirmed, can_send_pickup, can_edit_delivery, can_accept_payment)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}

@@ -115,6 +115,16 @@ async def create_tables():
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_confirmed   BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_send_pickup      BOOLEAN DEFAULT FALSE",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_delivery    BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_accept_payment   BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS handed_to_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        """CREATE TABLE IF NOT EXISTS cash_handovers (
+            id              SERIAL PRIMARY KEY,
+            from_staff_id   INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            to_staff_id     INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            amount          NUMERIC(12,2) NOT NULL,
+            note            TEXT DEFAULT '',
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        )""",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS review_claimed_by    INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS review_claimed_at    TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS gender             VARCHAR(1) DEFAULT 'M'",
@@ -2057,13 +2067,13 @@ async def get_order_payments(order_id: int) -> list:
             "SELECT * FROM order_payments WHERE order_id=$1 ORDER BY created_at", order_id)
         return [dict(r) for r in rows]
 
-async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str) -> dict:
+async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str, handed_to_staff_id: int = None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO order_payments (order_id, amount, method, purpose, note, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
-        """, order_id, amount, method, purpose, note, created_by)
+            INSERT INTO order_payments (order_id, amount, method, purpose, note, created_by, handed_to_staff_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, order_id, amount, method, purpose, note, created_by, handed_to_staff_id)
         # Пересчитать payment_status на orders
         total_row = await conn.fetchrow(
             "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1", order_id)
@@ -2307,3 +2317,65 @@ async def update_route_stop(route_id: int, order_id: int, data: dict) -> bool:
             f"UPDATE route_orders SET {sets} WHERE route_id=$1 AND order_id=$2",
             route_id, order_id, *fields.values())
         return True
+
+# ── Касса / наличные ──────────────────────────────────────────────────────────
+
+async def get_cashiers() -> list:
+    """Сотрудники с правом приёма оплаты."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, first_name, last_name FROM staff WHERE can_accept_payment=TRUE AND is_active=TRUE ORDER BY last_name, first_name")
+        return [dict(r) for r in rows]
+
+async def get_cash_balance() -> list:
+    """Баланс наличных по каждому кассиру: получено, сдано, на руках."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                s.id,
+                s.first_name,
+                s.last_name,
+                COALESCE(recv.total, 0) AS received,
+                COALESCE(hand.total, 0) AS handed_over,
+                COALESCE(recv.total, 0) - COALESCE(hand.total, 0) AS on_hand
+            FROM staff s
+            LEFT JOIN (
+                SELECT handed_to_staff_id, SUM(amount) AS total
+                FROM order_payments
+                WHERE method='cash' AND handed_to_staff_id IS NOT NULL
+                GROUP BY handed_to_staff_id
+            ) recv ON recv.handed_to_staff_id = s.id
+            LEFT JOIN (
+                SELECT to_staff_id, SUM(amount) AS total
+                FROM cash_handovers
+                GROUP BY to_staff_id
+            ) hand ON hand.to_staff_id = s.id
+            WHERE s.can_accept_payment = TRUE AND s.is_active = TRUE
+            ORDER BY s.last_name, s.first_name
+        """)
+        return [dict(r) for r in rows]
+
+async def add_cash_handover(from_staff_id: int, to_staff_id: int, amount: float, note: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note)
+            VALUES ($1,$2,$3,$4) RETURNING *
+        """, from_staff_id, to_staff_id, amount, note)
+        return dict(row) if row else {}
+
+async def get_cash_handovers(limit: int = 50) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ch.*,
+                   sf.first_name || ' ' || sf.last_name AS from_name,
+                   st.first_name || ' ' || st.last_name AS to_name
+            FROM cash_handovers ch
+            LEFT JOIN staff sf ON sf.id = ch.from_staff_id
+            LEFT JOIN staff st ON st.id = ch.to_staff_id
+            ORDER BY ch.created_at DESC LIMIT $1
+        """, limit)
+        return [dict(r) for r in rows]
