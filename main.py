@@ -2869,6 +2869,17 @@ async def create_cash_handover(
     row = await db.add_cash_handover(from_staff_id, to_staff_id, amount, note)
     return {"ok": True, "handover": row}
 
+@app.get("/api/admin/cash/my-payments")
+async def get_my_cash_payments(staff=Depends(get_current_staff)):
+    """Наличные платежи где текущий сотрудник указан получателем."""
+    if not db.pool: return {"ok": True, "payments": []}
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM order_payments WHERE method='cash' AND handed_to_staff_id=$1 ORDER BY created_at DESC LIMIT 100",
+            staff["id"])
+        return {"ok": True, "payments": [dict(r) for r in rows]}
+
+
 @app.delete("/api/admin/orders/{order_id}/payments/{payment_id}")
 async def delete_order_payment(order_id: int, payment_id: int, _=Depends(get_current_staff)):
     await db.delete_order_payment(payment_id)
