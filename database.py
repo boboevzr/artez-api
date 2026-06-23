@@ -1764,6 +1764,11 @@ async def delete_order_item(item_id: int) -> bool:
 async def delete_order(order_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
+        # Блокируем удаление если есть платежи — деньги должны быть сняты вручную
+        payment_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM order_payments WHERE order_id=$1", order_id)
+        if payment_count:
+            raise ValueError(f"has_payments:{payment_count}")
         # Получаем order_num до удаления (нужен для history)
         row = await conn.fetchrow("SELECT order_num FROM orders WHERE id=$1", order_id)
         order_num = dict(row).get("order_num") if row else None
@@ -1773,8 +1778,6 @@ async def delete_order(order_id: int) -> bool:
         await conn.execute("DELETE FROM order_items WHERE order_id=$1", order_id)
         # Удаляем фото заказа
         await conn.execute("DELETE FROM order_photos WHERE order_id=$1", order_id)
-        # Удаляем платежи
-        await conn.execute("DELETE FROM order_payments WHERE order_id=$1", order_id)
         # Удаляем из маршрутов
         await conn.execute("DELETE FROM route_orders WHERE order_id=$1", order_id)
         # Удаляем историю статусов

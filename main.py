@@ -1411,10 +1411,19 @@ async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
     if not ids:
         raise HTTPException(status_code=400, detail="Нет ID заказов")
     deleted = 0
+    skipped = []
     for order_id in ids:
-        ok = await db.delete_order(int(order_id))
-        if ok: deleted += 1
-    return {"ok": True, "deleted": deleted}
+        try:
+            ok = await db.delete_order(int(order_id))
+            if ok: deleted += 1
+        except ValueError as e:
+            if "has_payments" in str(e):
+                skipped.append(int(order_id))
+    result = {"ok": True, "deleted": deleted}
+    if skipped:
+        result["skipped"] = skipped
+        result["skipped_reason"] = "Заказы с платежами не удалены — сначала удалите платежи в карточке заказа"
+    return result
 
 
 # ══════════════════════════════════════
