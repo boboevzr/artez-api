@@ -3661,6 +3661,17 @@ async def get_pending_payment_reviews(staff=Depends(get_current_staff)):
     payments = await db.get_unconfirmed_payments()
     return {"ok": True, "payments": payments}
 
+@app.get("/api/staff/pending-position-requests")
+async def get_pending_position_requests(staff=Depends(get_current_staff)):
+    """Список заказов с активным (не принятым) запросом позиции — для поллинга."""
+    if not db.pool:
+        return {"ok": True, "order_ids": []}
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM orders WHERE pos_request_pending=TRUE"
+        )
+    return {"ok": True, "order_ids": [r["id"] for r in rows]}
+
 @app.get("/api/staff/pending-reviews")
 async def get_pending_reviews(staff=Depends(get_current_staff)):
     if not staff.get("can_approve_measure"):
@@ -3695,6 +3706,13 @@ async def request_position(
             a["id"], title, body,
             order_id=order_id, push_type="position_request"
         ))
+    # Ставим флаг pending в БД
+    if db.pool:
+        async with db.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET pos_request_pending=TRUE, pos_request_at=NOW() WHERE id=$1",
+                order_id
+            )
     return {"ok": True}
 
 @app.post("/api/staff/orders/{order_id}/claim-position-request")
@@ -3708,6 +3726,12 @@ async def claim_position_request(order_id: int, staff=Depends(get_current_staff)
     my_name     = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
     title = f"✅ {order_num} — принято"
     body  = f"{my_name} принял запрос на добавление позиции"
+    # Сбрасываем флаг pending
+    if db.pool:
+        async with db.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE orders SET pos_request_pending=FALSE WHERE id=$1", order_id
+            )
     approvers = await db.get_all_approvers()
     for a in approvers:
         if a["id"] == my_id:

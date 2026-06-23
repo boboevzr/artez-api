@@ -575,6 +575,13 @@ async def create_tables():
         ALTER TABLE leads  ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(10) DEFAULT 'courier';
         """)
 
+    # ── Шаг 11: флаг pending position request ────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_pending BOOLEAN DEFAULT FALSE;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_at TIMESTAMPTZ DEFAULT NULL;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
