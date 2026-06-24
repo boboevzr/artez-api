@@ -3992,10 +3992,12 @@ SITE_SETTINGS_DEFAULTS = {
     "contact_short":       "1221",
     "contact_main":        "+998792221221",
     "contact_zarafshan_1":         "+998882001221",
+    "contact_zarafshan_2":         "",
     "contact_zarafshan_telegram":  "",
     "contact_zarafshan_whatsapp":  "",
     "contact_zarafshan_instagram": "",
     "contact_navoi_1":             "+998997500020",
+    "contact_navoi_2":             "",
     "contact_navoi_telegram":      "",
     "contact_navoi_whatsapp":      "",
     "contact_navoi_instagram":     "",
@@ -4057,8 +4059,8 @@ async def get_site_settings():
     PUBLIC_KEYS = [
         "social_instagram", "social_tg_bot", "social_tg_group",
         "contact_short", "contact_main",
-        "contact_zarafshan_1", "contact_zarafshan_telegram", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
-        "contact_navoi_1", "contact_navoi_telegram", "contact_navoi_whatsapp", "contact_navoi_instagram",
+        "contact_zarafshan_1", "contact_zarafshan_2", "contact_zarafshan_telegram", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
+        "contact_navoi_1", "contact_navoi_2", "contact_navoi_telegram", "contact_navoi_whatsapp", "contact_navoi_instagram",
         "yandex_maps_key",
         "osago_partner_phone", "osago_partner_promo",
     ]
@@ -4075,10 +4077,12 @@ class SiteSettings(BaseModel):
     contact_short:       str | None = None
     contact_main:        str | None = None
     contact_zarafshan_1:        str | None = None
+    contact_zarafshan_2:        str | None = None
     contact_zarafshan_telegram: str | None = None
     contact_zarafshan_whatsapp: str | None = None
     contact_zarafshan_instagram:str | None = None
     contact_navoi_1:            str | None = None
+    contact_navoi_2:            str | None = None
     contact_navoi_telegram:     str | None = None
     contact_navoi_whatsapp:     str | None = None
     contact_navoi_instagram:    str | None = None
