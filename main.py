@@ -4558,6 +4558,18 @@ async def seed_templates(staff=Depends(get_current_staff)):
     await db.seed_chat_templates_forced()
     return {"ok": True}
 
+@app.get("/api/chat/active-by-phone")
+async def chat_active_by_phone(phone: str):
+    """Публичный эндпоинт — проверить есть ли активный чат для этого номера."""
+    if not phone:
+        return {"session": None}
+    session = await db.get_active_chat_by_phone(phone)
+    if not session:
+        return {"session": None}
+    for k, v in session.items():
+        if hasattr(v, 'isoformat'): session[k] = v.isoformat()
+    return {"session": {"code": session["code"], "status": session["status"]}}
+
 @app.get("/api/chat/history")
 async def chat_history(limit: int = 50, offset: int = 0, staff=Depends(get_current_staff)):
     rows = await db.get_closed_chat_sessions(limit, offset)

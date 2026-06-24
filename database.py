@@ -2743,6 +2743,16 @@ async def get_active_chat_sessions() -> list:
         )
         return [dict(r) for r in rows]
 
+async def get_active_chat_by_phone(phone: str) -> dict:
+    """Найти активный/pending чат клиента по номеру телефона."""
+    if not pool or not phone: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM chat_sessions WHERE client_phone=$1 AND status IN ('pending','active') ORDER BY created_at DESC LIMIT 1",
+            phone.strip()
+        )
+        return dict(row) if row else None
+
 async def get_closed_chat_sessions(limit: int = 50, offset: int = 0) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
