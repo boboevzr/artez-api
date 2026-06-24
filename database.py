@@ -2832,45 +2832,9 @@ async def ensure_chat_templates():
         """)
         count = await conn.fetchval("SELECT COUNT(*) FROM chat_templates")
         if count == 0:
-            templates = [
-                # ── Авто-сообщения RU ──
-                ('welcome',      'ru', "Здравствуйте! 👋 Добро пожаловать в ARTEZ. Напишите ваш вопрос — оператор ответит вам в ближайшее время.", 0),
-                ('auto_reply',   'ru', "✅ Ваше сообщение принято! Оператор ответит в течение 1-3 минут. Пожалуйста, подождите.", 1),
-                ('warn_timeout', 'ru', "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете.", 1),
-                ('bye_m',        'ru', "Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 2),
-                ('bye_f',        'ru', "Я рада, что смогла вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 3),
-                # ── Авто-сообщения UZ ──
-                ('welcome',      'uz', "Salom! 👋 Xush kelibsiz ARTEZ'ga. Savolingizni yozing, operatorimiz tez orada javob beradi.", 0),
-                ('auto_reply',   'uz', "✅ Xabaringiz qabul qilindi! Operatorimiz 1-3 daqiqa ichida javob beradi. Iltimos, kuting.", 1),
-                ('warn_timeout', 'uz', "⏰ Siz uzoq vaqtdan beri javob bermayapsiz. Agar yozmasangiz, chat 1 daqiqadan so'ng avtomatik yopiladi.", 1),
-                ('bye_m',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 2),
-                ('bye_f',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 3),
-                # ── Быстрые ответы RU ──
-                ('quick', 'ru', "Здравствуйте! Как могу вам помочь? 😊", 10),
-                ('quick', 'ru', "Уточните, пожалуйста, какой вид чистки вас интересует?", 11),
-                ('quick', 'ru', "Стоимость зависит от размера изделия. Пришлите фото или замеры?", 12),
-                ('quick', 'ru', "Мы работаем ежедневно с 9:00 до 20:00", 13),
-                ('quick', 'ru', "Выезд и доставка — бесплатно!", 14),
-                ('quick', 'ru', "Срок чистки — от 1 до 3 дней в зависимости от загрязнения", 15),
-                ('quick', 'ru', "Оплата при получении — наличными или картой", 16),
-                ('quick', 'ru', "Оставьте заявку на сайте, и мы перезвоним вам!", 17),
-                ('quick', 'ru', "Мы используем профессиональную химию — безопасно для здоровья и ткани", 18),
-                ('quick', 'ru', "Спасибо за обращение! Обработаем ваш запрос в ближайшее время", 19),
-                # ── Быстрые ответы UZ ──
-                ('quick', 'uz', "Salom! Qanday yordam bera olaman? 😊", 10),
-                ('quick', 'uz', "Qanday tozalash turini qiziqtiraydi?", 11),
-                ('quick', 'uz', "Narx mahsulot o'lchamiga qarab belgilanadi. Rasm yoki o'lcham yuboring?", 12),
-                ('quick', 'uz', "Biz har kuni soat 9:00 dan 20:00 gacha ishlаymiz", 13),
-                ('quick', 'uz', "Olib ketish va yetkazib berish — bepul!", 14),
-                ('quick', 'uz', "Tozalash muddati ifloslanishga qarab 1 dan 3 kungacha", 15),
-                ('quick', 'uz', "To'lov qabul qilishda — naqd yoki karta orqali", 16),
-                ('quick', 'uz', "Saytda ariza qoldiring, biz siz bilan bog'lanamiz!", 17),
-                ('quick', 'uz', "Sog'liqqa va matoga zararsiz professional kimyoviy moddalar ishlatamiz", 18),
-                ('quick', 'uz', "Murojaat uchun rahmat! So'rovingizni tez orada ko'rib chiqamiz", 19),
-            ]
             await conn.executemany(
                 "INSERT INTO chat_templates (key, lang, text, sort_order) VALUES ($1,$2,$3,$4)",
-                templates
+                _CHAT_TEMPLATE_SEED
             )
 
 async def get_chat_templates(lang: str = None, key: str = None) -> list:
@@ -2914,55 +2878,79 @@ async def delete_chat_template(tid: int):
         await conn.execute("DELETE FROM chat_templates WHERE id=$1", tid)
 
 _CHAT_TEMPLATE_SEED = [
-    ('welcome',      'ru', "Здравствуйте! 👋 Добро пожаловать в ARTEZ. Напишите ваш вопрос — оператор ответит вам в ближайшее время.", 0),
-    ('welcome',      'uz', "Salom! 👋 Xush kelibsiz ARTEZ'ga. Savolingizni yozing, operatorimiz tez orada javob beradi.", 0),
-    ('auto_reply',   'ru', "✅ Ваше сообщение принято! Оператор ответит в течение 1-3 минут. Пожалуйста, подождите.", 1),
-    ('auto_reply',   'uz', "✅ Xabaringiz qabul qilindi! Operatorimiz 1-3 daqiqa ichida javob beradi. Iltimos, kuting.", 1),
-    ('warn_timeout', 'ru', "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете.", 1),
-    ('warn_timeout', 'uz', "⏰ Siz uzoq vaqtdan beri javob bermayapsiz. Agar yozmasangiz, chat 1 daqiqadan so'ng avtomatik yopiladi.", 1),
-    ('bye_m',        'ru', "Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 2),
-    ('bye_m',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 2),
-    ('bye_f',        'ru', "Я рада, что смогла вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 3),
-    ('bye_f',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 3),
-    ('quick', 'ru', "Здравствуйте! Как могу вам помочь? 😊", 10),
-    ('quick', 'ru', "Уточните, пожалуйста, какой вид чистки вас интересует?", 11),
-    ('quick', 'ru', "Стоимость зависит от размера изделия. Пришлите фото или замеры?", 12),
-    ('quick', 'ru', "Мы работаем ежедневно с 9:00 до 20:00", 13),
-    ('quick', 'ru', "Выезд и доставка — бесплатно!", 14),
-    ('quick', 'ru', "Срок чистки — от 1 до 3 дней в зависимости от загрязнения", 15),
-    ('quick', 'ru', "Оплата при получении — наличными или картой", 16),
-    ('quick', 'ru', "Оставьте заявку на сайте, и мы перезвоним вам!", 17),
-    ('quick', 'ru', "Мы используем профессиональную химию — безопасно для здоровья и ткани", 18),
-    ('quick', 'ru', "Спасибо за обращение! Обработаем ваш запрос в ближайшее время", 19),
-    ('quick', 'ru', "Ваш ковёр/изделие будет доставлено в указанное вами время", 20),
-    ('quick', 'ru', "Можете уточнить адрес для выезда мастера?", 21),
-    ('quick', 'uz', "Salom! Qanday yordam bera olaman? 😊", 10),
-    ('quick', 'uz', "Qanday tozalash turini qiziqtiraydi?", 11),
-    ('quick', 'uz', "Narx mahsulot o'lchamiga qarab belgilanadi. Rasm yoki o'lcham yuboring?", 12),
-    ('quick', 'uz', "Biz har kuni soat 9:00 dan 20:00 gacha ishlаymiz", 13),
-    ('quick', 'uz', "Olib ketish va yetkazib berish — bepul!", 14),
-    ('quick', 'uz', "Tozalash muddati ifloslanishga qarab 1 dan 3 kungacha", 15),
-    ('quick', 'uz', "To'lov qabul qilishda — naqd yoki karta orqali", 16),
-    ('quick', 'uz', "Saytda ariza qoldiring, biz siz bilan bog'lanamiz!", 17),
-    ('quick', 'uz', "Sog'liqqa va matoga zararsiz professional kimyoviy moddalar ishlatamiz", 18),
-    ('quick', 'uz', "Murojaat uchun rahmat! So'rovingizni tez orada ko'rib chiqamiz", 19),
-    ('quick', 'uz', "Gilamingiz/mahsulotingiz belgilangan vaqtda yetkazib beriladi", 20),
-    ('quick', 'uz', "Usta chiqishi uchun manzilni aniqlay olasizmi?", 21),
+    # ── Авто-сообщения RU ──
+    ('welcome',      'ru', "Здравствуйте, {name}! 👋 Рады видеть вас в ARTEZ. Напишите ваш вопрос — оператор ответит в ближайшее время.", 0),
+    ('auto_reply',   'ru', "✅ {name}, ваше сообщение принято! Оператор ответит в течение 1–3 минут. Спасибо за ожидание 🙏", 1),
+    ('warn_timeout', 'ru', "⏰ {name}, вы давно не отвечаете. Чат будет автоматически закрыт через 2 минуты.", 2),
+    ('bye_m',        'ru', "Спасибо за обращение, {name}! Рад был помочь 😊 Если появятся вопросы — мы всегда здесь. Хорошего дня!", 3),
+    ('bye_f',        'ru', "Спасибо за обращение, {name}! Рада была помочь 😊 Если появятся вопросы — мы всегда здесь. Хорошего дня!", 4),
+    # ── Авто-сообщения UZ ──
+    ('welcome',      'uz', "Salom, {name}! 👋 Sizni ARTEZ'da ko'rganimizdan xursandmiz. Savolingizni yozing — operator tez orada javob beradi.", 0),
+    ('auto_reply',   'uz', "✅ {name}, xabaringiz qabul qilindi! Operator 1–3 daqiqa ichida javob beradi. Kutganingiz uchun rahmat 🙏", 1),
+    ('warn_timeout', 'uz', "⏰ {name}, siz uzoq vaqtdan beri javob bermadingiz. Chat 2 daqiqadan so'ng avtomatik yopiladi.", 2),
+    ('bye_m',        'uz', "Murojaat qilganingiz uchun rahmat, {name}! Yordam bera olganim uchun xursandman 😊 Savol bo'lsa — biz doim shu yerdamiz. Yaxshi kun!", 3),
+    ('bye_f',        'uz', "Murojaat qilganingiz uchun rahmat, {name}! Yordam bera olganim uchun xursandman 😊 Savol bo'lsa — biz doim shu yerdamiz. Yaxshi kun!", 4),
+    # ── Быстрые ответы RU ──
+    ('quick', 'ru', "Здравствуйте, {name}! Чем могу помочь? 😊", 10),
+    ('quick', 'ru', "Какое изделие нужно почистить? (ковёр, диван, матрас, шторы...)", 11),
+    ('quick', 'ru', "Стоимость зависит от размера и состояния. Пришлите фото или назовите размеры? 📐", 12),
+    ('quick', 'ru', "Выезд мастера для замера и забора — бесплатно 🚗", 13),
+    ('quick', 'ru', "Срок чистки — 1–3 дня. Вернём чистым и свежим 🧹", 14),
+    ('quick', 'ru', "Работаем ежедневно с 9:00 до 20:00 🕐", 15),
+    ('quick', 'ru', "Оплата при получении — наличными или картой 💳", 16),
+    ('quick', 'ru', "Используем профессиональную химию — безопасно для детей и аллергиков ✅", 17),
+    ('quick', 'ru', "Уточните адрес, {name}? Выедем в удобное для вас время 📍", 18),
+    ('quick', 'ru', "Записываем вас! Мастер свяжется для подтверждения времени ✅", 19),
+    ('quick', 'ru', "Если есть ещё вопросы — спрашивайте, с удовольствием помогу 😊", 20),
+    ('quick', 'ru', "Спасибо, {name}! Ждём ваше изделие 🙏", 21),
+    # ── Быстрые ответы UZ ──
+    ('quick', 'uz', "Salom, {name}! Qanday yordam bera olaman? 😊", 10),
+    ('quick', 'uz', "Qaysi mahsulotni tozalash kerak? (gilam, divan, matras, parda...)", 11),
+    ('quick', 'uz', "Narx o'lcham va holatiga qarab. Rasm yuboring yoki o'lchamlarini ayting? 📐", 12),
+    ('quick', 'uz', "Usta o'lchov va olib ketish uchun chiqishi bepul 🚗", 13),
+    ('quick', 'uz', "Tozalash muddati — 1–3 kun. Toza va yangi holda qaytaramiz 🧹", 14),
+    ('quick', 'uz', "Har kuni soat 9:00 dan 20:00 gacha ishlaymiz 🕐", 15),
+    ('quick', 'uz', "To'lov qabul qilishda — naqd yoki karta orqali 💳", 16),
+    ('quick', 'uz', "Professional kimyo ishlatamiz — bolalar va allergiklar uchun xavfsiz ✅", 17),
+    ('quick', 'uz', "Manzilni ayta olasizmi, {name}? Qulay vaqtingizda chiqamiz 📍", 18),
+    ('quick', 'uz', "Yozib olyapmiz! Usta vaqtni tasdiqlash uchun bog'lanadi ✅", 19),
+    ('quick', 'uz', "Yana savollar bo'lsa — so'rang, mamnuniyat bilan yordam beraman 😊", 20),
+    ('quick', 'uz', "Rahmat, {name}! Mahsulotingizni kutamiz 🙏", 21),
 ]
 
 async def seed_chat_templates_forced():
-    """Добавить шаблоны которых ещё нет (по key+lang+text combo)."""
-    if not pool: return
+    """Обновить auto-шаблоны (welcome/auto_reply/warn/bye) по key+lang,
+       добавить quick-шаблоны если текста ещё нет."""
+    if not pool: return 0
+    updated = 0
+    inserted = 0
     async with pool.acquire() as conn:
-        existing = await conn.fetch("SELECT text FROM chat_templates")
-        existing_texts = {r['text'] for r in existing}
-        to_insert = [t for t in _CHAT_TEMPLATE_SEED if t[2] not in existing_texts]
-        if to_insert:
-            await conn.executemany(
-                "INSERT INTO chat_templates (key, lang, text, sort_order) VALUES ($1,$2,$3,$4)",
-                to_insert
-            )
-    return len(to_insert) if 'to_insert' in dir() else 0
+        existing_texts = {r['text'] for r in await conn.fetch("SELECT text FROM chat_templates")}
+        for key, lang, text, sort_order in _CHAT_TEMPLATE_SEED:
+            if key == 'quick':
+                if text not in existing_texts:
+                    await conn.execute(
+                        "INSERT INTO chat_templates (key, lang, text, sort_order) VALUES ($1,$2,$3,$4)",
+                        key, lang, text, sort_order
+                    )
+                    inserted += 1
+            else:
+                row = await conn.fetchrow(
+                    "SELECT id FROM chat_templates WHERE key=$1 AND lang=$2 LIMIT 1", key, lang
+                )
+                if row:
+                    await conn.execute(
+                        "UPDATE chat_templates SET text=$1, sort_order=$2 WHERE id=$3",
+                        text, sort_order, row['id']
+                    )
+                    updated += 1
+                else:
+                    await conn.execute(
+                        "INSERT INTO chat_templates (key, lang, text, sort_order) VALUES ($1,$2,$3,$4)",
+                        key, lang, text, sort_order
+                    )
+                    inserted += 1
+    return updated + inserted
 
 async def get_chat_template_text(key: str, lang: str) -> str:
     """Получить текст шаблона по ключу и языку, fallback на uz."""

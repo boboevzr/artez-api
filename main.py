@@ -4360,12 +4360,17 @@ async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin))
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _tpl(text: str, session: dict) -> str:
-    """Подставляет {name} → имя клиента (или телефон если имя не задано)."""
+    """Подставляет {name} → первое слово имени клиента. Без имени — убирает {name} вместе с соседней запятой."""
     if not text:
         return text
-    name = (session.get('client_name') or session.get('client_phone') or '').strip()
-    first = name.split()[0] if name else ''
-    return text.replace('{name}', first) if first else text.replace('{name} ', '').replace('{name}', '')
+    raw = (session.get('client_name') or '').strip()
+    first = raw.split()[0] if raw else ''
+    if first:
+        return text.replace('{name}', first)
+    # убираем «, {name}», «{name},» и просто «{name}»
+    for pat in (', {name}', ' {name},', '{name}, ', '{name}'):
+        text = text.replace(pat, '')
+    return text
 
 class _ChatMgr:
     def __init__(self):
