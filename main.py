@@ -3360,6 +3360,49 @@ async def temp_delete_records(table: str, body: _TempDeleteBody, _=Depends(_get_
     deleted = int(result.split()[-1]) if result else 0
     return {"ok": True, "deleted": deleted}
 
+# ── История чатов (admin) ─────────────────────────────────────────────────────
+
+class _ChatHistoryDeleteBody(BaseModel):
+    date_from: str   # YYYY-MM-DD
+    date_to:   str   # YYYY-MM-DD
+
+@app.get("/api/admin/chat/history/stats")
+async def chat_history_stats(date_from: str, date_to: str, _=Depends(_get_admin)):
+    if not db.pool: raise HTTPException(503)
+    try:
+        df = datetime.strptime(date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(date_to,   "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "date_from / date_to must be YYYY-MM-DD")
+    async with db.pool.acquire() as conn:
+        sessions = int(await conn.fetchval(
+            "SELECT COUNT(*) FROM chat_sessions WHERE status='closed' AND created_at::date BETWEEN $1 AND $2",
+            df, dt
+        ))
+        messages = int(await conn.fetchval(
+            """SELECT COUNT(*) FROM chat_messages cm
+               JOIN chat_sessions cs ON cs.id = cm.session_id
+               WHERE cs.status='closed' AND cs.created_at::date BETWEEN $1 AND $2""",
+            df, dt
+        ))
+    return {"ok": True, "sessions": sessions, "messages": messages, "date_from": date_from, "date_to": date_to}
+
+@app.delete("/api/admin/chat/history")
+async def chat_history_delete(body: _ChatHistoryDeleteBody, _=Depends(_get_admin)):
+    if not db.pool: raise HTTPException(503)
+    try:
+        df = datetime.strptime(body.date_from, "%Y-%m-%d").date()
+        dt = datetime.strptime(body.date_to,   "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(400, "date_from / date_to must be YYYY-MM-DD")
+    async with db.pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM chat_sessions WHERE status='closed' AND created_at::date BETWEEN $1 AND $2",
+            df, dt
+        )
+    deleted = int(result.split()[-1]) if result else 0
+    return {"ok": True, "deleted_sessions": deleted}
+
 # ── Настройки кассы (admin) ───────────────────────────────────────────────────
 
 @app.get("/api/admin/settings/cash-channel")
@@ -4670,19 +4713,24 @@ async def ws_chat_client(websocket: WebSocket, code: str):
                 await _chat.send_staff(claimed, payload)
             else:
                 await _chat.broadcast_staff(payload)
-            # Авто-ответ на первое сообщение клиента
+            # Авто-ответ на первое сообщение клиента (через 3 сек)
             if is_first:
-                lang = session.get('lang') or 'uz'
-                auto_text = _tpl(await db.get_chat_template_text('auto_reply', lang), session)
-                if auto_text:
-                    auto_msg = await db.add_chat_message(session['id'], 'bot', 'ARTEZ', auto_text)
-                    if auto_msg:
-                        auto_payload = {"type": "message", "code": code, "msg": _msg_json(auto_msg)}
-                        await websocket.send_json(auto_payload)
-                        if claimed:
-                            await _chat.send_staff(claimed, auto_payload)
-                        else:
-                            await _chat.broadcast_staff(auto_payload)
+                async def _send_auto_reply(c=code, sess=dict(session), cl=claimed):
+                    await asyncio.sleep(3)
+                    lang = sess.get('lang') or 'uz'
+                    auto_text = _tpl(await db.get_chat_template_text('auto_reply', lang), sess)
+                    if not auto_text:
+                        return
+                    auto_msg = await db.add_chat_message(sess['id'], 'bot', 'ARTEZ', auto_text)
+                    if not auto_msg:
+                        return
+                    auto_payload = {"type": "message", "code": c, "msg": _msg_json(auto_msg)}
+                    await _chat.send_client(c, auto_payload)
+                    if cl:
+                        await _chat.send_staff(cl, auto_payload)
+                    else:
+                        await _chat.broadcast_staff(auto_payload)
+                asyncio.create_task(_send_auto_reply())
     except (WebSocketDisconnect, Exception):
         pass
     finally:
