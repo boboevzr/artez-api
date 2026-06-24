@@ -3991,10 +3991,14 @@ SITE_SETTINGS_DEFAULTS = {
     # Контакты
     "contact_short":       "1221",
     "contact_main":        "+998792221221",
-    "contact_zarafshan_1": "+998882001221",
-    "contact_zarafshan_2": "+998947380444",
-    "contact_navoi_1":     "+998997500020",
-    "contact_navoi_2":     "+998991124848",
+    "contact_zarafshan_1":         "+998882001221",
+    "contact_zarafshan_telegram":  "",
+    "contact_zarafshan_whatsapp":  "",
+    "contact_zarafshan_instagram": "",
+    "contact_navoi_1":             "+998997500020",
+    "contact_navoi_telegram":      "",
+    "contact_navoi_whatsapp":      "",
+    "contact_navoi_instagram":     "",
     # Telegram бот — fallback из env
     "tg_bot_token":        BOT_TOKEN,
     "tg_group_id":         GROUP_ID,
@@ -4070,10 +4074,14 @@ class SiteSettings(BaseModel):
     social_tg_group:     str | None = None
     contact_short:       str | None = None
     contact_main:        str | None = None
-    contact_zarafshan_1: str | None = None
-    contact_zarafshan_2: str | None = None
-    contact_navoi_1:     str | None = None
-    contact_navoi_2:     str | None = None
+    contact_zarafshan_1:        str | None = None
+    contact_zarafshan_telegram: str | None = None
+    contact_zarafshan_whatsapp: str | None = None
+    contact_zarafshan_instagram:str | None = None
+    contact_navoi_1:            str | None = None
+    contact_navoi_telegram:     str | None = None
+    contact_navoi_whatsapp:     str | None = None
+    contact_navoi_instagram:    str | None = None
     tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
     tg_group_zarafshan:  str | None = None
