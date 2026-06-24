@@ -4204,6 +4204,8 @@ async def create_order_from_site(order: OrderRequest):
 class CallbackRequest(BaseModel):
     phone: str
     branch: str = ""
+    name: str = ""
+    profile_phone: str = ""  # зарегистрированный телефон пользователя
 
     @field_validator("phone")
     @classmethod
@@ -4214,21 +4216,26 @@ class CallbackRequest(BaseModel):
         return v
 
 @app.post("/api/callback")
-async def request_callback(req: CallbackRequest):
-    """Обратный звонок с сайта → лид в группу лидов филиала."""
+async def request_callback(req: CallbackRequest, user=Depends(get_current_user)):
+    """Обратный звонок с сайта → лид в группу лидов филиала. Только для авторизованных."""
     lead_num  = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
 
+    client_name = req.name.strip() or user.get("first_name", "") or req.phone
+    note_parts = ["🔔 Обратный звонок с сайта"]
+    if req.profile_phone and req.profile_phone != req.phone:
+        note_parts.append(f"Тел. в профиле: {req.profile_phone}")
+
     lead = await db.create_lead({
-        "lead_num":   lead_num,
-        "lead_code":  lead_code,
-        "client_name":  req.phone,
+        "lead_num":     lead_num,
+        "lead_code":    lead_code,
+        "client_name":  client_name,
         "client_phone": req.phone,
-        "service":    "callback",
-        "branch":     req.branch,
-        "note":       "🔔 Обратный звонок с сайта",
-        "status":     "new",
-        "created_by": None,
+        "service":      "callback",
+        "branch":       req.branch,
+        "note":         " · ".join(note_parts),
+        "status":       "new",
+        "created_by":   None,
         "volunteer_id": None,
     })
     if lead:
@@ -4238,7 +4245,7 @@ async def request_callback(req: CallbackRequest):
     site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
     asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
 
-    await db.upsert_crm_client(phone=req.phone, first_name="", last_name="", source="callback")
+    await db.upsert_crm_client(phone=req.phone, first_name=client_name, last_name="", source="callback")
     await db.refresh_crm_client_stats(req.phone)
 
     return {"ok": True, "lead_code": lead_code}
