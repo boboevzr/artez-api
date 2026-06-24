@@ -4601,9 +4601,11 @@ async def del_template(tid: int, staff=Depends(get_current_staff)):
 
 @app.websocket("/ws/chat/client/{code}")
 async def ws_chat_client(websocket: WebSocket, code: str):
+    await websocket.accept()
     session = await db.get_chat_session(code)
     if not session or session['status'] == 'closed':
-        await websocket.close(code=4004)
+        await websocket.send_json({"type": "chat_closed"})
+        await websocket.close()
         return
 
     await _chat.connect_client(code, websocket)
