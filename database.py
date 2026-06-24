@@ -2715,6 +2715,8 @@ async def ensure_chat_tables():
             created_at  TIMESTAMPTZ DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
+        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS last_client_msg_at TIMESTAMPTZ;
+        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS warned_at TIMESTAMPTZ;
         """)
 
 async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '') -> dict:
@@ -2782,3 +2784,47 @@ async def get_staff_for_chat_push() -> list:
             "SELECT id FROM staff WHERE active=TRUE AND role IN ('admin','manager','callcenter')"
         )
         return [r['id'] for r in rows]
+
+async def touch_chat_client_activity(code: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE chat_sessions SET last_client_msg_at=NOW(), warned_at=NULL, updated_at=NOW() WHERE code=$1",
+            code
+        )
+
+async def get_sessions_to_warn() -> list:
+    """Активные сессии, где клиент молчит 4+ мин и предупреждение ещё не отправлено."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT cs.*, s.gender AS staff_gender, s.first_name AS staff_first_name
+            FROM chat_sessions cs
+            LEFT JOIN staff s ON s.id = cs.claimed_by
+            WHERE cs.status = 'active'
+              AND cs.last_client_msg_at IS NOT NULL
+              AND cs.last_client_msg_at < NOW() - INTERVAL '4 minutes'
+              AND cs.warned_at IS NULL
+        """)
+        return [dict(r) for r in rows]
+
+async def get_sessions_to_close() -> list:
+    """Активные сессии, где предупреждение было >1 мин назад."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT cs.*, s.gender AS staff_gender, s.first_name AS staff_first_name
+            FROM chat_sessions cs
+            LEFT JOIN staff s ON s.id = cs.claimed_by
+            WHERE cs.status = 'active'
+              AND cs.warned_at IS NOT NULL
+              AND cs.warned_at < NOW() - INTERVAL '1 minute'
+        """)
+        return [dict(r) for r in rows]
+
+async def set_chat_warned(code: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE chat_sessions SET warned_at=NOW(), updated_at=NOW() WHERE code=$1", code
+        )

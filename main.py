@@ -81,6 +81,7 @@ async def startup():
     await db.ensure_plans_table()
     await db.ensure_chat_tables()
     asyncio.create_task(_tg_reminder_worker())
+    asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
     if BOT_TOKEN and APP_URL:
         asyncio.create_task(_set_tg_webhook())
@@ -4402,6 +4403,51 @@ class _ChatMgr:
 _chat = _ChatMgr()
 
 
+async def _chat_timeout_worker():
+    """Каждые 60 сек проверяет неактивные чаты и закрывает их."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            # 1. Предупредить
+            to_warn = await db.get_sessions_to_warn()
+            for s in to_warn:
+                warn_text = "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете."
+                msg = await db.add_chat_message(s['id'], 'bot', 'ARTEZ', warn_text)
+                if msg:
+                    await _chat.send_client(s['code'], {"type": "message", "msg": _msg_json(msg)})
+                    claimed = s.get('claimed_by')
+                    if claimed:
+                        await _chat.send_staff(claimed, {"type": "message", "code": s['code'], "msg": _msg_json(msg)})
+                    else:
+                        await _chat.broadcast_staff({"type": "message", "code": s['code'], "msg": _msg_json(msg)})
+                await db.set_chat_warned(s['code'])
+
+            # 2. Закрыть
+            to_close = await db.get_sessions_to_close()
+            for s in to_close:
+                gender = (s.get('staff_gender') or 'M').upper()
+                fname  = s.get('staff_first_name') or ''
+                if gender == 'F':
+                    bye = f"Я рада, что смогла вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!"
+                else:
+                    bye = f"Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!"
+                msg = await db.add_chat_message(s['id'], 'bot', 'ARTEZ', bye)
+                if msg:
+                    await _chat.send_client(s['code'], {"type": "message", "msg": _msg_json(msg)})
+                    claimed = s.get('claimed_by')
+                    if claimed:
+                        await _chat.send_staff(claimed, {"type": "message", "code": s['code'], "msg": _msg_json(msg)})
+                    else:
+                        await _chat.broadcast_staff({"type": "message", "code": s['code'], "msg": _msg_json(msg)})
+                await asyncio.sleep(1)
+                closed = await db.close_chat_session(s['code'])
+                if closed:
+                    await _chat.send_client(s['code'], {"type": "chat_closed"})
+                    await _chat.broadcast_staff({"type": "chat_closed", "code": s['code']})
+        except Exception as e:
+            logging.warning(f"_chat_timeout_worker error: {e}")
+        await asyncio.sleep(60)
+
 def _gen_chat_code() -> str:
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
@@ -4527,6 +4573,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
             msg = await db.add_chat_message(session['id'], 'client', cname, text)
             if not msg:
                 continue
+            asyncio.create_task(db.touch_chat_client_activity(code))
             payload = {"type": "message", "code": code, "msg": _msg_json(msg)}
             await websocket.send_json(payload)
             claimed = session.get('claimed_by')
