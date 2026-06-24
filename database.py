@@ -2683,3 +2683,102 @@ async def delete_plan(plan_id: int):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM plans WHERE id=$1", plan_id)
+
+
+# ── Chat ──────────────────────────────────────────────────────────────────────
+
+async def ensure_chat_tables():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_sessions (
+            id           SERIAL PRIMARY KEY,
+            code         VARCHAR(12) UNIQUE NOT NULL,
+            client_phone VARCHAR(20) DEFAULT '',
+            client_name  VARCHAR(100) DEFAULT '',
+            branch       VARCHAR(50) DEFAULT '',
+            status       VARCHAR(20) DEFAULT 'pending',
+            claimed_by   INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            claimed_name VARCHAR(100) DEFAULT '',
+            created_at   TIMESTAMPTZ DEFAULT NOW(),
+            updated_at   TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_status ON chat_sessions(status);
+        CREATE INDEX IF NOT EXISTS idx_chat_sessions_code   ON chat_sessions(code);
+
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id          SERIAL PRIMARY KEY,
+            session_id  INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE,
+            sender_type VARCHAR(10) NOT NULL,
+            sender_name VARCHAR(100) DEFAULT '',
+            text        TEXT NOT NULL,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
+        """)
+
+async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '') -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO chat_sessions (code, client_phone, client_name, branch) VALUES ($1,$2,$3,$4) RETURNING *",
+            code, client_phone, client_name, branch
+        )
+        return dict(row) if row else None
+
+async def get_chat_session(code: str) -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM chat_sessions WHERE code=$1", code)
+        return dict(row) if row else None
+
+async def get_active_chat_sessions() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM chat_sessions WHERE status IN ('pending','active') ORDER BY created_at DESC"
+        )
+        return [dict(r) for r in rows]
+
+async def claim_chat_session(code: str, staff_id: int, staff_name: str) -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """UPDATE chat_sessions SET status='active', claimed_by=$2, claimed_name=$3, updated_at=NOW()
+               WHERE code=$1 AND (claimed_by IS NULL OR claimed_by=$2) RETURNING *""",
+            code, staff_id, staff_name
+        )
+        return dict(row) if row else None
+
+async def close_chat_session(code: str) -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE chat_sessions SET status='closed', updated_at=NOW() WHERE code=$1 RETURNING *", code
+        )
+        return dict(row) if row else None
+
+async def add_chat_message(session_id: int, sender_type: str, sender_name: str, text: str) -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO chat_messages (session_id, sender_type, sender_name, text) VALUES ($1,$2,$3,$4) RETURNING *",
+            session_id, sender_type, sender_name, text
+        )
+        return dict(row) if row else None
+
+async def get_chat_messages(session_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM chat_messages WHERE session_id=$1 ORDER BY created_at ASC", session_id
+        )
+        return [dict(r) for r in rows]
+
+async def get_staff_for_chat_push() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM staff WHERE active=TRUE AND role IN ('admin','manager','callcenter')"
+        )
+        return [r['id'] for r in rows]

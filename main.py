@@ -3,11 +3,13 @@ import re
 import secrets
 import logging
 import asyncio
+import random
+import string
 from datetime import datetime, timedelta, timezone
 
 import json as _json
 import aiohttp
-from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
@@ -77,6 +79,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 async def startup():
     await db.init_db()
     await db.ensure_plans_table()
+    await db.ensure_chat_tables()
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_measure_review_worker())
     if BOT_TOKEN and APP_URL:
@@ -4348,3 +4351,227 @@ async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin))
 
         else:
             raise HTTPException(status_code=400, detail=f"Неизвестная операция: {op}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CHAT
+# ══════════════════════════════════════════════════════════════════════════════
+
+class _ChatMgr:
+    def __init__(self):
+        self.clients: dict[str, WebSocket] = {}   # code → ws
+        self.staff:   dict[int,  WebSocket] = {}   # staff_id → ws
+
+    async def connect_client(self, code: str, ws: WebSocket):
+        await ws.accept()
+        self.clients[code] = ws
+
+    async def connect_staff(self, staff_id: int, ws: WebSocket):
+        await ws.accept()
+        self.staff[staff_id] = ws
+
+    def disconnect_client(self, code: str):
+        self.clients.pop(code, None)
+
+    def disconnect_staff(self, staff_id: int):
+        self.staff.pop(staff_id, None)
+
+    async def send_client(self, code: str, data: dict):
+        ws = self.clients.get(code)
+        if ws:
+            try: await ws.send_json(data)
+            except: self.disconnect_client(code)
+
+    async def send_staff(self, staff_id: int, data: dict):
+        ws = self.staff.get(staff_id)
+        if ws:
+            try: await ws.send_json(data)
+            except: self.disconnect_staff(staff_id)
+
+    async def broadcast_staff(self, data: dict, exclude: int = None):
+        dead = []
+        for sid, ws in list(self.staff.items()):
+            if sid == exclude: continue
+            try: await ws.send_json(data)
+            except: dead.append(sid)
+        for sid in dead: self.disconnect_staff(sid)
+
+    def staff_online_ids(self) -> set:
+        return set(self.staff.keys())
+
+_chat = _ChatMgr()
+
+
+def _gen_chat_code() -> str:
+    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+
+def _msg_json(msg: dict) -> dict:
+    m = dict(msg)
+    if hasattr(m.get('created_at'), 'isoformat'):
+        m['created_at'] = m['created_at'].isoformat()
+    return m
+
+
+@app.post("/api/chat/start")
+async def chat_start(body: dict = Body(...)):
+    client_phone = (body.get("client_phone") or "").strip()
+    client_name  = (body.get("client_name")  or "").strip()
+    branch       = (body.get("branch")       or "").strip()
+
+    code = _gen_chat_code()
+    session = await db.create_chat_session(code, client_phone, client_name, branch)
+    if not session:
+        raise HTTPException(500, "Не удалось создать сессию")
+
+    welcome = "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время."
+    await db.add_chat_message(session['id'], 'bot', 'ARTEZ', welcome)
+
+    # Уведомить подключённых сотрудников через WS
+    await _chat.broadcast_staff({
+        "type": "new_chat",
+        "code": code,
+        "client_name": client_name or client_phone or "Клиент",
+        "client_phone": client_phone,
+        "branch": branch,
+        "created_at": session['created_at'].isoformat() if hasattr(session.get('created_at'), 'isoformat') else str(session.get('created_at','')),
+    })
+
+    # Push сотрудникам, которые не подключены
+    staff_ids = await db.get_staff_for_chat_push()
+    online    = _chat.staff_online_ids()
+    for sid in staff_ids:
+        if sid not in online:
+            asyncio.create_task(send_web_push(
+                sid,
+                title="💬 Новый чат",
+                body=f"Клиент {client_name or client_phone or 'с сайта'} ждёт ответа",
+                push_type="new_chat",
+            ))
+
+    return {"ok": True, "code": code}
+
+
+@app.get("/api/chat/sessions")
+async def chat_sessions(staff=Depends(get_current_staff)):
+    sessions = await db.get_active_chat_sessions()
+    result = []
+    for s in sessions:
+        msgs = await db.get_chat_messages(s['id'])
+        s2 = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in s.items()}
+        s2['message_count'] = len(msgs)
+        s2['last_text'] = msgs[-1]['text'] if msgs else ''
+        result.append(s2)
+    return result
+
+
+@app.get("/api/chat/{code}/messages")
+async def chat_get_messages(code: str, staff=Depends(get_current_staff)):
+    session = await db.get_chat_session(code)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    msgs = await db.get_chat_messages(session['id'])
+    s = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in session.items()}
+    return {"session": s, "messages": [_msg_json(m) for m in msgs]}
+
+
+@app.post("/api/chat/{code}/claim")
+async def chat_claim(code: str, staff=Depends(get_current_staff)):
+    name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or "Менеджер"
+    session = await db.claim_chat_session(code, staff['id'], name)
+    if not session:
+        raise HTTPException(400, "Чат уже занят другим сотрудником")
+
+    await _chat.broadcast_staff({"type": "chat_claimed", "code": code,
+                                  "claimed_by": staff['id'], "claimed_name": name})
+    await _chat.send_client(code, {"type": "staff_joined", "staff_name": name})
+    s = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in session.items()}
+    return {"ok": True, "session": s}
+
+
+@app.post("/api/chat/{code}/close")
+async def chat_close(code: str, staff=Depends(get_current_staff)):
+    session = await db.close_chat_session(code)
+    if not session:
+        raise HTTPException(404, "Сессия не найдена")
+    await _chat.broadcast_staff({"type": "chat_closed", "code": code})
+    await _chat.send_client(code, {"type": "chat_closed",
+                                    "text": "Чат завершён. Спасибо, что обратились в ARTEZ!"})
+    return {"ok": True}
+
+
+@app.websocket("/ws/chat/client/{code}")
+async def ws_chat_client(websocket: WebSocket, code: str):
+    session = await db.get_chat_session(code)
+    if not session or session['status'] == 'closed':
+        await websocket.close(code=4004)
+        return
+
+    await _chat.connect_client(code, websocket)
+    msgs = await db.get_chat_messages(session['id'])
+    await websocket.send_json({"type": "history", "messages": [_msg_json(m) for m in msgs]})
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") != "message":
+                continue
+            text = (data.get("text") or "").strip()
+            if not text:
+                continue
+            # Перечитать сессию (могли claim)
+            session = await db.get_chat_session(code)
+            if not session or session['status'] == 'closed':
+                break
+            cname = session.get('client_name') or session.get('client_phone') or "Клиент"
+            msg = await db.add_chat_message(session['id'], 'client', cname, text)
+            if not msg:
+                continue
+            payload = {"type": "message", "code": code, "msg": _msg_json(msg)}
+            await websocket.send_json(payload)
+            claimed = session.get('claimed_by')
+            if claimed:
+                await _chat.send_staff(claimed, payload)
+            else:
+                await _chat.broadcast_staff(payload)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _chat.disconnect_client(code)
+
+
+@app.websocket("/ws/chat/staff/{token}")
+async def ws_chat_staff(websocket: WebSocket, token: str):
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        staff_id = int(payload.get("sub"))
+    except Exception:
+        await websocket.close(code=4001)
+        return
+
+    await _chat.connect_staff(staff_id, websocket)
+    staff_row = await db.get_staff_by_id(staff_id)
+    sname = f"{(staff_row or {}).get('first_name','')} {(staff_row or {}).get('last_name','')}".strip() or "Менеджер"
+
+    try:
+        while True:
+            data = await websocket.receive_json()
+            if data.get("type") != "message":
+                continue
+            code = (data.get("code") or "").strip()
+            text = (data.get("text") or "").strip()
+            if not code or not text:
+                continue
+            session = await db.get_chat_session(code)
+            if not session or session['status'] == 'closed':
+                continue
+            msg = await db.add_chat_message(session['id'], 'staff', sname, text)
+            if not msg:
+                continue
+            payload = {"type": "message", "code": code, "msg": _msg_json(msg)}
+            await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg)})
+            await _chat.broadcast_staff(payload, exclude=staff_id)
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        _chat.disconnect_staff(staff_id)
