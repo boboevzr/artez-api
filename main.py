@@ -3690,7 +3690,7 @@ class SiteContactsIn(BaseModel):
     instagram:   str  = ""
 
 @app.put("/api/admin/site-contacts/{branch}")
-async def update_site_contacts(branch: str, data: SiteContactsIn, admin=Depends(get_current_admin)):
+async def update_site_contacts(branch: str, data: SiteContactsIn, admin=Depends(get_admin)):
     if not db.pool:
         raise HTTPException(503)
     import json
