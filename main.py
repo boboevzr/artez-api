@@ -4635,12 +4635,17 @@ async def chat_active_by_phone(phone: str):
     return {"session": {"code": session["code"], "status": session["status"]}}
 
 @app.get("/api/chat/history")
-async def chat_history(limit: int = 50, offset: int = 0, staff=Depends(get_current_staff)):
-    rows = await db.get_closed_chat_sessions(limit, offset)
+async def chat_history(limit: int = 50, offset: int = 0, filter: str = "own",
+                       staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    can_see_all = role in ("admin", "manager")
+    own_only = not can_see_all or filter == "own"
+    rows = await db.get_closed_chat_sessions(limit, offset,
+                                              staff_id=staff["id"], own_only=own_only)
     for r in rows:
-        for k,v in r.items():
-            if hasattr(v,'isoformat'): r[k] = v.isoformat()
-    return rows
+        for k, v in r.items():
+            if hasattr(v, 'isoformat'): r[k] = v.isoformat()
+    return {"rows": rows, "can_see_all": can_see_all}
 
 @app.get("/api/chat/templates")
 async def get_templates(staff=Depends(get_current_staff)):

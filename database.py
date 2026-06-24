@@ -2763,13 +2763,20 @@ async def get_active_chat_by_phone(phone: str) -> dict:
         )
         return dict(row) if row else None
 
-async def get_closed_chat_sessions(limit: int = 50, offset: int = 0) -> list:
+async def get_closed_chat_sessions(limit: int = 50, offset: int = 0,
+                                    staff_id: int = None, own_only: bool = False) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM chat_sessions WHERE status='closed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
-            limit, offset
-        )
+        if own_only and staff_id:
+            rows = await conn.fetch(
+                "SELECT * FROM chat_sessions WHERE status='closed' AND claimed_by=$1 ORDER BY updated_at DESC LIMIT $2 OFFSET $3",
+                staff_id, limit, offset
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM chat_sessions WHERE status='closed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
+                limit, offset
+            )
         return [dict(r) for r in rows]
 
 async def claim_chat_session(code: str, staff_id: int, staff_name: str) -> dict:
