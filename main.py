@@ -4637,6 +4637,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
             if not session or session['status'] == 'closed':
                 break
             cname = session.get('client_name') or session.get('client_phone') or "Клиент"
+            is_first = await db.is_first_client_message(session['id'])
             msg = await db.add_chat_message(session['id'], 'client', cname, text)
             if not msg:
                 continue
@@ -4648,6 +4649,19 @@ async def ws_chat_client(websocket: WebSocket, code: str):
                 await _chat.send_staff(claimed, payload)
             else:
                 await _chat.broadcast_staff(payload)
+            # Авто-ответ на первое сообщение клиента
+            if is_first:
+                lang = session.get('lang') or 'uz'
+                auto_text = await db.get_chat_template_text('auto_reply', lang)
+                if auto_text:
+                    auto_msg = await db.add_chat_message(session['id'], 'bot', 'ARTEZ', auto_text)
+                    if auto_msg:
+                        auto_payload = {"type": "message", "code": code, "msg": _msg_json(auto_msg)}
+                        await websocket.send_json(auto_payload)
+                        if claimed:
+                            await _chat.send_staff(claimed, auto_payload)
+                        else:
+                            await _chat.broadcast_staff(auto_payload)
     except (WebSocketDisconnect, Exception):
         pass
     finally:

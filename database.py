@@ -2743,6 +2743,16 @@ async def get_active_chat_sessions() -> list:
         )
         return [dict(r) for r in rows]
 
+async def is_first_client_message(session_id: int) -> bool:
+    """True если клиент ещё не писал ни одного сообщения в этой сессии."""
+    if not pool: return False
+    async with pool.acquire() as conn:
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id=$1 AND sender_type='client'",
+            session_id
+        )
+        return count == 0
+
 async def get_active_chat_by_phone(phone: str) -> dict:
     """Найти активный/pending чат клиента по номеру телефона."""
     if not pool or not phone: return None
@@ -2824,12 +2834,14 @@ async def ensure_chat_templates():
         if count == 0:
             templates = [
                 # ── Авто-сообщения RU ──
-                ('welcome',      'ru', "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", 0),
+                ('welcome',      'ru', "Здравствуйте! 👋 Добро пожаловать в ARTEZ. Напишите ваш вопрос — оператор ответит вам в ближайшее время.", 0),
+                ('auto_reply',   'ru', "✅ Ваше сообщение принято! Оператор ответит в течение 1-3 минут. Пожалуйста, подождите.", 1),
                 ('warn_timeout', 'ru', "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете.", 1),
                 ('bye_m',        'ru', "Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 2),
                 ('bye_f',        'ru', "Я рада, что смогла вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 3),
                 # ── Авто-сообщения UZ ──
-                ('welcome',      'uz', "Salom! 👋 ARTEZ'ga murojaat qilganingiz uchun rahmat. Menejer tez orada javob beradi.", 0),
+                ('welcome',      'uz', "Salom! 👋 Xush kelibsiz ARTEZ'ga. Savolingizni yozing, operatorimiz tez orada javob beradi.", 0),
+                ('auto_reply',   'uz', "✅ Xabaringiz qabul qilindi! Operatorimiz 1-3 daqiqa ichida javob beradi. Iltimos, kuting.", 1),
                 ('warn_timeout', 'uz', "⏰ Siz uzoq vaqtdan beri javob bermayapsiz. Agar yozmasangiz, chat 1 daqiqadan so'ng avtomatik yopiladi.", 1),
                 ('bye_m',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 2),
                 ('bye_f',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 3),
@@ -2902,8 +2914,10 @@ async def delete_chat_template(tid: int):
         await conn.execute("DELETE FROM chat_templates WHERE id=$1", tid)
 
 _CHAT_TEMPLATE_SEED = [
-    ('welcome',      'ru', "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", 0),
-    ('welcome',      'uz', "Salom! 👋 ARTEZ'ga murojaat qilganingiz uchun rahmat. Menejer tez orada javob beradi.", 0),
+    ('welcome',      'ru', "Здравствуйте! 👋 Добро пожаловать в ARTEZ. Напишите ваш вопрос — оператор ответит вам в ближайшее время.", 0),
+    ('welcome',      'uz', "Salom! 👋 Xush kelibsiz ARTEZ'ga. Savolingizni yozing, operatorimiz tez orada javob beradi.", 0),
+    ('auto_reply',   'ru', "✅ Ваше сообщение принято! Оператор ответит в течение 1-3 минут. Пожалуйста, подождите.", 1),
+    ('auto_reply',   'uz', "✅ Xabaringiz qabul qilindi! Operatorimiz 1-3 daqiqa ichida javob beradi. Iltimos, kuting.", 1),
     ('warn_timeout', 'ru', "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете.", 1),
     ('warn_timeout', 'uz', "⏰ Siz uzoq vaqtdan beri javob bermayapsiz. Agar yozmasangiz, chat 1 daqiqadan so'ng avtomatik yopiladi.", 1),
     ('bye_m',        'ru', "Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 2),
