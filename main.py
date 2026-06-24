@@ -4053,10 +4053,8 @@ async def get_site_settings():
     PUBLIC_KEYS = [
         "social_instagram", "social_tg_bot", "social_tg_group",
         "contact_short", "contact_main",
-        "contact_zarafshan_1", "contact_zarafshan_2", "contact_zarafshan_3",
-        "contact_zarafshan_telegram", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
-        "contact_navoi_1", "contact_navoi_2", "contact_navoi_3",
-        "contact_navoi_telegram", "contact_navoi_whatsapp", "contact_navoi_instagram",
+        "contact_zarafshan_1", "contact_zarafshan_telegram", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
+        "contact_navoi_1", "contact_navoi_telegram", "contact_navoi_whatsapp", "contact_navoi_instagram",
         "yandex_maps_key",
         "osago_partner_phone", "osago_partner_promo",
     ]
