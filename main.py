@@ -4550,6 +4550,22 @@ async def chat_close(code: str, staff=Depends(get_current_staff)):
     return {"ok": True}
 
 
+@app.post("/api/chat/templates/seed")
+async def seed_templates(staff=Depends(get_current_staff)):
+    if staff.get('role') not in ('admin',):
+        raise HTTPException(403, "Только для admin")
+    # принудительно засеять (даже если таблица не пустая)
+    await db.seed_chat_templates_forced()
+    return {"ok": True}
+
+@app.get("/api/chat/history")
+async def chat_history(limit: int = 50, offset: int = 0, staff=Depends(get_current_staff)):
+    rows = await db.get_closed_chat_sessions(limit, offset)
+    for r in rows:
+        for k,v in r.items():
+            if hasattr(v,'isoformat'): r[k] = v.isoformat()
+    return rows
+
 @app.get("/api/chat/templates")
 async def get_templates(staff=Depends(get_current_staff)):
     rows = await db.get_all_chat_templates()

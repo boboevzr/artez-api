@@ -2743,6 +2743,15 @@ async def get_active_chat_sessions() -> list:
         )
         return [dict(r) for r in rows]
 
+async def get_closed_chat_sessions(limit: int = 50, offset: int = 0) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM chat_sessions WHERE status='closed' ORDER BY updated_at DESC LIMIT $1 OFFSET $2",
+            limit, offset
+        )
+        return [dict(r) for r in rows]
+
 async def claim_chat_session(code: str, staff_id: int, staff_name: str) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
@@ -2881,6 +2890,55 @@ async def delete_chat_template(tid: int):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM chat_templates WHERE id=$1", tid)
+
+_CHAT_TEMPLATE_SEED = [
+    ('welcome',      'ru', "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", 0),
+    ('welcome',      'uz', "Salom! 👋 ARTEZ'ga murojaat qilganingiz uchun rahmat. Menejer tez orada javob beradi.", 0),
+    ('warn_timeout', 'ru', "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете.", 1),
+    ('warn_timeout', 'uz', "⏰ Siz uzoq vaqtdan beri javob bermayapsiz. Agar yozmasangiz, chat 1 daqiqadan so'ng avtomatik yopiladi.", 1),
+    ('bye_m',        'ru', "Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 2),
+    ('bye_m',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 2),
+    ('bye_f',        'ru', "Я рада, что смогла вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 3),
+    ('bye_f',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 3),
+    ('quick', 'ru', "Здравствуйте! Как могу вам помочь? 😊", 10),
+    ('quick', 'ru', "Уточните, пожалуйста, какой вид чистки вас интересует?", 11),
+    ('quick', 'ru', "Стоимость зависит от размера изделия. Пришлите фото или замеры?", 12),
+    ('quick', 'ru', "Мы работаем ежедневно с 9:00 до 20:00", 13),
+    ('quick', 'ru', "Выезд и доставка — бесплатно!", 14),
+    ('quick', 'ru', "Срок чистки — от 1 до 3 дней в зависимости от загрязнения", 15),
+    ('quick', 'ru', "Оплата при получении — наличными или картой", 16),
+    ('quick', 'ru', "Оставьте заявку на сайте, и мы перезвоним вам!", 17),
+    ('quick', 'ru', "Мы используем профессиональную химию — безопасно для здоровья и ткани", 18),
+    ('quick', 'ru', "Спасибо за обращение! Обработаем ваш запрос в ближайшее время", 19),
+    ('quick', 'ru', "Ваш ковёр/изделие будет доставлено в указанное вами время", 20),
+    ('quick', 'ru', "Можете уточнить адрес для выезда мастера?", 21),
+    ('quick', 'uz', "Salom! Qanday yordam bera olaman? 😊", 10),
+    ('quick', 'uz', "Qanday tozalash turini qiziqtiraydi?", 11),
+    ('quick', 'uz', "Narx mahsulot o'lchamiga qarab belgilanadi. Rasm yoki o'lcham yuboring?", 12),
+    ('quick', 'uz', "Biz har kuni soat 9:00 dan 20:00 gacha ishlаymiz", 13),
+    ('quick', 'uz', "Olib ketish va yetkazib berish — bepul!", 14),
+    ('quick', 'uz', "Tozalash muddati ifloslanishga qarab 1 dan 3 kungacha", 15),
+    ('quick', 'uz', "To'lov qabul qilishda — naqd yoki karta orqali", 16),
+    ('quick', 'uz', "Saytda ariza qoldiring, biz siz bilan bog'lanamiz!", 17),
+    ('quick', 'uz', "Sog'liqqa va matoga zararsiz professional kimyoviy moddalar ishlatamiz", 18),
+    ('quick', 'uz', "Murojaat uchun rahmat! So'rovingizni tez orada ko'rib chiqamiz", 19),
+    ('quick', 'uz', "Gilamingiz/mahsulotingiz belgilangan vaqtda yetkazib beriladi", 20),
+    ('quick', 'uz', "Usta chiqishi uchun manzilni aniqlay olasizmi?", 21),
+]
+
+async def seed_chat_templates_forced():
+    """Добавить шаблоны которых ещё нет (по key+lang+text combo)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        existing = await conn.fetch("SELECT text FROM chat_templates")
+        existing_texts = {r['text'] for r in existing}
+        to_insert = [t for t in _CHAT_TEMPLATE_SEED if t[2] not in existing_texts]
+        if to_insert:
+            await conn.executemany(
+                "INSERT INTO chat_templates (key, lang, text, sort_order) VALUES ($1,$2,$3,$4)",
+                to_insert
+            )
+    return len(to_insert) if 'to_insert' in dir() else 0
 
 async def get_chat_template_text(key: str, lang: str) -> str:
     """Получить текст шаблона по ключу и языку, fallback на uz."""
