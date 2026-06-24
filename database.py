@@ -2963,7 +2963,7 @@ async def touch_chat_client_activity(code: str):
         )
 
 async def get_sessions_to_warn() -> list:
-    """Активные сессии, где клиент молчит 4+ мин и предупреждение ещё не отправлено."""
+    """Активные сессии, где клиент молчит 10+ мин и предупреждение ещё не отправлено."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -2972,13 +2972,13 @@ async def get_sessions_to_warn() -> list:
             LEFT JOIN staff s ON s.id = cs.claimed_by
             WHERE cs.status = 'active'
               AND cs.last_client_msg_at IS NOT NULL
-              AND cs.last_client_msg_at < NOW() - INTERVAL '4 minutes'
+              AND cs.last_client_msg_at < NOW() - INTERVAL '10 minutes'
               AND cs.warned_at IS NULL
         """)
         return [dict(r) for r in rows]
 
 async def get_sessions_to_close() -> list:
-    """Активные сессии, где предупреждение было >1 мин назад."""
+    """Активные сессии, где предупреждение было >2 мин назад."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -2987,7 +2987,7 @@ async def get_sessions_to_close() -> list:
             LEFT JOIN staff s ON s.id = cs.claimed_by
             WHERE cs.status = 'active'
               AND cs.warned_at IS NOT NULL
-              AND cs.warned_at < NOW() - INTERVAL '1 minute'
+              AND cs.warned_at < NOW() - INTERVAL '2 minutes'
         """)
         return [dict(r) for r in rows]
 
