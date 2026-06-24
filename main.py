@@ -4374,28 +4374,36 @@ def _tpl(text: str, session: dict) -> str:
 
 class _ChatMgr:
     def __init__(self):
-        self.clients: dict[str, WebSocket] = {}   # code → ws
+        self.clients: dict[str, set] = {}   # code → set of WebSocket (multi-device)
         self.staff:   dict[int,  WebSocket] = {}   # staff_id → ws
 
     async def connect_client(self, code: str, ws: WebSocket):
         await ws.accept()
-        self.clients[code] = ws
+        if code not in self.clients:
+            self.clients[code] = set()
+        self.clients[code].add(ws)
 
     async def connect_staff(self, staff_id: int, ws: WebSocket):
         await ws.accept()
         self.staff[staff_id] = ws
 
-    def disconnect_client(self, code: str):
-        self.clients.pop(code, None)
+    def disconnect_client(self, code: str, ws: WebSocket = None):
+        if ws is not None:
+            self.clients.get(code, set()).discard(ws)
+            if not self.clients.get(code):
+                self.clients.pop(code, None)
+        else:
+            self.clients.pop(code, None)
 
     def disconnect_staff(self, staff_id: int):
         self.staff.pop(staff_id, None)
 
     async def send_client(self, code: str, data: dict):
-        ws = self.clients.get(code)
-        if ws:
+        dead = []
+        for ws in list(self.clients.get(code, set())):
             try: await ws.send_json(data)
-            except: self.disconnect_client(code)
+            except: dead.append(ws)
+        for ws in dead: self.disconnect_client(code, ws)
 
     async def send_staff(self, staff_id: int, data: dict):
         ws = self.staff.get(staff_id)
@@ -4678,7 +4686,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
     except (WebSocketDisconnect, Exception):
         pass
     finally:
-        _chat.disconnect_client(code)
+        _chat.disconnect_client(code, websocket)
 
 
 @app.websocket("/ws/chat/staff/{token}")
