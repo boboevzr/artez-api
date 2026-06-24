@@ -4359,6 +4359,14 @@ async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin))
 # CHAT
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _tpl(text: str, session: dict) -> str:
+    """Подставляет {name} → имя клиента (или телефон если имя не задано)."""
+    if not text:
+        return text
+    name = (session.get('client_name') or session.get('client_phone') or '').strip()
+    first = name.split()[0] if name else ''
+    return text.replace('{name}', first) if first else text.replace('{name} ', '').replace('{name}', '')
+
 class _ChatMgr:
     def __init__(self):
         self.clients: dict[str, WebSocket] = {}   # code → ws
@@ -4413,8 +4421,8 @@ async def _chat_timeout_worker():
             to_warn = await db.get_sessions_to_warn()
             for s in to_warn:
                 lang = s.get('lang') or 'uz'
-                warn_text = await db.get_chat_template_text('warn_timeout', lang) or \
-                    "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту."
+                warn_text = _tpl(await db.get_chat_template_text('warn_timeout', lang) or \
+                    "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту.", s)
                 msg = await db.add_chat_message(s['id'], 'bot', 'ARTEZ', warn_text)
                 if msg:
                     await _chat.send_client(s['code'], {"type": "message", "msg": _msg_json(msg)})
@@ -4431,8 +4439,8 @@ async def _chat_timeout_worker():
                 lang   = s.get('lang') or 'uz'
                 gender = (s.get('staff_gender') or 'M').upper()
                 bye_key = 'bye_f' if gender == 'F' else 'bye_m'
-                bye = await db.get_chat_template_text(bye_key, lang) or \
-                    ("Я рада, что смогла вам помочь! 😊" if gender == 'F' else "Я рад, что смог вам помочь! 😊")
+                bye = _tpl(await db.get_chat_template_text(bye_key, lang) or \
+                    ("Я рада, что смогла вам помочь! 😊" if gender == 'F' else "Я рад, что смог вам помочь! 😊"), s)
                 msg = await db.add_chat_message(s['id'], 'bot', 'ARTEZ', bye)
                 if msg:
                     await _chat.send_client(s['code'], {"type": "message", "msg": _msg_json(msg)})
@@ -4473,8 +4481,8 @@ async def chat_start(body: dict = Body(...)):
     if not session:
         raise HTTPException(500, "Не удалось создать сессию")
 
-    welcome = await db.get_chat_template_text('welcome', lang) or \
-        "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время."
+    welcome = _tpl(await db.get_chat_template_text('welcome', lang) or \
+        "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", session)
     await db.add_chat_message(session['id'], 'bot', 'ARTEZ', welcome)
 
     # Уведомить подключённых сотрудников через WS
@@ -4652,7 +4660,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
             # Авто-ответ на первое сообщение клиента
             if is_first:
                 lang = session.get('lang') or 'uz'
-                auto_text = await db.get_chat_template_text('auto_reply', lang)
+                auto_text = _tpl(await db.get_chat_template_text('auto_reply', lang), session)
                 if auto_text:
                     auto_msg = await db.add_chat_message(session['id'], 'bot', 'ARTEZ', auto_text)
                     if auto_msg:
