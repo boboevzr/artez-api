@@ -4201,6 +4201,49 @@ async def create_order_from_site(order: OrderRequest):
     return {"ok": True, "order_num": lead_code}
 
 
+class CallbackRequest(BaseModel):
+    phone: str
+    branch: str = ""
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v):
+        v = normalize_phone(v)
+        if not PHONE_RE.match(v):
+            raise ValueError("Неверный формат номера. Используйте +998XXXXXXXXX")
+        return v
+
+@app.post("/api/callback")
+async def request_callback(req: CallbackRequest):
+    """Обратный звонок с сайта → лид в группу лидов филиала."""
+    lead_num  = await db.get_next_lead_num()
+    lead_code = await db.generate_lead_code()
+
+    lead = await db.create_lead({
+        "lead_num":   lead_num,
+        "lead_code":  lead_code,
+        "client_name":  req.phone,
+        "client_phone": req.phone,
+        "service":    "callback",
+        "branch":     req.branch,
+        "note":       "🔔 Обратный звонок с сайта",
+        "status":     "new",
+        "created_by": None,
+        "volunteer_id": None,
+    })
+    if lead:
+        await db.add_lead_call(lead["id"], None, action="created",
+                               note=f"Обратный звонок с сайта ({lead_code})")
+
+    site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
+    asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
+
+    await db.upsert_crm_client(phone=req.phone, first_name="", last_name="", source="callback")
+    await db.refresh_crm_client_stats(req.phone)
+
+    return {"ok": True, "lead_code": lead_code}
+
+
 async def _notify_group_site_lead(lead_code: str, data: "OrderRequest", lead_id: int = None):
     """Telegram: новый лид с сайта — кнопка Взять лид прямо в группе."""
     if not BOT_TOKEN:
