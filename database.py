@@ -2717,14 +2717,15 @@ async def ensure_chat_tables():
         CREATE INDEX IF NOT EXISTS idx_chat_messages_session ON chat_messages(session_id);
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS last_client_msg_at TIMESTAMPTZ;
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS warned_at TIMESTAMPTZ;
+        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS lang VARCHAR(5) DEFAULT 'uz';
         """)
 
-async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '') -> dict:
+async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '', lang: str = 'uz') -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO chat_sessions (code, client_phone, client_name, branch) VALUES ($1,$2,$3,$4) RETURNING *",
-            code, client_phone, client_name, branch
+            "INSERT INTO chat_sessions (code, client_phone, client_name, branch, lang) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+            code, client_phone, client_name, branch, lang
         )
         return dict(row) if row else None
 
@@ -2784,6 +2785,116 @@ async def get_staff_for_chat_push() -> list:
             "SELECT id FROM staff WHERE active=TRUE AND role IN ('admin','manager','callcenter')"
         )
         return [r['id'] for r in rows]
+
+async def ensure_chat_templates():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+        CREATE TABLE IF NOT EXISTS chat_templates (
+            id         SERIAL PRIMARY KEY,
+            key        VARCHAR(30) DEFAULT 'quick',
+            lang       VARCHAR(5) NOT NULL DEFAULT 'uz',
+            text       TEXT NOT NULL,
+            sort_order INT DEFAULT 0,
+            active     BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_chat_templates_lang ON chat_templates(lang, key);
+        """)
+        count = await conn.fetchval("SELECT COUNT(*) FROM chat_templates")
+        if count == 0:
+            templates = [
+                # ── Авто-сообщения RU ──
+                ('welcome',      'ru', "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", 0),
+                ('warn_timeout', 'ru', "⏰ Вы давно не отвечаете. Чат будет автоматически закрыт через 1 минуту, если не напишете.", 1),
+                ('bye_m',        'ru', "Я рад, что смог вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 2),
+                ('bye_f',        'ru', "Я рада, что смогла вам помочь! 😊 Если возникнут вопросы — обращайтесь снова. Хорошего вам дня!", 3),
+                # ── Авто-сообщения UZ ──
+                ('welcome',      'uz', "Salom! 👋 ARTEZ'ga murojaat qilganingiz uchun rahmat. Menejer tez orada javob beradi.", 0),
+                ('warn_timeout', 'uz', "⏰ Siz uzoq vaqtdan beri javob bermayapsiz. Agar yozmasangiz, chat 1 daqiqadan so'ng avtomatik yopiladi.", 1),
+                ('bye_m',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 2),
+                ('bye_f',        'uz', "Yordam bera olganim uchun xursandman! 😊 Savollar bo'lsa — yana murojaat qiling. Yaxshi kun tilayman!", 3),
+                # ── Быстрые ответы RU ──
+                ('quick', 'ru', "Здравствуйте! Как могу вам помочь? 😊", 10),
+                ('quick', 'ru', "Уточните, пожалуйста, какой вид чистки вас интересует?", 11),
+                ('quick', 'ru', "Стоимость зависит от размера изделия. Пришлите фото или замеры?", 12),
+                ('quick', 'ru', "Мы работаем ежедневно с 9:00 до 20:00", 13),
+                ('quick', 'ru', "Выезд и доставка — бесплатно!", 14),
+                ('quick', 'ru', "Срок чистки — от 1 до 3 дней в зависимости от загрязнения", 15),
+                ('quick', 'ru', "Оплата при получении — наличными или картой", 16),
+                ('quick', 'ru', "Оставьте заявку на сайте, и мы перезвоним вам!", 17),
+                ('quick', 'ru', "Мы используем профессиональную химию — безопасно для здоровья и ткани", 18),
+                ('quick', 'ru', "Спасибо за обращение! Обработаем ваш запрос в ближайшее время", 19),
+                # ── Быстрые ответы UZ ──
+                ('quick', 'uz', "Salom! Qanday yordam bera olaman? 😊", 10),
+                ('quick', 'uz', "Qanday tozalash turini qiziqtiraydi?", 11),
+                ('quick', 'uz', "Narx mahsulot o'lchamiga qarab belgilanadi. Rasm yoki o'lcham yuboring?", 12),
+                ('quick', 'uz', "Biz har kuni soat 9:00 dan 20:00 gacha ishlаymiz", 13),
+                ('quick', 'uz', "Olib ketish va yetkazib berish — bepul!", 14),
+                ('quick', 'uz', "Tozalash muddati ifloslanishga qarab 1 dan 3 kungacha", 15),
+                ('quick', 'uz', "To'lov qabul qilishda — naqd yoki karta orqali", 16),
+                ('quick', 'uz', "Saytda ariza qoldiring, biz siz bilan bog'lanamiz!", 17),
+                ('quick', 'uz', "Sog'liqqa va matoga zararsiz professional kimyoviy moddalar ishlatamiz", 18),
+                ('quick', 'uz', "Murojaat uchun rahmat! So'rovingizni tez orada ko'rib chiqamiz", 19),
+            ]
+            await conn.executemany(
+                "INSERT INTO chat_templates (key, lang, text, sort_order) VALUES ($1,$2,$3,$4)",
+                templates
+            )
+
+async def get_chat_templates(lang: str = None, key: str = None) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        conditions, args = ["active=TRUE"], []
+        if lang:  args.append(lang);  conditions.append(f"lang=${len(args)}")
+        if key:   args.append(key);   conditions.append(f"key=${len(args)}")
+        rows = await conn.fetch(
+            f"SELECT * FROM chat_templates WHERE {' AND '.join(conditions)} ORDER BY lang, sort_order, id",
+            *args
+        )
+        return [dict(r) for r in rows]
+
+async def get_all_chat_templates() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM chat_templates ORDER BY lang, key, sort_order, id")
+        return [dict(r) for r in rows]
+
+async def upsert_chat_template(data: dict) -> dict:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        tid = data.get('id')
+        if tid:
+            row = await conn.fetchrow(
+                "UPDATE chat_templates SET key=$2,lang=$3,text=$4,sort_order=$5,active=$6 WHERE id=$1 RETURNING *",
+                tid, data['key'], data['lang'], data['text'],
+                data.get('sort_order', 0), data.get('active', True)
+            )
+        else:
+            row = await conn.fetchrow(
+                "INSERT INTO chat_templates (key,lang,text,sort_order,active) VALUES ($1,$2,$3,$4,$5) RETURNING *",
+                data['key'], data['lang'], data['text'], data.get('sort_order', 0), data.get('active', True)
+            )
+        return dict(row) if row else None
+
+async def delete_chat_template(tid: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM chat_templates WHERE id=$1", tid)
+
+async def get_chat_template_text(key: str, lang: str) -> str:
+    """Получить текст шаблона по ключу и языку, fallback на uz."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT text FROM chat_templates WHERE key=$1 AND lang=$2 AND active=TRUE LIMIT 1",
+            key, lang
+        )
+        if not row:
+            row = await conn.fetchrow(
+                "SELECT text FROM chat_templates WHERE key=$1 AND active=TRUE LIMIT 1", key
+            )
+        return row['text'] if row else None
 
 async def touch_chat_client_activity(code: str):
     if not pool: return
