@@ -3672,6 +3672,39 @@ async def get_pending_position_requests(staff=Depends(get_current_staff)):
         )
     return {"ok": True, "order_ids": [r["id"] for r in rows]}
 
+# ── Контакты филиалов (публичный GET) ────────────────────────────────────────
+@app.get("/api/site-contacts")
+async def get_site_contacts():
+    if not db.pool:
+        return {"ok": True, "contacts": []}
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM site_contacts ORDER BY branch")
+    return {"ok": True, "contacts": [dict(r) for r in rows]}
+
+# ── Обновление контактов (только админ) ──────────────────────────────────────
+class SiteContactsIn(BaseModel):
+    branch_name: str = ""
+    phones:      list = []
+    telegram:    str  = ""
+    whatsapp:    str  = ""
+    instagram:   str  = ""
+
+@app.put("/api/admin/site-contacts/{branch}")
+async def update_site_contacts(branch: str, data: SiteContactsIn, admin=Depends(get_current_admin)):
+    if not db.pool:
+        raise HTTPException(503)
+    import json
+    async with db.pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO site_contacts (branch, branch_name, phones, telegram, whatsapp, instagram)
+            VALUES ($1,$2,$3::jsonb,$4,$5,$6)
+            ON CONFLICT (branch) DO UPDATE SET
+                branch_name=$2, phones=$3::jsonb,
+                telegram=$4, whatsapp=$5, instagram=$6
+        """, branch, data.branch_name, json.dumps(data.phones, ensure_ascii=False),
+             data.telegram, data.whatsapp, data.instagram)
+    return {"ok": True}
+
 @app.get("/api/staff/pending-reviews")
 async def get_pending_reviews(staff=Depends(get_current_staff)):
     if not staff.get("can_approve_measure"):

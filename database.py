@@ -582,6 +582,24 @@ async def create_tables():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_at TIMESTAMPTZ DEFAULT NULL;
         """)
 
+    # ── Шаг 12: контакты филиалов ────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS site_contacts (
+            branch      VARCHAR(50) PRIMARY KEY,
+            branch_name VARCHAR(100) NOT NULL,
+            phones      JSONB NOT NULL DEFAULT '[]',
+            telegram    VARCHAR(200) DEFAULT '',
+            whatsapp    VARCHAR(200) DEFAULT '',
+            instagram   VARCHAR(200) DEFAULT ''
+        );
+        INSERT INTO site_contacts (branch, branch_name, phones, telegram, whatsapp, instagram)
+        VALUES
+          ('navoi',     'Навои',     '["1221","+998792221221"]', '', '', ''),
+          ('zarafshan', 'Зарафшан',  '["1221","+998792221221"]', '', '', '')
+        ON CONFLICT (branch) DO NOTHING;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
