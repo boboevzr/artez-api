@@ -2799,8 +2799,9 @@ async def _notify_new_site_user(first_name: str, phone: str, method: str):
         f"📅 {now}"
     )
     targets = []
-    if GROUP_NEW_CLIENTS_ID:
-        targets.append(GROUP_NEW_CLIENTS_ID)
+    group_id = await _get_cfg("new_clients_group_id")
+    if group_id:
+        targets.append(group_id)
     try:
         staff_ids = await db.get_staff_notify_new_users()
         targets.extend(str(tid) for tid in staff_ids)
@@ -4434,6 +4435,8 @@ SITE_SETTINGS_DEFAULTS = {
     "osago_partner_promo": "ARTEZ",
     # Google Sheets
     "sheets_url":          SHEETS_URL,
+    # Новые пользователи сайта — группа уведомлений
+    "new_clients_group_id":    GROUP_NEW_CLIENTS_ID,
     # Лиды — группы и шаблон уведомлений
     "leads_group_id":          LEADS_GROUP_ID,
     "leads_group_zarafshan":   "",
