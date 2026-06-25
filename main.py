@@ -767,7 +767,7 @@ class StaffCreateRequest(BaseModel):
     role: str = "callcenter"
     position: str | None = None
     branch: str | None = None
-    tg_id: str | None = None
+    tg_id: int | None = None
     tg_username: str | None = None
     salary_type: str | None = None
     salary_rate: float | None = None
