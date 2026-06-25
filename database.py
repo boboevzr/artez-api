@@ -744,6 +744,13 @@ async def update_user_profile(user_id: int, first_name: str, address: str = None
         """, user_id, first_name, address, car_plate, osago_expiry)
 
 
+async def set_user_tg_id(phone: str, tg_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE users SET tg_id=$2, updated_at=NOW() WHERE phone=$1", phone, tg_id)
+
+
 async def delete_site_user(user_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:

@@ -2704,6 +2704,82 @@ async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_ge
     return {"ok": True, "tg_sent": send_tg and bool(body.get("send_tg"))}
 
 
+@app.post("/api/register-via-tg")
+async def register_via_tg(body: dict):
+    phone      = (body.get("phone") or "").strip()
+    first_name = (body.get("first_name") or "").strip()
+    password   = (body.get("password") or "").strip()
+    uz = (body.get("lang") or "ru") == "uz"
+
+    if not phone or not first_name or not password:
+        raise HTTPException(400, "Yetishmayotgan maydonlar" if uz else "Заполните все поля")
+    if len(password) < 6:
+        raise HTTPException(400, "Parol kamida 6 ta belgi" if uz else "Пароль минимум 6 символов")
+
+    tg_id = await db.get_tg_id_by_phone(phone)
+    if not tg_id:
+        raise HTTPException(400,
+            "Bu raqam botda topilmadi. Avval bot bilan telefon raqamingizni ulashing."
+            if uz else
+            "Телефон не найден в боте. Сначала поделитесь номером через бота.")
+
+    existing = await db.get_user_by_phone(phone)
+    if existing and existing["is_verified"]:
+        raise HTTPException(400,
+            "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
+            else "Этот номер уже зарегистрирован")
+
+    password_hash = pwd_context.hash(password[:72])
+    await db.create_user(phone, password_hash, first_name)
+    await db.verify_user(phone)
+    await db.set_user_tg_id(phone, tg_id)
+
+    user = await db.get_user_by_phone(phone)
+    asyncio.create_task(db.update_user_last_login(user["id"]))
+    token = create_token(user["id"], user["phone"])
+
+    # Отправляем данные аккаунта в Telegram
+    if BOT_TOKEN:
+        text = (
+            f"🎉 <b>ARTEZ</b> — регистрация завершена!\n\n"
+            f"👤 Имя: <b>{first_name}</b>\n"
+            f"📱 Номер / Логин: <code>{phone}</code>\n"
+            f"🔑 Пароль: <code>{password}</code>\n\n"
+            f"Используйте эти данные для входа на сайте artez.uz"
+        ) if not uz else (
+            f"🎉 <b>ARTEZ</b> — ro'yxatdan o'tdingiz!\n\n"
+            f"👤 Ism: <b>{first_name}</b>\n"
+            f"📱 Raqam / Login: <code>{phone}</code>\n"
+            f"🔑 Parol: <code>{password}</code>\n\n"
+            f"artez.uz saytiga kirish uchun ushbu ma'lumotlardan foydalaning."
+        )
+        asyncio.create_task(_send_tg_safe(tg_id, text))
+
+    return {
+        "ok": True,
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "phone": user["phone"],
+            "first_name": user["first_name"],
+            "address": user.get("address"),
+            "car_plate": user.get("car_plate"),
+            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
+        }
+    }
+
+
+async def _send_tg_safe(tg_id: int, text: str):
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": str(tg_id), "text": text, "parse_mode": "HTML"},
+                timeout=aiohttp.ClientTimeout(total=5))
+    except Exception:
+        pass
+
+
 @app.delete("/api/admin/site-users/{user_id}")
 async def admin_delete_site_user(user_id: int, body: dict, _=Depends(_get_admin)):
     if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
