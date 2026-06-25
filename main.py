@@ -2703,6 +2703,16 @@ async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_ge
                 pass
     return {"ok": True, "tg_sent": send_tg and bool(body.get("send_tg"))}
 
+
+@app.delete("/api/admin/site-users/{user_id}")
+async def admin_delete_site_user(user_id: int, body: dict, _=Depends(_get_admin)):
+    if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль администратора")
+    ok = await db.delete_site_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
+    return {"ok": True}
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 @app.get("/api/admin/prices")

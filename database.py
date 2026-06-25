@@ -744,6 +744,13 @@ async def update_user_profile(user_id: int, first_name: str, address: str = None
         """, user_id, first_name, address, car_plate, osago_expiry)
 
 
+async def delete_site_user(user_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM users WHERE id=$1", user_id)
+    return result != "DELETE 0"
+
+
 # ══════════════════════════════════════
 #  SMS-КОДЫ
 # ══════════════════════════════════════
