@@ -1432,13 +1432,18 @@ async def ensure_washer_notifications_table():
             );
             CREATE INDEX IF NOT EXISTS idx_washer_notif_staff ON washer_notifications(staff_id, is_read);
         """)
+        # Idempotent columns added after initial release
+        await conn.execute("ALTER TABLE washer_notifications ADD COLUMN IF NOT EXISTS item_id INTEGER")
+        await conn.execute("ALTER TABLE washer_notifications ADD COLUMN IF NOT EXISTS notification_type VARCHAR(30) DEFAULT 'order_item'")
 
-async def create_washer_notification(staff_id: int, order_id: int, order_num: str, message: str):
+async def create_washer_notification(staff_id: int, order_id: int, order_num: str, message: str,
+                                      item_id: int = None, notification_type: str = 'order_item'):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute(
-            "INSERT INTO washer_notifications (staff_id, order_id, order_num, message) VALUES ($1,$2,$3,$4)",
-            staff_id, order_id, order_num, message)
+            "INSERT INTO washer_notifications (staff_id, order_id, order_num, message, item_id, notification_type) "
+            "VALUES ($1,$2,$3,$4,$5,$6)",
+            staff_id, order_id, order_num, message, item_id, notification_type)
 
 async def get_washer_notifications(staff_id: int, limit: int = 50) -> list:
     if not pool: return []

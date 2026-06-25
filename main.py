@@ -3700,12 +3700,17 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                     order_row = await db.get_order_by_id(order_id)
                     order_num = (order_row or {}).get("order_num") or f"#{order_id}"
                     svc       = item.get("service") or "позиция"
+                    push_body = f"«{svc}» — замер принят. Отличная работа!"
                     asyncio.create_task(send_web_push(
                         washer["id"],
                         f"✅ Замер утверждён — {order_num}",
-                        f"«{svc}» — замер принят. Отличная работа!",
+                        push_body,
                         order_id=order_id, item_id=item_id, push_type="measure_approved"
                     ))
+                    await db.create_washer_notification(
+                        washer["id"], order_id, order_num, push_body,
+                        item_id=item_id, notification_type="measure_approved"
+                    )
         except Exception as _pe:
             logging.warning(f"measure approved push error: {_pe}")
     elif action == "reject":
@@ -3720,12 +3725,17 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                     order_row = await db.get_order_by_id(order_id)
                     order_num = (order_row or {}).get("order_num") or f"#{order_id}"
                     svc = item.get("service") or "позиция"
+                    push_body = f"«{svc}» — {note}"
                     asyncio.create_task(send_web_push(
                         washer["id"],
                         f"❌ Замер отклонён — {order_num}",
-                        f"«{svc}» — {note}",
+                        push_body,
                         order_id=order_id, item_id=item_id, push_type="measure_rejected"
                     ))
+                    await db.create_washer_notification(
+                        washer["id"], order_id, order_num, push_body,
+                        item_id=item_id, notification_type="measure_rejected"
+                    )
         except Exception as _pe:
             logging.warning(f"measure reject push error: {_pe}")
     else:
