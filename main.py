@@ -27,6 +27,10 @@ JWT_ALGORITHM  = "HS256"
 JWT_EXPIRE_DAYS = 30
 SMS_CODE_TTL_MIN = 5
 ADMIN_PASS     = os.getenv("ADMIN_PASS", "")
+
+async def get_admin_pass() -> str:
+    """Читает пароль из БД (если изменён через UI), иначе — env var."""
+    return await db.get_config("admin_pass") or ADMIN_PASS
 VAPID_PRIVATE  = os.getenv("VAPID_PRIVATE", "")
 VAPID_PUBLIC   = os.getenv("VAPID_PUBLIC", "")
 
@@ -1489,7 +1493,7 @@ async def remove_push_subscription(body: dict, staff=Depends(get_current_staff))
 
 @app.delete("/api/staff/leads/{lead_id}")
 async def delete_lead_staff(lead_id: int, body: dict, _=Depends(require_perm("leads"))):
-    if not body.get("admin_password") or body["admin_password"] != ADMIN_PASS:
+    if not body.get("admin_password") or body["admin_password"] != await get_admin_pass():
         raise HTTPException(status_code=403, detail="Неверный пароль администратора")
     ok = await db.delete_lead(lead_id)
     if not ok:
@@ -1498,7 +1502,7 @@ async def delete_lead_staff(lead_id: int, body: dict, _=Depends(require_perm("le
 
 @app.post("/api/staff/leads/bulk-delete")
 async def bulk_delete_leads(body: dict, _=Depends(require_perm("leads"))):
-    if not body.get("admin_password") or body["admin_password"] != ADMIN_PASS:
+    if not body.get("admin_password") or body["admin_password"] != await get_admin_pass():
         raise HTTPException(status_code=403, detail="Неверный пароль администратора")
     ids = body.get("ids", [])
     if not ids:
@@ -1540,7 +1544,7 @@ async def bulk_status_orders(body: dict, staff=Depends(require_perm("orders"))):
 
 @app.post("/api/staff/orders/bulk-delete")
 async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
-    if not body.get("admin_password") or body["admin_password"] != ADMIN_PASS:
+    if not body.get("admin_password") or body["admin_password"] != await get_admin_pass():
         raise HTTPException(status_code=403, detail="Неверный пароль администратора")
     ids = body.get("ids", [])
     if not ids:
@@ -1821,7 +1825,7 @@ class ClientDeleteRequest(BaseModel):
 
 @app.post("/api/clients/{client_id}/delete")
 async def client_delete(client_id: int, req: ClientDeleteRequest):
-    if not ADMIN_PASS or req.password != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or req.password != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль")
     ok = await db.delete_crm_client(client_id)
     if not ok:
@@ -1913,7 +1917,7 @@ class ContactDeleteRequest(BaseModel):
 
 @app.post("/api/contacts/{contact_id}/delete")
 async def contact_delete(contact_id: int, req: ContactDeleteRequest):
-    if not ADMIN_PASS or req.password != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or req.password != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль")
     ok = await db.delete_contact(contact_id)
     if not ok:
@@ -1927,7 +1931,7 @@ class ContactsPurgeRequest(BaseModel):
 @app.post("/api/contacts/purge")
 async def contacts_purge(req: ContactsPurgeRequest):
     """Удалить все контакты — только по паролю администратора."""
-    if not ADMIN_PASS or req.password != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or req.password != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль")
     deleted = await db.delete_all_contacts()
     return {"ok": True, "deleted": deleted}
@@ -2385,9 +2389,20 @@ async def get_admin(authorization: str = Header(None)):
 
 @app.post("/api/admin/login")
 async def admin_login(req: AdminLoginRequest):
-    if not ADMIN_PASS or req.password != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or req.password != apass:
         raise HTTPException(status_code=401, detail="Неверный пароль")
     return {"ok": True, "token": create_admin_token()}
+
+@app.post("/api/admin/change-master-password")
+async def change_master_password(body: dict, _=Depends(_get_admin)):
+    current = body.get("current_password", "")
+    new_pass = body.get("new_password", "")
+    if not current or current != await get_admin_pass():
+        raise HTTPException(status_code=403, detail="Неверный текущий пароль")
+    if not new_pass or len(new_pass) < 4:
+        raise HTTPException(status_code=400, detail="Новый пароль минимум 4 символа")
+    await db.set_config("admin_pass", new_pass)
+    return {"ok": True}
 
 # ══════════════════════════════════════════════════════════════════════════════
 # ADMIN LEADS
@@ -2439,7 +2454,7 @@ class LeadDeleteRequest(BaseModel):
 
 @app.post("/api/admin/leads/{lead_id}/delete")
 async def admin_delete_lead(lead_id: int, req: LeadDeleteRequest):
-    if not ADMIN_PASS or req.password != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or req.password != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль")
     ok = await db.delete_lead(lead_id)
     if not ok:
@@ -2830,7 +2845,7 @@ async def _notify_new_site_user(first_name: str, phone: str, method: str):
 
 @app.delete("/api/admin/site-users/{user_id}")
 async def admin_delete_site_user(user_id: int, body: dict, _=Depends(_get_admin)):
-    if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or body.get("admin_password") != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль администратора")
     ok = await db.delete_site_user(user_id)
     if not ok:
@@ -4575,7 +4590,7 @@ async def get_tg_clients(search: str = "", _=Depends(get_admin)):
 
 @app.patch("/api/admin/tg-clients/{tg_id}/block")
 async def tg_client_block(tg_id: int, body: dict, _=Depends(get_admin)):
-    if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or body.get("admin_password") != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль администратора")
     blocked = bool(body.get("blocked", True))
     await db.block_tg_client(tg_id, blocked)
@@ -4583,7 +4598,7 @@ async def tg_client_block(tg_id: int, body: dict, _=Depends(get_admin)):
 
 @app.delete("/api/admin/tg-clients/{tg_id}")
 async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
-    if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
+    if not (apass := await get_admin_pass()) or body.get("admin_password") != apass:
         raise HTTPException(status_code=403, detail="Неверный пароль администратора")
     await db.delete_tg_client(tg_id)
     return {"ok": True}
