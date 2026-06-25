@@ -310,6 +310,28 @@ async def _notify_agent_status(lead_id: int, status: str, note: str):
 
 
 async def _notify_new_lead(lead: dict, staff: dict):
+    # Web push к callcenter/manager/admin — всегда, независимо от TG настроек
+    if db.pool and lead.get("id"):
+        try:
+            async with db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT DISTINCT s.id FROM staff s "
+                    "JOIN push_subscriptions ps ON ps.staff_id = s.id "
+                    "WHERE s.active=TRUE AND s.role IN ('callcenter','manager','admin')"
+                )
+            lead_code   = lead.get("lead_code") or f"#{lead.get('id')}"
+            push_title  = f"🎯 Новый лид — {lead_code}"
+            push_body   = f"{lead.get('client_name') or '—'} · {lead.get('client_phone') or '—'}"
+            client_phone = lead.get("client_phone", "")
+            for row in rows:
+                asyncio.create_task(send_web_push(
+                    row["id"], push_title, push_body,
+                    lead_id=lead.get("id"), phone=client_phone, push_type="new_lead"
+                ))
+        except Exception as _ex:
+            logging.warning(f"_notify_new_lead push error: {_ex}")
+
+    # Telegram группа — только если включено в настройках
     enabled = await _get_cfg("leads_group_enabled")
     if enabled not in ("1", "true"):
         return
@@ -652,6 +674,25 @@ async def get_current_user(authorization: str = Header(None)):
     if not user:
         raise HTTPException(status_code=401, detail="Пользователь не найден")
     return user
+
+
+async def get_optional_user(authorization: str = Header(None)):
+    """Как get_current_user, но возвращает None вместо 401 для незалогиненных."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization.removeprefix("Bearer ").strip()
+    if token in ("null", "undefined", ""):
+        return None
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("type") == "staff":
+        return None
+    try:
+        return await db.get_user_by_id(int(payload["sub"]))
+    except Exception:
+        return None
 
 
 async def get_current_staff(authorization: str = Header(None)):
@@ -4286,12 +4327,12 @@ class CallbackRequest(BaseModel):
         return v
 
 @app.post("/api/callback")
-async def request_callback(req: CallbackRequest, user=Depends(get_current_user)):
-    """Обратный звонок с сайта → лид в группу лидов филиала. Только для авторизованных."""
+async def request_callback(req: CallbackRequest, user=Depends(get_optional_user)):
+    """Обратный звонок с сайта → лид в группу лидов филиала."""
     lead_num  = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
 
-    client_name = req.name.strip() or user.get("first_name", "") or req.phone
+    client_name = req.name.strip() or (user.get("first_name", "") if user else "") or req.phone
     note_parts = ["🔔 Обратный звонок с сайта"]
     if req.profile_phone and req.profile_phone != req.phone:
         note_parts.append(f"Тел. в профиле: {req.profile_phone}")
