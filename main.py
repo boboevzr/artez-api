@@ -5056,6 +5056,38 @@ async def del_template(tid: int, staff=Depends(get_current_staff)):
     return {"ok": True}
 
 
+@app.post("/api/admin/bot/broadcast-restart")
+async def bot_broadcast_restart(_=Depends(_get_admin)):
+    """Рассылает всем клиентам бота сообщение «Нажмите /start»."""
+    token = await _get_cfg("tg_bot_token") or BOT_TOKEN
+    if not token:
+        raise HTTPException(status_code=503, detail="BOT_TOKEN не настроен")
+    tg_ids = await db.get_all_bot_client_tg_ids()
+    if not tg_ids:
+        return {"ok": True, "sent": 0, "failed": 0, "total": 0}
+    text = (
+        "🔄 <b>Бот ARTEZ обновлён!</b>\n\n"
+        "Для продолжения нажмите /start"
+    )
+    sent = failed = 0
+    async with aiohttp.ClientSession() as s:
+        for tg_id in tg_ids:
+            try:
+                r = await s.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json={"chat_id": tg_id, "text": text, "parse_mode": "HTML"},
+                    timeout=aiohttp.ClientTimeout(total=5))
+                if (await r.json()).get("ok"):
+                    sent += 1
+                else:
+                    failed += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)
+    logging.info(f"Bot broadcast-restart: sent={sent}, failed={failed}, total={len(tg_ids)}")
+    return {"ok": True, "sent": sent, "failed": failed, "total": len(tg_ids)}
+
+
 @app.websocket("/ws/chat/client/{code}")
 async def ws_chat_client(websocket: WebSocket, code: str):
     session = await db.get_chat_session(code)

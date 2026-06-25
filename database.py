@@ -755,6 +755,13 @@ async def get_staff_notify_new_users():
     return [r["tg_id"] for r in rows]
 
 
+async def get_all_bot_client_tg_ids() -> list:
+    """Все tg_id клиентов бота (таблица clients)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT tg_id FROM clients WHERE tg_id IS NOT NULL")
+    return [r["tg_id"] for r in rows]
+
 async def set_user_tg_id(phone: str, tg_id: int):
     if not pool: return
     async with pool.acquire() as conn:
