@@ -1947,6 +1947,19 @@ async def check_tg_link(phone: str):
     return {"has_tg": tg_id is not None}
 
 
+@app.post("/api/tg-phone-link")
+async def tg_phone_link(body: dict):
+    """Бот вызывает этот endpoint когда клиент делится номером для привязки к сайту."""
+    phone  = str(body.get("phone", "")).strip()
+    tg_id  = body.get("tg_id")
+    if not phone or not tg_id:
+        raise HTTPException(400, "phone and tg_id required")
+    phone = normalize_phone(phone)
+    await db.save_tg_phone_link(phone, int(tg_id))
+    user = await db.get_user_by_phone(phone)
+    return {"ok": True, "registered": user is not None and user.get("is_verified", False)}
+
+
 @app.post("/api/register")
 async def register(req: RegisterRequest):
     uz = req.lang == "uz"
