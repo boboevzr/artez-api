@@ -4588,6 +4588,15 @@ async def get_tg_clients(search: str = "", _=Depends(get_admin)):
     rows = await db.get_tg_clients(search=search)
     return {"clients": rows, "total": len(rows)}
 
+@app.patch("/api/admin/tg-clients/{tg_id}")
+async def tg_client_update(tg_id: int, body: dict, _=Depends(get_admin)):
+    allowed = {"first_name", "last_name", "phone"}
+    data = {k: v for k, v in body.items() if k in allowed}
+    if not data:
+        raise HTTPException(status_code=400, detail="Нет полей для обновления")
+    await db.update_tg_client(tg_id, data)
+    return {"ok": True}
+
 @app.patch("/api/admin/tg-clients/{tg_id}/block")
 async def tg_client_block(tg_id: int, body: dict, _=Depends(get_admin)):
     if not (apass := await get_admin_pass()) or body.get("admin_password") != apass:

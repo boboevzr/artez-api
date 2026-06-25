@@ -756,6 +756,17 @@ async def get_staff_notify_new_users():
     return [r["tg_id"] for r in rows]
 
 
+async def update_tg_client(tg_id: int, data: dict):
+    if not pool: return
+    allowed = {"first_name", "last_name", "phone"}
+    fields = {k: v for k, v in data.items() if k in allowed}
+    if not fields: return
+    sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        await conn.execute(
+            f"UPDATE clients SET {sets}, updated_at=NOW() WHERE tg_id=$1",
+            tg_id, *fields.values())
+
 async def block_tg_client(tg_id: int, blocked: bool):
     if not pool: return
     async with pool.acquire() as conn:
