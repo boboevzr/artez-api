@@ -252,6 +252,8 @@ async def create_tables():
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS cash_tg_channel_id VARCHAR(50) DEFAULT NULL",
         # Настройки: канал медиафайлов (замеры, чеки и т.д.)
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS media_channel_id VARCHAR(50) DEFAULT NULL",
+        # Уведомления о новых пользователях сайта
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_new_users BOOLEAN DEFAULT FALSE",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -742,6 +744,15 @@ async def update_user_profile(user_id: int, first_name: str, address: str = None
         await conn.execute("""
             UPDATE users SET first_name=$2, address=$3, car_plate=$4, osago_expiry=$5, updated_at=NOW() WHERE id=$1
         """, user_id, first_name, address, car_plate, osago_expiry)
+
+
+async def get_staff_notify_new_users():
+    """Возвращает tg_id сотрудников с включённым notify_new_users."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT tg_id FROM staff WHERE notify_new_users=TRUE AND tg_id IS NOT NULL AND active=TRUE")
+    return [r["tg_id"] for r in rows]
 
 
 async def set_user_tg_id(phone: str, tg_id: int):

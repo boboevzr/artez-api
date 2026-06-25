@@ -30,9 +30,10 @@ VAPID_PRIVATE  = os.getenv("VAPID_PRIVATE", "")
 VAPID_PUBLIC   = os.getenv("VAPID_PUBLIC", "")
 
 BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
-GROUP_ID           = os.getenv("GROUP_ID", "")
-GROUP_ID_ZARAFSHAN = os.getenv("GROUP_ID_ZARAFSHAN", "")
-LEADS_GROUP_ID     = os.getenv("LEADS_GROUP_ID", "-1004486597965")
+GROUP_ID              = os.getenv("GROUP_ID", "")
+GROUP_ID_ZARAFSHAN    = os.getenv("GROUP_ID_ZARAFSHAN", "")
+LEADS_GROUP_ID        = os.getenv("LEADS_GROUP_ID", "-1004486597965")
+GROUP_NEW_CLIENTS_ID  = os.getenv("GROUP_NEW_CLIENTS_ID", "-1003768571929")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
 APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
@@ -2009,6 +2010,7 @@ async def verify(req: VerifyRequest):
     await db.verify_user(req.phone)
     user = await db.get_user_by_phone(req.phone)
     asyncio.create_task(db.update_user_last_login(user["id"]))
+    asyncio.create_task(_notify_new_site_user(user.get("first_name") or "", user["phone"], "sms"))
     token = create_token(user["id"], user["phone"])
 
     return {
@@ -2755,6 +2757,8 @@ async def register_via_tg(body: dict):
         )
         asyncio.create_task(_send_tg_safe(tg_id, text))
 
+    asyncio.create_task(_notify_new_site_user(first_name, phone, "tg"))
+
     return {
         "ok": True,
         "token": token,
@@ -2778,6 +2782,39 @@ async def _send_tg_safe(tg_id: int, text: str):
                 timeout=aiohttp.ClientTimeout(total=5))
     except Exception:
         pass
+
+
+async def _notify_new_site_user(first_name: str, phone: str, method: str):
+    """Уведомляет группу и персональных сотрудников о новой регистрации."""
+    if not BOT_TOKEN:
+        return
+    from datetime import datetime
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    method_icon = "✈️ Telegram" if method == "tg" else "📱 SMS"
+    text = (
+        f"👤 <b>Новый пользователь сайта!</b>\n\n"
+        f"Имя: <b>{first_name}</b>\n"
+        f"📱 Номер: <code>{phone}</code>\n"
+        f"🔐 Регистрация: {method_icon}\n"
+        f"📅 {now}"
+    )
+    targets = []
+    if GROUP_NEW_CLIENTS_ID:
+        targets.append(GROUP_NEW_CLIENTS_ID)
+    try:
+        staff_ids = await db.get_staff_notify_new_users()
+        targets.extend(str(tid) for tid in staff_ids)
+    except Exception:
+        pass
+    async with aiohttp.ClientSession() as s:
+        for chat_id in targets:
+            try:
+                await s.post(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                    json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
+                    timeout=aiohttp.ClientTimeout(total=5))
+            except Exception:
+                pass
 
 
 @app.delete("/api/admin/site-users/{user_id}")
@@ -4268,6 +4305,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_edit_delivery:   bool = Body(False, embed=True),
     can_accept_payment:  bool = Body(False, embed=True),
     can_manage_cash:     bool = Body(False, embed=True),
+    notify_new_users:    bool = Body(False, embed=True),
     order_stages:        str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -4276,16 +4314,16 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4,
                    can_create_order=$5, can_confirm_order=$6, order_stages=$7,
                    can_edit_confirmed=$8, can_send_pickup=$9, can_edit_delivery=$10,
-                   can_accept_payment=$11, can_manage_cash=$12
+                   can_accept_payment=$11, can_manage_cash=$12, notify_new_users=$13
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
-                         can_accept_payment, can_manage_cash""",
+                         can_accept_payment, can_manage_cash, notify_new_users""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
-            can_accept_payment, can_manage_cash)
+            can_accept_payment, can_manage_cash, notify_new_users)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
