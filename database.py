@@ -254,6 +254,7 @@ async def create_tables():
         "ALTER TABLE settings ADD COLUMN IF NOT EXISTS media_channel_id VARCHAR(50) DEFAULT NULL",
         # Уведомления о новых пользователях сайта
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_new_users BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE clients ADD COLUMN IF NOT EXISTS blocked BOOLEAN DEFAULT FALSE",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -754,6 +755,16 @@ async def get_staff_notify_new_users():
             "SELECT tg_id FROM staff WHERE notify_new_users=TRUE AND tg_id IS NOT NULL AND active=TRUE")
     return [r["tg_id"] for r in rows]
 
+
+async def block_tg_client(tg_id: int, blocked: bool):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE clients SET blocked=$1 WHERE tg_id=$2", blocked, tg_id)
+
+async def delete_tg_client(tg_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM clients WHERE tg_id=$1", tg_id)
 
 async def get_all_bot_client_tg_ids() -> list:
     """Все tg_id клиентов бота (таблица clients)."""
@@ -2091,13 +2102,16 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
         )
         if not exists:
             return []
+        blocked_col = "blocked" if await conn.fetchval(
+            "SELECT COUNT(*) FROM information_schema.columns WHERE table_name='clients' AND column_name='blocked'"
+        ) else "FALSE::boolean AS blocked"
         if search:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(f"""
                 SELECT id, tg_id, tg_username, first_name, last_name, phone,
                        lang, total_orders AS orders_count,
                        NULL::numeric AS total_spent,
                        NULL::timestamptz AS last_order_at,
-                       created_at
+                       created_at, {blocked_col}
                 FROM clients
                 WHERE phone ILIKE $1 OR first_name ILIKE $1
                    OR last_name ILIKE $1 OR tg_username ILIKE $1
@@ -2105,12 +2119,12 @@ async def get_tg_clients(search: str = "", limit: int = 200) -> list[dict]:
                 LIMIT $2
             """, f"%{search}%", limit)
         else:
-            rows = await conn.fetch("""
+            rows = await conn.fetch(f"""
                 SELECT id, tg_id, tg_username, first_name, last_name, phone,
                        lang, total_orders AS orders_count,
                        NULL::numeric AS total_spent,
                        NULL::timestamptz AS last_order_at,
-                       created_at
+                       created_at, {blocked_col}
                 FROM clients
                 ORDER BY created_at DESC
                 LIMIT $1

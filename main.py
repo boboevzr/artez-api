@@ -4573,6 +4573,21 @@ async def get_tg_clients(search: str = "", _=Depends(get_admin)):
     rows = await db.get_tg_clients(search=search)
     return {"clients": rows, "total": len(rows)}
 
+@app.patch("/api/admin/tg-clients/{tg_id}/block")
+async def tg_client_block(tg_id: int, body: dict, _=Depends(get_admin)):
+    if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль администратора")
+    blocked = bool(body.get("blocked", True))
+    await db.block_tg_client(tg_id, blocked)
+    return {"ok": True, "blocked": blocked}
+
+@app.delete("/api/admin/tg-clients/{tg_id}")
+async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
+    if not ADMIN_PASS or body.get("admin_password") != ADMIN_PASS:
+        raise HTTPException(status_code=403, detail="Неверный пароль администратора")
+    await db.delete_tg_client(tg_id)
+    return {"ok": True}
+
 
 @app.post("/api/orders")
 async def create_order_from_site(order: OrderRequest):
