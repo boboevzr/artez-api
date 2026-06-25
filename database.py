@@ -406,6 +406,7 @@ async def create_tables():
         """)
 
     await ensure_agent_notifications_table()
+    await ensure_washer_notifications_table()
 
     # ── Шаг 4в: позиции услуг в заказах ─────────────────────────────────
     async with pool.acquire() as c:
@@ -1412,6 +1413,58 @@ async def mark_agent_notification_read_by_id(notif_id: int, agent_id: int):
         await conn.execute(
             "UPDATE agent_notifications SET is_read=TRUE WHERE id=$1 AND agent_id=$2",
             notif_id, agent_id)
+
+
+# ── washer_notifications ─────────────────────────────────────────────────────
+
+async def ensure_washer_notifications_table():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS washer_notifications (
+                id         SERIAL PRIMARY KEY,
+                staff_id   INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+                order_id   INTEGER NOT NULL,
+                order_num  VARCHAR(50) DEFAULT '',
+                message    TEXT DEFAULT '',
+                is_read    BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            );
+            CREATE INDEX IF NOT EXISTS idx_washer_notif_staff ON washer_notifications(staff_id, is_read);
+        """)
+
+async def create_washer_notification(staff_id: int, order_id: int, order_num: str, message: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO washer_notifications (staff_id, order_id, order_num, message) VALUES ($1,$2,$3,$4)",
+            staff_id, order_id, order_num, message)
+
+async def get_washer_notifications(staff_id: int, limit: int = 50) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM washer_notifications WHERE staff_id=$1 ORDER BY created_at DESC LIMIT $2",
+            staff_id, limit)
+        return [dict(r) for r in rows]
+
+async def count_unread_washer_notifications(staff_id: int) -> int:
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT COUNT(*) FROM washer_notifications WHERE staff_id=$1 AND is_read=FALSE", staff_id))
+
+async def mark_washer_notifications_read(staff_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE washer_notifications SET is_read=TRUE WHERE staff_id=$1 AND is_read=FALSE", staff_id)
+
+async def mark_washer_notification_read(notif_id: int, staff_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE washer_notifications SET is_read=TRUE WHERE id=$1 AND staff_id=$2", notif_id, staff_id)
 
 
 async def convert_lead_to_order(lead_id: int, order_num: str, converted_by: int):

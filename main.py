@@ -3849,6 +3849,7 @@ async def notify_washer_new_item(
     sent = 0
     no_sub = 0
     for wid in target_ids:
+        await db.create_washer_notification(wid, order_id, order_num, body)
         subs = await db.get_push_subscriptions(wid)
         if subs:
             asyncio.create_task(send_web_push(wid, title, body, order_id=order_id, push_type="new_item"))
@@ -3858,6 +3859,27 @@ async def notify_washer_new_item(
             logging.warning(f"notify_washer: no push sub for staff_id={wid}")
 
     return {"ok": True, "sent": sent, "no_subscription": no_sub}
+
+
+@app.get("/api/staff/my-order-notifications")
+async def get_my_order_notifications(staff=Depends(get_current_staff)):
+    rows = await db.get_washer_notifications(staff["id"])
+    return {"ok": True, "notifications": rows}
+
+@app.get("/api/staff/my-order-notifications/unread-count")
+async def get_order_notif_unread(staff=Depends(get_current_staff)):
+    count = await db.count_unread_washer_notifications(staff["id"])
+    return {"ok": True, "count": count}
+
+@app.post("/api/staff/my-order-notifications/read")
+async def mark_order_notifs_read(staff=Depends(get_current_staff)):
+    await db.mark_washer_notifications_read(staff["id"])
+    return {"ok": True}
+
+@app.patch("/api/staff/my-order-notifications/{notif_id}/read")
+async def mark_order_notif_read(notif_id: int, staff=Depends(get_current_staff)):
+    await db.mark_washer_notification_read(notif_id, staff["id"])
+    return {"ok": True}
 
 @app.get("/api/admin/orders/{order_id}/items/{item_id}/media")
 async def get_item_media(order_id: int, item_id: int, _=Depends(get_current_staff)):
