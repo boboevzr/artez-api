@@ -101,6 +101,7 @@ async def create_tables():
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate  VARCHAR(20)   DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE        DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS last_login  TIMESTAMPTZ  DEFAULT NULL",
+        "UPDATE users SET last_login = updated_at WHERE last_login IS NULL AND updated_at IS NOT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS total_price   INT          DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS discount_sum  NUMERIC(12,2) DEFAULT 0",

@@ -1895,6 +1895,7 @@ async def verify(req: VerifyRequest):
 
     await db.verify_user(req.phone)
     user = await db.get_user_by_phone(req.phone)
+    asyncio.create_task(db.update_user_last_login(user["id"]))
     token = create_token(user["id"], user["phone"])
 
     return {
