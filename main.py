@@ -84,8 +84,9 @@ async def startup():
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
-    if BOT_TOKEN and APP_URL:
-        asyncio.create_task(_set_tg_webhook())
+    # Webhook не нужен — бот работает в режиме polling (ARTEZ-BOT сервис на Railway)
+    # if BOT_TOKEN and APP_URL:
+    #     asyncio.create_task(_set_tg_webhook())
 
 async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None,
                         order_id: int = None, item_id: int = None, push_type: str = None):
