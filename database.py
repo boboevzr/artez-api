@@ -97,9 +97,10 @@ async def create_tables():
         "ALTER TABLE orders ADD CONSTRAINT orders_source_check CHECK (source IN ('bot','site','staff'))",
         "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS unit_key  VARCHAR(20)   DEFAULT 'm2'",
         "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL",
-        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS address   VARCHAR(200)  DEFAULT NULL",
-        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate VARCHAR(20)   DEFAULT NULL",
-        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE       DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS address    VARCHAR(200)  DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate  VARCHAR(20)   DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE        DEFAULT NULL",
+        "ALTER TABLE users   ADD COLUMN IF NOT EXISTS last_login  TIMESTAMPTZ  DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS total_price   INT          DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS discount_sum  NUMERIC(12,2) DEFAULT 0",
@@ -678,20 +679,27 @@ async def update_user_password(user_id: int, password_hash: str):
             UPDATE users SET password_hash=$2, updated_at=NOW() WHERE id=$1
         """, user_id, password_hash)
 
-async def get_all_site_users(search: str = "", limit: int = 200):
+async def get_all_site_users(search: str = "", limit: int = 500):
     if not pool: return []
+    base = """
+        SELECT u.id, u.phone, u.first_name, u.is_verified, u.tg_id,
+               u.address, u.car_plate, u.osago_expiry,
+               u.created_at, u.updated_at, u.last_login,
+               EXISTS(SELECT 1 FROM staff s WHERE s.site_user_id = u.id AND s.active = TRUE) AS is_agent
+        FROM users u
+    """
     async with pool.acquire() as conn:
         if search:
             return await conn.fetch(
-                "SELECT id, phone, first_name, is_verified, tg_id, created_at "
-                "FROM users WHERE phone ILIKE $1 OR first_name ILIKE $1 "
-                "ORDER BY created_at DESC LIMIT $2",
-                f"%{search}%", limit
-            )
-        return await conn.fetch(
-            "SELECT id, phone, first_name, is_verified, tg_id, created_at "
-            "FROM users ORDER BY created_at DESC LIMIT $1", limit
-        )
+                base + "WHERE u.phone ILIKE $1 OR u.first_name ILIKE $1 ORDER BY u.created_at DESC LIMIT $2",
+                f"%{search}%", limit)
+        return await conn.fetch(base + "ORDER BY u.created_at DESC LIMIT $1", limit)
+
+
+async def update_user_last_login(user_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET last_login=NOW() WHERE id=$1", user_id)
 
 
 async def update_user_profile(user_id: int, first_name: str, address: str = None,

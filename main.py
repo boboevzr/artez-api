@@ -1938,6 +1938,7 @@ async def login(req: LoginRequest):
     if not user["is_verified"]:
         raise HTTPException(status_code=403, detail=bi("Номер не подтверждён. Запросите код заново","Raqam tasdiqlanmagan. Kodni qayta so'rang"))
 
+    asyncio.create_task(db.update_user_last_login(user["id"]))
     token = create_token(user["id"], user["phone"])
     return {
         "ok": True,
@@ -2526,16 +2527,61 @@ async def agent_reset_password_by_tg(req: ResetByTgRequest):
 @app.get("/api/admin/site-users")
 async def admin_get_site_users(search: str = "", _=Depends(_get_admin)):
     rows = await db.get_all_site_users(search=search.strip())
-    return {"ok": True, "users": [dict(r) for r in rows]}
+    def _row(r):
+        d = dict(r)
+        for k in ("osago_expiry",):
+            if d.get(k) and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        for k in ("created_at", "updated_at", "last_login"):
+            if d.get(k) and hasattr(d[k], "isoformat"):
+                d[k] = d[k].isoformat()
+        return d
+    return {"ok": True, "users": [_row(r) for r in rows]}
+
+@app.patch("/api/admin/site-users/{user_id}")
+async def admin_update_site_user(user_id: int, body: dict, _=Depends(_get_admin)):
+    first_name   = (body.get("first_name")   or "").strip() or None
+    address      = (body.get("address")      or "").strip() or None
+    car_plate    = (body.get("car_plate")    or "").strip().upper() or None
+    osago_str    = (body.get("osago_expiry") or "").strip() or None
+    osago_expiry = None
+    if osago_str:
+        try:
+            from datetime import date as _d
+            osago_expiry = _d.fromisoformat(osago_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Неверный формат даты ОСАГО (YYYY-MM-DD)")
+    await db.update_user_profile(user_id, first_name, address, car_plate, osago_expiry)
+    return {"ok": True}
 
 @app.post("/api/admin/site-users/{user_id}/reset-password")
 async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_get_admin)):
     new_password = (body.get("new_password") or "").strip()
     if len(new_password) < 4:
         raise HTTPException(status_code=400, detail="Пароль минимум 4 символа")
+    send_tg = bool(body.get("send_tg", False))
     hashed = pwd_context.hash(new_password[:72])
     await db.update_user_password(user_id, hashed)
-    return {"ok": True}
+    if send_tg and BOT_TOKEN:
+        user = await db.get_user_by_id(user_id)
+        tg_id = user.get("tg_id") if user else None
+        if tg_id:
+            text = (
+                f"🔑 <b>ARTEZ</b> — ваш пароль изменён администратором.\n\n"
+                f"📱 Логин: <code>{user['phone']}</code>\n"
+                f"🔑 Новый пароль: <code>{new_password}</code>\n\n"
+                f"Не передавайте пароль третьим лицам."
+            )
+            try:
+                async with aiohttp.ClientSession() as _s:
+                    await _s.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={"chat_id": str(tg_id), "text": text, "parse_mode": "HTML"},
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    )
+            except Exception:
+                pass
+    return {"ok": True, "tg_sent": send_tg and bool(body.get("send_tg"))}
 
 # ══════════════════════════════════════════════════════════════════════════════
 
