@@ -102,6 +102,11 @@ async def create_tables():
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE        DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS last_login  TIMESTAMPTZ  DEFAULT NULL",
         "UPDATE users SET last_login = updated_at WHERE last_login IS NULL AND updated_at IS NOT NULL",
+        """CREATE TABLE IF NOT EXISTS tg_phone_links (
+            phone      VARCHAR(20) PRIMARY KEY,
+            tg_id      BIGINT      NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS total_price   INT          DEFAULT NULL",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS discount_sum  NUMERIC(12,2) DEFAULT 0",
@@ -663,6 +668,33 @@ async def link_user_tg_id(phone: str, tg_id: int):
             UPDATE users SET tg_id = $2, updated_at = NOW()
             WHERE phone = $1
         """, phone, tg_id)
+
+async def save_tg_phone_link(phone: str, tg_id: int):
+    """Сохраняет связку телефон→tg_id от бота (до регистрации на сайте)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO tg_phone_links (phone, tg_id, created_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (phone) DO UPDATE SET tg_id=$2, created_at=NOW()
+        """, phone, tg_id)
+        # Если пользователь уже зарегистрирован — сразу линкуем
+        await conn.execute("""
+            UPDATE users SET tg_id=$2, updated_at=NOW()
+            WHERE phone=$1 AND tg_id IS NULL
+        """, phone, tg_id)
+
+async def get_tg_id_by_phone(phone: str):
+    """Возвращает tg_id для телефона: сначала из users, потом из tg_phone_links."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tg_id FROM users WHERE phone=$1 AND tg_id IS NOT NULL", phone)
+        if row:
+            return row["tg_id"]
+        row = await conn.fetchrow(
+            "SELECT tg_id FROM tg_phone_links WHERE phone=$1", phone)
+        return row["tg_id"] if row else None
 
 
 async def update_user_name(user_id: int, first_name: str):

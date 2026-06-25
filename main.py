@@ -427,6 +427,8 @@ class RegisterRequest(BaseModel):
     phone: str
     password: str
     first_name: str
+    via_tg: bool = False
+    lang: str = "ru"
 
     @field_validator("phone")
     @classmethod
@@ -464,6 +466,7 @@ class LoginRequest(BaseModel):
 class ResendCodeRequest(BaseModel):
     phone: str
     purpose: str = "register"
+    via_tg: bool = False
 
     @field_validator("phone")
     @classmethod
@@ -1291,14 +1294,84 @@ async def ack_reminder(reminder_id: int, staff=Depends(require_perm("leads"))):
     await db.mark_reminder_sent(reminder_id, "browser")
     return {"ok": True}
 
+async def _tg_send_reply_keyboard(chat_id, text: str):
+    """Отправляет сообщение с кнопкой 'Поделиться номером'."""
+    if not BOT_TOKEN: return
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": {
+                    "keyboard": [[{"text": "📱 Поделиться номером", "request_contact": True}]],
+                    "resize_keyboard": True,
+                    "one_time_keyboard": True,
+                }
+            }
+        )
+
+async def _tg_remove_keyboard(chat_id, text: str):
+    """Отправляет сообщение и убирает клавиатуру."""
+    if not BOT_TOKEN: return
+    async with httpx.AsyncClient(timeout=10) as client:
+        await client.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "reply_markup": {"remove_keyboard": True}
+            }
+        )
+
+
 @app.post("/api/telegram/webhook")
 async def telegram_webhook(request: Request):
-    """Обрабатывает callback_query от Telegram — нажатие кнопки 'Взять лид'."""
+    """Обрабатывает сообщения и callback_query от Telegram."""
     try:
         data = await request.json()
     except Exception:
         return {"ok": True}
 
+    # ── Обычные сообщения (текст и контакт) ──────────────────────────
+    msg = data.get("message") or data.get("edited_message")
+    if msg:
+        chat_id  = msg.get("chat", {}).get("id")
+        tg_user_id = msg.get("from", {}).get("id")
+        text     = (msg.get("text") or "").strip()
+        contact  = msg.get("contact")
+
+        if text == "/start" and chat_id:
+            await _tg_send_reply_keyboard(
+                chat_id,
+                "👋 <b>Добро пожаловать в ARTEZ!</b>\n\n"
+                "Нажмите кнопку ниже, чтобы привязать ваш номер телефона.\n"
+                "После этого при регистрации на сайте вы сможете получить код подтверждения через Telegram."
+            )
+            return {"ok": True}
+
+        if contact and tg_user_id and chat_id:
+            phone_raw = contact.get("phone_number", "")
+            # Нормализуем: +998901234567 → +998901234567
+            phone = phone_raw if phone_raw.startswith("+") else "+" + phone_raw
+            owner_tg = contact.get("user_id")
+            # Принимаем только собственный контакт
+            if owner_tg and int(owner_tg) != int(tg_user_id):
+                await _tg_remove_keyboard(chat_id, "❌ Пожалуйста, поделитесь <b>своим</b> номером.")
+                return {"ok": True}
+            await db.save_tg_phone_link(phone, int(tg_user_id))
+            await _tg_remove_keyboard(
+                chat_id,
+                f"✅ <b>Номер привязан!</b>\n\n"
+                f"📱 <code>{phone}</code>\n\n"
+                f"Теперь при регистрации на сайте ARTEZ вы можете выбрать "
+                f"«Получить код через Telegram»."
+            )
+            return {"ok": True}
+
+    # ── Callback query (кнопка 'Взять лид') ──────────────────────────
     cq = data.get("callback_query")
     if not cq:
         return {"ok": True}
@@ -1866,11 +1939,22 @@ async def get_prices():
     return {"ok": True, "prices": prices, "units": units_dict}
 
 
+@app.get("/api/check-tg-link")
+async def check_tg_link(phone: str):
+    """Проверяет, привязан ли телефон к Telegram боту."""
+    normalized = normalize_phone(phone)
+    tg_id = await db.get_tg_id_by_phone(normalized)
+    return {"has_tg": tg_id is not None}
+
+
 @app.post("/api/register")
 async def register(req: RegisterRequest):
+    uz = req.lang == "uz"
     existing = await db.get_user_by_phone(req.phone)
     if existing and existing["is_verified"]:
-        raise HTTPException(status_code=400, detail=bi("Этот номер уже зарегистрирован","Bu raqam allaqachon ro'yxatdan o'tgan"))
+        raise HTTPException(status_code=400, detail=(
+            "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
+            else "Этот номер уже зарегистрирован"))
 
     ok, err = await db.check_sms_rate_limit(req.phone, "register")
     if not ok:
@@ -1882,9 +1966,24 @@ async def register(req: RegisterRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, "register", expires_at)
-    await send_sms(req.phone, await sms_text(code, "register"))
 
-    return {"ok": True, "message": "Код подтверждения отправлен", "phone": req.phone}
+    if req.via_tg:
+        tg_id = await db.get_tg_id_by_phone(req.phone)
+        if not tg_id:
+            raise HTTPException(status_code=400, detail=(
+                "Telegram не привязан. Сначала напишите боту /start и поделитесь номером."
+                if not uz else
+                "Telegram bog'lanmagan. Botga /start yozing va raqamingizni ulashing."))
+        code_text = (
+            f"🔐 <b>ARTEZ</b> — код подтверждения регистрации:\n\n<code>{code}</code>\n\n⏱ Действителен 5 минут."
+            if not uz else
+            f"🔐 <b>ARTEZ</b> — ro'yxatdan o'tish tasdiqlash kodi:\n\n<code>{code}</code>\n\n⏱ 5 daqiqa davomida amal qiladi."
+        )
+        await send_tg(tg_id, code_text)
+        return {"ok": True, "via_tg": True, "message": "Код отправлен в Telegram", "phone": req.phone}
+
+    await send_sms(req.phone, await sms_text(code, "register"))
+    return {"ok": True, "via_tg": False, "message": "Код подтверждения отправлен", "phone": req.phone}
 
 
 @app.post("/api/verify")
@@ -1925,8 +2024,14 @@ async def resend_code(req: ResendCodeRequest):
     code = generate_code()
     expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
     await db.save_sms_code(req.phone, code, req.purpose, expires_at)
-    await send_sms(req.phone, await sms_text(code, req.purpose))
 
+    if req.via_tg:
+        tg_id = await db.get_tg_id_by_phone(req.phone)
+        if tg_id:
+            await send_tg(tg_id,
+                f"🔐 <b>ARTEZ</b> — код подтверждения:\n\n<code>{code}</code>\n\n⏱ Действителен 5 минут.")
+            return {"ok": True, "message": "Код отправлен в Telegram"}
+    await send_sms(req.phone, await sms_text(code, req.purpose))
     return {"ok": True, "message": "Код отправлен повторно"}
 
 
