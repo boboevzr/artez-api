@@ -1116,18 +1116,18 @@ async def get_staff_by_tg_id(tg_id):
             except Exception:
                 return None
 
-async def create_agent_from_user(user: dict, password_hash: str) -> int:
+async def create_agent_from_user(user: dict, password_hash: str, branch: str = "") -> int:
     """Создаёт staff-аккаунт агента из пользователя сайта."""
     if not pool: return None
     async with pool.acquire() as conn:
         return await conn.fetchval("""
             INSERT INTO staff (first_name, phone, login, password_hash, role,
-                               tg_id, site_user_id, active)
-            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE)
+                               tg_id, site_user_id, active, branch)
+            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE,$7)
             ON CONFLICT (login) DO NOTHING
             RETURNING id
         """, user["first_name"], user["phone"], user["phone"],
-            password_hash, user.get("tg_id"), user["id"])
+            password_hash, user.get("tg_id"), user["id"], branch or None)
 
 async def set_staff_temp_password(staff_id: int, temp_hash: str, expires_at):
     if not pool: return

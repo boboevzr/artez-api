@@ -490,6 +490,9 @@ class ResendCodeRequest(BaseModel):
         return normalize_phone(v)
 
 
+class AgentApplyRequest(BaseModel):
+    branch: str = ""
+
 class OrderRequest(BaseModel):
     first_name: str
     last_name: str = ""
@@ -2498,7 +2501,7 @@ async def agent_status(user=Depends(get_current_user)):
     return {"ok": True, "is_agent": False}
 
 @app.post("/api/agent/apply")
-async def agent_apply(user=Depends(get_current_user)):
+async def agent_apply(req: AgentApplyRequest = Body(default_factory=AgentApplyRequest), user=Depends(get_current_user)):
     """Пользователь сайта регистрируется как агент.
     Ищет клиента бота по clients.tg_phone = users.phone.
     Если не найден — возвращает needs_bot=True (нужно написать боту).
@@ -2536,7 +2539,7 @@ async def agent_apply(user=Depends(get_current_user)):
     if tg_id:
         user_data["tg_id"] = int(tg_id)
 
-    staff_id = await db.create_agent_from_user(user_data, password_hash)
+    staff_id = await db.create_agent_from_user(user_data, password_hash, req.branch)
     if not staff_id:
         return {"ok": True, "already": True, "message": "Аккаунт агента уже существует"}
 
@@ -4614,7 +4617,7 @@ async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
 
 
 @app.post("/api/orders")
-async def create_order_from_site(order: OrderRequest):
+async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_user)):
     """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
     lead_num  = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
@@ -4627,6 +4630,18 @@ async def create_order_from_site(order: OrderRequest):
     if order.is_quick:     note_parts.append("Быстрая заявка")
     if order.total_price:  note_parts.append(f"Расчёт: {order.total_price:,} сум")
     note = " · ".join(note_parts) if note_parts else None
+
+    # Определяем агента: сначала по авторизованному пользователю, затем по телефону
+    volunteer_id = None
+    agent_staff = None
+    if user:
+        agent_staff = await db.get_staff_by_site_user(user["id"])
+        if not agent_staff:
+            agent_staff = await db.get_staff_by_login(user["phone"])
+    if not agent_staff:
+        agent_staff = await db.get_staff_by_login(order.phone)
+    if agent_staff and agent_staff.get("role") == "agent" and agent_staff.get("active"):
+        volunteer_id = agent_staff["id"]
 
     lead = await db.create_lead({
         "lead_num":      lead_num,
@@ -4641,7 +4656,7 @@ async def create_order_from_site(order: OrderRequest):
         "note":          note,
         "status":        "new",
         "created_by":    None,
-        "volunteer_id":  None,
+        "volunteer_id":  volunteer_id,
         "location":      order.location,
         "location_address": order.location_address,
     })
