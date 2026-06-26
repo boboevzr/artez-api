@@ -1167,7 +1167,6 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     perms = ROLE_PERMISSIONS.get(role, [])
     if "leads" not in perms and "leads_own" not in perms and staff.get("sub") != "admin":
         raise HTTPException(status_code=403, detail="Нет доступа")
-    lead_num = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
     creator_id = None if staff.get("sub") == "admin" else staff.get("id")
     # агент автоматически становится agent_id лида
@@ -1175,7 +1174,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     if role == "agent" and not agent_id:
         agent_id = creator_id
     lead = await db.create_lead({
-        "lead_num": lead_num, "client_name": req.client_name,
+        "client_name": req.client_name,
         "client_phone": req.client_phone, "service": req.service,
         "branch": req.branch, "city": req.city, "address": req.address,
         "short_address": req.short_address, "note": req.note,
@@ -2493,9 +2492,8 @@ async def admin_delete_lead(lead_id: int, req: LeadDeleteRequest):
 
 @app.post("/api/admin/leads")
 async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
-    lead_num = await db.get_next_lead_num()
     lead = await db.create_lead({
-        "lead_num": lead_num, "client_name": req.client_name,
+        "client_name": req.client_name,
         "client_phone": req.client_phone, "service": req.service,
         "branch": req.branch, "city": req.city, "address": req.address,
         "short_address": req.short_address, "note": req.note,
@@ -4740,7 +4738,6 @@ async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
 @app.post("/api/orders")
 async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_user)):
     """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
-    lead_num  = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
 
     full_name = f"{order.first_name} {order.last_name}".strip()
@@ -4764,7 +4761,6 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         volunteer_id = agent_staff["id"]
 
     lead = await db.create_lead({
-        "lead_num":      lead_num,
         "lead_code":     lead_code,
         "client_name":   full_name,
         "client_phone":  order.phone,
@@ -4816,7 +4812,6 @@ class CallbackRequest(BaseModel):
 @app.post("/api/callback")
 async def request_callback(req: CallbackRequest, user=Depends(get_optional_user)):
     """Обратный звонок с сайта → лид в группу лидов филиала."""
-    lead_num  = await db.get_next_lead_num()
     lead_code = await db.generate_lead_code()
 
     client_name = req.name.strip() or (user.get("first_name", "") if user else "") or req.phone
@@ -4825,7 +4820,6 @@ async def request_callback(req: CallbackRequest, user=Depends(get_optional_user)
         note_parts.append(f"Тел. в профиле: {req.profile_phone}")
 
     lead = await db.create_lead({
-        "lead_num":     lead_num,
         "lead_code":    lead_code,
         "client_name":  client_name,
         "client_phone": req.phone,

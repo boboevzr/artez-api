@@ -1228,27 +1228,23 @@ async def update_staff_password(staff_id: int, password_hash: str, plain: str = 
 # ══════════════════════════════════════
 #  ЛИДЫ
 # ══════════════════════════════════════
-async def get_next_lead_num() -> str:
-    if not pool: return "LEAD-0001"
-    async with pool.acquire() as conn:
-        count = await conn.fetchval("SELECT COUNT(*) FROM leads") or 0
-        return f"LEAD-{count + 1:04d}"
-
 async def create_lead(data: dict) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO leads (lead_num, lead_code, client_name, client_phone, service, branch,
+            INSERT INTO leads (lead_code, client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
                                created_by, volunteer_id, location, location_address)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
             RETURNING *
-        """, data["lead_num"], data.get("lead_code"), data.get("client_name"), data["client_phone"],
+        """, data.get("lead_code"), data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
             data.get("volunteer_id"), data.get("location"), data.get("location_address"))
-        return dict(row)
+        lead_num = f"LEAD-{row['id']:04d}"
+        await conn.execute("UPDATE leads SET lead_num=$1 WHERE id=$2", lead_num, row["id"])
+        return dict(row) | {"lead_num": lead_num}
 
 async def get_leads(status: str = None, branch: str = None,
                     assigned_to: int = None, limit: int = 100):
