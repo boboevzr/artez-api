@@ -1232,19 +1232,24 @@ async def create_lead(data: dict) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO leads (lead_code, client_name, client_phone, service, branch,
+            INSERT INTO leads (client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
                                created_by, volunteer_id, location, location_address)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
             RETURNING *
-        """, data.get("lead_code"), data.get("client_name"), data["client_phone"],
+        """, data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
             data.get("volunteer_id"), data.get("location"), data.get("location_address"))
-        lead_num = f"LEAD-{row['id']:04d}"
-        await conn.execute("UPDATE leads SET lead_num=$1 WHERE id=$2", lead_num, row["id"])
-        return dict(row) | {"lead_num": lead_num}
+        rid      = row["id"]
+        lead_num = f"LEAD-{rid:04d}"
+        lead_code = f"L-{rid:04d}"
+        await conn.execute(
+            "UPDATE leads SET lead_num=$1, lead_code=$2 WHERE id=$3",
+            lead_num, lead_code, rid
+        )
+        return dict(row) | {"lead_num": lead_num, "lead_code": lead_code}
 
 async def get_leads(status: str = None, branch: str = None,
                     assigned_to: int = None, limit: int = 100):

@@ -1167,7 +1167,6 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     perms = ROLE_PERMISSIONS.get(role, [])
     if "leads" not in perms and "leads_own" not in perms and staff.get("sub") != "admin":
         raise HTTPException(status_code=403, detail="Нет доступа")
-    lead_code = await db.generate_lead_code()
     creator_id = None if staff.get("sub") == "admin" else staff.get("id")
     # агент автоматически становится agent_id лида
     agent_id = req.volunteer_id
@@ -1179,12 +1178,12 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
         "branch": req.branch, "city": req.city, "address": req.address,
         "short_address": req.short_address, "note": req.note,
         "assigned_to": req.assigned_to, "created_by": creator_id,
-        "volunteer_id": agent_id, "lead_code": lead_code,
+        "volunteer_id": agent_id,
         "location": req.location, "location_address": req.location_address,
     })
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
-                               note=f"Лид создан ({lead_code})")
+                               note=f"Лид создан ({lead.get('lead_code','')})")
         if req.notify_group:
             asyncio.create_task(_notify_new_lead(lead, staff))
         elif creator_id:
@@ -4738,8 +4737,6 @@ async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
 @app.post("/api/orders")
 async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_user)):
     """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
-    lead_code = await db.generate_lead_code()
-
     full_name = f"{order.first_name} {order.last_name}".strip()
     note_parts = []
     if order.service_type: note_parts.append(f"Тип: {order.service_type}")
@@ -4761,7 +4758,6 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         volunteer_id = agent_staff["id"]
 
     lead = await db.create_lead({
-        "lead_code":     lead_code,
         "client_name":   full_name,
         "client_phone":  order.phone,
         "service":       order.service,
@@ -4778,7 +4774,7 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     })
     if lead:
         await db.add_lead_call(lead["id"], None, action="created",
-                               note=f"Лид создан с сайта ({lead_code})")
+                               note=f"Лид создан с сайта ({lead.get('lead_code','')})")
 
     site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
     asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
@@ -4812,15 +4808,12 @@ class CallbackRequest(BaseModel):
 @app.post("/api/callback")
 async def request_callback(req: CallbackRequest, user=Depends(get_optional_user)):
     """Обратный звонок с сайта → лид в группу лидов филиала."""
-    lead_code = await db.generate_lead_code()
-
     client_name = req.name.strip() or (user.get("first_name", "") if user else "") or req.phone
     note_parts = ["🔔 Обратный звонок с сайта"]
     if req.profile_phone and req.profile_phone != req.phone:
         note_parts.append(f"Тел. в профиле: {req.profile_phone}")
 
     lead = await db.create_lead({
-        "lead_code":    lead_code,
         "client_name":  client_name,
         "client_phone": req.phone,
         "service":      "callback",
