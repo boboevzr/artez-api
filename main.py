@@ -1095,14 +1095,18 @@ async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
         row = await conn.fetchrow("SELECT id, first_name, last_name FROM staff WHERE id=$1", staff_id)
         if not row:
             raise HTTPException(status_code=404, detail="Сотрудник не найден")
+        # NULL out FK references that don't have ON DELETE SET NULL
+        await conn.execute("UPDATE leads  SET volunteer_id=NULL WHERE volunteer_id=$1", staff_id)
+        await conn.execute("UPDATE leads  SET assigned_to=NULL  WHERE assigned_to=$1",  staff_id)
+        await conn.execute("UPDATE leads  SET created_by=NULL   WHERE created_by=$1",   staff_id)
+        await conn.execute("UPDATE leads  SET converted_by=NULL WHERE converted_by=$1", staff_id)
+        await conn.execute("UPDATE orders SET assigned_to=NULL  WHERE assigned_to=$1",  staff_id)
+        await conn.execute("UPDATE orders SET created_by=NULL   WHERE created_by=$1",   staff_id)
+        await conn.execute("UPDATE orders SET operator_id=NULL  WHERE operator_id=$1",  staff_id)
         try:
             await conn.execute("DELETE FROM staff WHERE id=$1", staff_id)
         except Exception as e:
-            err = str(e)
-            if "foreign key" in err.lower() or "violates" in err.lower():
-                raise HTTPException(status_code=409,
-                    detail="Нельзя удалить: у сотрудника есть связанные заказы или лиды. Деактивируйте его.")
-            raise HTTPException(status_code=500, detail=f"Ошибка БД: {err}")
+            raise HTTPException(status_code=500, detail=f"Ошибка БД: {str(e)}")
     return {"ok": True}
 
 @app.put("/api/staff/{staff_id}/password")
