@@ -4775,9 +4775,10 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         "location":      order.location,
         "location_address": order.location_address,
     })
+    lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
     if lead:
         await db.add_lead_call(lead["id"], None, action="created",
-                               note=f"Лид создан с сайта ({lead.get('lead_code','')})")
+                               note=f"Лид создан с сайта ({lead_code})")
 
     site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
     asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
@@ -4826,6 +4827,7 @@ async def request_callback(req: CallbackRequest, user=Depends(get_optional_user)
         "created_by":   None,
         "volunteer_id": None,
     })
+    lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
     if lead:
         await db.add_lead_call(lead["id"], None, action="created",
                                note=f"Обратный звонок с сайта ({lead_code})")
