@@ -3389,27 +3389,122 @@ async def _send_tg_cash(chat_id, text: str, photo_bytes: bytes = None, filename:
 
 @app.post("/api/tg/webhook")
 async def tg_webhook(request: Request):
-    """Обработчик callback-кнопок от Telegram."""
+    """Единый обработчик всех callback-кнопок Telegram (take_lead, chk:, accept_, reject_)."""
     try:
         data = await request.json()
     except Exception:
         return {"ok": True}
+
+    # ── Обычные сообщения (text / contact) ──────────────────────────
+    msg = data.get("message") or data.get("edited_message")
+    if msg:
+        chat_id_msg  = msg.get("chat", {}).get("id")
+        tg_uid_msg   = msg.get("from", {}).get("id")
+        text_msg     = (msg.get("text") or "").strip()
+        contact      = msg.get("contact")
+        if text_msg == "/start" and chat_id_msg:
+            await _tg_send_reply_keyboard(
+                chat_id_msg,
+                "👋 <b>Добро пожаловать в ARTEZ!</b>\n\n"
+                "Нажмите кнопку ниже, чтобы привязать ваш номер телефона.\n"
+                "После этого при регистрации на сайте вы сможете получить код подтверждения через Telegram."
+            )
+            return {"ok": True}
+        if contact and tg_uid_msg and chat_id_msg:
+            phone_raw = contact.get("phone_number", "")
+            phone = phone_raw if phone_raw.startswith("+") else "+" + phone_raw
+            owner_tg = contact.get("user_id")
+            if owner_tg and int(owner_tg) != int(tg_uid_msg):
+                await _tg_remove_keyboard(chat_id_msg, "❌ Пожалуйста, поделитесь <b>своим</b> номером.")
+                return {"ok": True}
+            await db.save_tg_phone_link(phone, int(tg_uid_msg))
+            await _tg_remove_keyboard(
+                chat_id_msg,
+                f"✅ <b>Номер привязан!</b>\n\n"
+                f"📱 <code>{phone}</code>\n\n"
+                f"Теперь при регистрации на сайте ARTEZ вы можете выбрать "
+                f"«Получить код через Telegram»."
+            )
+            return {"ok": True}
+
     cq = data.get("callback_query")
     if not cq:
         return {"ok": True}
-    cq_id    = cq["id"]
-    cb_data  = cq.get("data", "")
-    msg      = cq.get("message", {})
-    chat_id  = msg.get("chat", {}).get("id")
-    msg_id   = msg.get("message_id")
-    tg_user  = cq.get("from", {})
-    uname    = tg_user.get("username")
-    fname    = tg_user.get("first_name", "")
-    lname    = tg_user.get("last_name", "")
-    display  = f"@{uname}" if uname else " ".join(filter(None, [fname, lname])) or "кто-то"
+    cq_id      = cq["id"]
+    cb_data    = cq.get("data", "")
+    msg        = cq.get("message", {})
+    chat_id    = msg.get("chat", {}).get("id")
+    msg_id     = msg.get("message_id")
+    orig_text  = msg.get("text", "")
+    tg_user_id = cq["from"]["id"]
+    uname      = cq["from"].get("username")
+    fname      = cq["from"].get("first_name", "")
+    lname      = cq["from"].get("last_name", "")
+    display    = f"@{uname}" if uname else " ".join(filter(None, [fname, lname])) or "кто-то"
 
+    # ── Взять лид ─────────────────────────────────────────────────
+    if cb_data.startswith("take_lead_"):
+        try:
+            lead_id = int(cb_data.split("_")[2])
+        except (IndexError, ValueError):
+            await _tg_answer_callback(cq_id, "❌ Ошибка: неверный формат данных")
+            return {"ok": True}
+
+        staff = await db.get_staff_by_tg_id(tg_user_id)
+        if not staff:
+            await _tg_answer_callback(cq_id,
+                "❌ Ваш Telegram не привязан к аккаунту сотрудника ARTEZ.\n"
+                "Обратитесь к администратору.", alert=True)
+            return {"ok": True}
+        if staff.get("role") == "agent":
+            await _tg_answer_callback(cq_id,
+                "❌ Агенты не могут брать лиды через Telegram.\n"
+                "Лиды берут только сотрудники.", alert=True)
+            return {"ok": True}
+
+        staff_id   = staff["id"]
+        staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get("login","")
+        took_verb  = "Взяла" if staff.get("gender") == "F" else "Взял"
+
+        if not db.pool:
+            await _tg_answer_callback(cq_id, "❌ Ошибка базы данных", alert=True)
+            return {"ok": True}
+
+        async with db.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT assigned_to, lead_code FROM leads WHERE id=$1", lead_id)
+            if not row:
+                await _tg_answer_callback(cq_id, "❌ Лид не найден", alert=True)
+                return {"ok": True}
+
+            if row["assigned_to"] and row["assigned_to"] != staff_id:
+                taker = await db.get_staff_by_id(row["assigned_to"])
+                taker_name = ""
+                taker_verb = "Взяла" if taker and taker.get("gender") == "F" else "Взял"
+                if taker:
+                    taker_name = f"{taker.get('first_name','')} {taker.get('last_name','')}".strip()
+                await _tg_answer_callback(cq_id,
+                    f"❌ Лид уже взят: {taker_name or 'другой сотрудник'}", alert=True)
+                new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {taker_verb}: {taker_name or 'другой сотрудник'}"
+                await _tg_edit_message(chat_id, msg_id, new_text)
+                return {"ok": True}
+
+            if row["assigned_to"] == staff_id:
+                await _tg_answer_callback(cq_id, "✅ Этот лид уже ваш!")
+                return {"ok": True}
+
+            await conn.execute(
+                "UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
+
+        await db.add_lead_call(lead_id, staff_id, action="note",
+                               note=f"Лид взят через Telegram: {staff_name}")
+        await _tg_answer_callback(cq_id, "✅ Лид взят! Откройте приложение.")
+        new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {took_verb}: {staff_name}"
+        await _tg_edit_message(chat_id, msg_id, new_text)
+        return {"ok": True}
+
+    # ── Проверка оплаты (chk:) ─────────────────────────────────────
     if cb_data.startswith("chk:"):
-        # chk:g:ORDER_ID или chk:r:ORDER_ID
         parts  = cb_data.split(":")
         color  = parts[1] if len(parts) > 1 else "g"
         icon   = "🟢" if color == "g" else "🔴"
@@ -3424,6 +3519,7 @@ async def tg_webhook(request: Request):
                              timeout=aiohttp.ClientTimeout(total=5))
         except Exception as e:
             logging.warning(f"webhook callback error: {e}")
+
     return {"ok": True}
 
 
