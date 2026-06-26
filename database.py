@@ -611,6 +611,13 @@ async def create_tables():
         ON CONFLICT (branch) DO NOTHING;
         """)
 
+    # ── Шаг 13: источник и tg_id клиента в лидах ───────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE leads ADD COLUMN IF NOT EXISTS source       VARCHAR(20) DEFAULT 'staff';
+        ALTER TABLE leads ADD COLUMN IF NOT EXISTS client_tg_id BIGINT DEFAULT NULL;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1234,14 +1241,16 @@ async def create_lead(data: dict) -> dict:
         row = await conn.fetchrow("""
             INSERT INTO leads (client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
-                               created_by, volunteer_id, location, location_address)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                               created_by, volunteer_id, location, location_address,
+                               source, client_tg_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
             RETURNING *
         """, data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
-            data.get("volunteer_id"), data.get("location"), data.get("location_address"))
+            data.get("volunteer_id"), data.get("location"), data.get("location_address"),
+            data.get("source", "staff"), data.get("client_tg_id"))
         rid      = row["id"]
         lead_num = f"LEAD-{rid:04d}"
         lead_code = f"L-{rid:04d}"

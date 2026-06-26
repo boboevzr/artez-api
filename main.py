@@ -369,14 +369,17 @@ async def _notify_new_lead(lead: dict, staff: dict):
     role    = staff.get("role", "")
     if role == "agent":   source = "🤝 Агент"
     elif role == "site":  source = "🌐 Сайт"
+    elif role == "bot":   source = "✈️ Telegram"
     else:                 source = "👤 Сотрудник"
     creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "—")
 
-    # source_full: для агентов/сотрудников добавляем имя, для сайта — только иконка
+    # source_full: для агентов/сотрудников добавляем имя, для сайта/бота — только иконка
     if role == "agent":
         source_full = f"🤝 {creator}" if creator and creator != "—" else "🤝 Агент"
     elif role == "site":
         source_full = "🌐 Сайт"
+    elif role == "bot":
+        source_full = "✈️ Telegram"
     else:
         source_full = f"👤 {creator}" if creator and creator != "—" else "👤 Сотрудник"
 
@@ -526,6 +529,8 @@ class OrderRequest(BaseModel):
     pickup_time: str = ""
     is_quick: bool = False
     total_price: int | None = None
+    source: str = "site"  # "site" or "bot"
+    client_tg_id: int | None = None
 
     @field_validator("phone")
     @classmethod
@@ -545,9 +550,7 @@ class OrderRequest(BaseModel):
     @field_validator("address")
     @classmethod
     def validate_address(cls, v):
-        if not v.strip():
-            raise ValueError("Укажите адрес")
-        return v.strip()
+        return v.strip()  # allow empty for quick/bot orders
 
 
 class StaffOrderRequest(BaseModel):
@@ -1175,6 +1178,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     agent_id = req.volunteer_id
     if role == "agent" and not agent_id:
         agent_id = creator_id
+    lead_source = "agent" if role == "agent" else "staff"
     lead = await db.create_lead({
         "client_name": req.client_name,
         "client_phone": req.client_phone, "service": req.service,
@@ -1183,6 +1187,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
         "assigned_to": req.assigned_to, "created_by": creator_id,
         "volunteer_id": agent_id,
         "location": req.location, "location_address": req.location_address,
+        "source": lead_source,
     })
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
@@ -4760,6 +4765,7 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     if agent_staff and agent_staff.get("role") == "agent" and agent_staff.get("active"):
         volunteer_id = agent_staff["id"]
 
+    lead_source = order.source if order.source in ("site", "bot") else "site"
     lead = await db.create_lead({
         "client_name":   full_name,
         "client_phone":  order.phone,
@@ -4774,14 +4780,18 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         "volunteer_id":  volunteer_id,
         "location":      order.location,
         "location_address": order.location_address,
+        "source":        lead_source,
+        "client_tg_id":  order.client_tg_id,
     })
     lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
     if lead:
+        src_label = "Telegram-бот" if lead_source == "bot" else "сайта"
         await db.add_lead_call(lead["id"], None, action="created",
-                               note=f"Лид создан с сайта ({lead_code})")
+                               note=f"Лид создан с {src_label} ({lead_code})")
 
-    site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
-    asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
+    creator_role = lead_source if lead_source in ("site", "bot") else "site"
+    creator_staff = {"role": creator_role, "first_name": "Сайт" if creator_role == "site" else "Telegram", "last_name": "", "login": creator_role}
+    asyncio.create_task(_notify_new_lead(lead or {}, creator_staff))
     await notify_sheets_new_order(lead_code, order)
 
     await db.upsert_crm_client(
@@ -4793,6 +4803,82 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     await db.refresh_crm_client_stats(order.phone)
 
     return {"ok": True, "order_num": lead_code}
+
+
+class BotLeadRequest(BaseModel):
+    client_name: str
+    client_phone: str
+    branch: str = ""
+    city: str = ""
+    address: str = ""
+    service: str = ""
+    service_type: str = ""
+    pickup_date: str = ""
+    pickup_time: str = ""
+    note: str = ""
+    location: str = ""
+    location_address: str = ""
+    client_tg_id: int | None = None
+    is_quick: bool = False
+
+    @field_validator("client_phone")
+    @classmethod
+    def validate_phone(cls, v):
+        v = normalize_phone(v)
+        if not PHONE_RE.match(v):
+            raise ValueError("Неверный формат номера. Используйте +998XXXXXXXXX")
+        return v
+
+@app.post("/api/bot/lead")
+async def create_bot_lead(req: BotLeadRequest, x_bot_token: str = Header(None, alias="X-Bot-Token")):
+    """Заявка из Telegram-бота → лид."""
+    if not BOT_TOKEN or x_bot_token != BOT_TOKEN:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+
+    note_parts = []
+    if req.is_quick:        note_parts.append("Быстрая заявка (бот)")
+    if req.service_type:    note_parts.append(f"Тип: {req.service_type}")
+    if req.pickup_date:     note_parts.append(f"Дата: {req.pickup_date}")
+    if req.pickup_time:     note_parts.append(f"Время: {req.pickup_time}")
+    if req.note:            note_parts.append(req.note)
+    note = " · ".join(note_parts) if note_parts else None
+
+    lead = await db.create_lead({
+        "client_name":     req.client_name,
+        "client_phone":    req.client_phone,
+        "service":         req.service,
+        "branch":          req.branch,
+        "city":            req.city,
+        "address":         req.address,
+        "short_address":   req.address,
+        "note":            note,
+        "status":          "new",
+        "created_by":      None,
+        "volunteer_id":    None,
+        "location":        req.location,
+        "location_address": req.location_address,
+        "source":          "bot",
+        "client_tg_id":    req.client_tg_id,
+    })
+    lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
+    if lead:
+        await db.add_lead_call(lead["id"], None, action="created",
+                               note=f"Лид создан через Telegram-бот ({lead_code})")
+
+    bot_staff = {"role": "bot", "first_name": "Telegram", "last_name": "", "login": "bot"}
+    asyncio.create_task(_notify_new_lead(lead or {}, bot_staff))
+
+    if req.client_phone:
+        await db.upsert_crm_client(
+            phone=req.client_phone,
+            first_name=req.client_name,
+            last_name="",
+            tg_id=req.client_tg_id,
+            source="bot",
+        )
+        await db.refresh_crm_client_stats(req.client_phone)
+
+    return {"ok": True, "lead_code": lead_code, "lead_id": (lead or {}).get("id")}
 
 
 class CallbackRequest(BaseModel):
