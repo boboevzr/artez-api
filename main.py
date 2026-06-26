@@ -2501,7 +2501,7 @@ async def agent_status(user=Depends(get_current_user)):
     return {"ok": True, "is_agent": False}
 
 @app.post("/api/agent/apply")
-async def agent_apply(req: AgentApplyRequest = Body(default_factory=AgentApplyRequest), user=Depends(get_current_user)):
+async def agent_apply(req: AgentApplyRequest, user=Depends(get_current_user)):
     """Пользователь сайта регистрируется как агент.
     Ищет клиента бота по clients.tg_phone = users.phone.
     Если не найден — возвращает needs_bot=True (нужно написать боту).
