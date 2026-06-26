@@ -2852,10 +2852,7 @@ async def _notify_new_site_user(first_name: str, phone: str, method: str):
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     method_icon = "✈️ Telegram" if method == "tg" else "📱 SMS"
     text = (
-        f"👤 <b>Новый пользователь сайта!</b>\n\n"
-        f"Имя: <b>{first_name}</b>\n"
-        f"📱 Номер: <code>{phone}</code>\n"
-        f"🔐 Регистрация: {method_icon}\n"
+        f"👤 {first_name}, 📞 <code>{phone}</code>, 🔐 {method_icon}, 🌐\n"
         f"📅 {now}"
     )
     targets = []
