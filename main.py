@@ -372,6 +372,14 @@ async def _notify_new_lead(lead: dict, staff: dict):
     else:                 source = "👤 Сотрудник"
     creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "—")
 
+    # source_full: для агентов/сотрудников добавляем имя, для сайта — только иконка
+    if role == "agent":
+        source_full = f"🤝 {creator}" if creator and creator != "—" else "🤝 Агент"
+    elif role == "site":
+        source_full = "🌐 Сайт"
+    else:
+        source_full = f"👤 {creator}" if creator and creator != "—" else "👤 Сотрудник"
+
     loc = (lead.get("location") or "").strip()
     if loc:
         parts = loc.split(",")
@@ -384,13 +392,23 @@ async def _notify_new_lead(lead: dict, staff: dict):
     else:
         location_link = ""
 
+    note_full = lead.get("note") or ""
+    # note_short: первый сегмент заметки (до " · "), убираем префикс "Тип: "
+    note_first = note_full.split(" · ")[0] if note_full else ""
+    if note_first.startswith("Тип: "):
+        note_first = note_first[5:]
+    note_inline = f" · {note_first}" if note_first else ""
+
     vars_ = {
         "lead_code":     lead.get("lead_code") or f"#{lead.get('id')}",
         "client_name":   lead.get("client_name") or "—",
         "client_phone":  lead.get("client_phone") or "—",
         "branch":        branch_ru(branch) if branch else "—",
-        "note":          lead.get("note") or "—",
+        "note":          note_full or "—",
+        "note_short":    note_first,
+        "note_inline":   note_inline,
         "source":        source,
+        "source_full":   source_full,
         "creator":       creator,
         "location_link": location_link,
     }
@@ -4471,21 +4489,16 @@ SITE_SETTINGS_DEFAULTS = {
     "leads_group_navoi":       "",
     "leads_group_enabled": "0",
     "lead_notify_ru": (
-        "🎯 Новый лид {lead_code}\n\n"
-        "👤 {client_name}\n"
-        "📞 {client_phone}\n"
-        "🏢 {branch}\n"
-        "💬 {note}\n"
-        "📍 {location_link}\n\n"
-        "📌 {source}: {creator}"
+        "🎯 {lead_code} · {source_full}\n"
+        "👤 {client_name}  📞 {client_phone}\n"
+        "🏢 {branch}{note_inline}\n"
+        "{location_link}"
     ),
     "lead_notify_uz": (
-        "🎯 Yangi lid {lead_code}\n\n"
-        "👤 {client_name}\n"
-        "📞 {client_phone}\n"
-        "🏢 Filial: {branch}\n"
-        "💬 {note}\n\n"
-        "📌 {source}: {creator}"
+        "🎯 {lead_code} · {source_full}\n"
+        "👤 {client_name}  📞 {client_phone}\n"
+        "🏢 {branch}{note_inline}\n"
+        "{location_link}"
     ),
     "callback_overdue_minutes": "10",
 }
