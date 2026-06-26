@@ -1061,12 +1061,8 @@ async def get_admin_orders(status: str = None, limit: int = 50):
         q = """
             SELECT o.*,
                    COALESCE(i.cnt, 0)::int AS item_count,
-                   COALESCE(i.corr, 0)::int AS corrected_count,
-                   s.first_name AS creator_first_name,
-                   s.last_name  AS creator_last_name,
-                   s.login      AS creator_login
+                   COALESCE(i.corr, 0)::int AS corrected_count
             FROM orders o
-            LEFT JOIN staff s ON s.id = o.created_by
             LEFT JOIN (
                 SELECT order_id, COUNT(*) AS cnt,
                        COUNT(*) FILTER (WHERE measure_status='corrected') AS corr
