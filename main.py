@@ -1132,6 +1132,7 @@ class LeadCreateRequest(BaseModel):
     volunteer_id: int | None = None
     location: str | None = None
     location_address: str | None = None
+    notify_group: bool = True
 
 @app.get("/api/staff/search")
 async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)):
@@ -1185,7 +1186,15 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
                                note=f"Лид создан ({lead_code})")
-        asyncio.create_task(_notify_new_lead(lead, staff))
+        if req.notify_group:
+            asyncio.create_task(_notify_new_lead(lead, staff))
+        elif creator_id:
+            # Взять себе: назначаем на создателя, не отправляем в ТГ
+            async with db.pool.acquire() as _conn:
+                await _conn.execute(
+                    "UPDATE leads SET assigned_to=$1 WHERE id=$2", creator_id, lead["id"])
+            await db.add_lead_call(lead["id"], creator_id, action="note",
+                                   note="Лид взят создателем")
     return {"ok": True, "lead": lead}
 
 @app.get("/api/staff/leads")
@@ -3446,61 +3455,64 @@ async def tg_webhook(request: Request):
     if cb_data.startswith("take_lead_"):
         try:
             lead_id = int(cb_data.split("_")[2])
-        except (IndexError, ValueError):
-            await _tg_answer_callback(cq_id, "❌ Ошибка: неверный формат данных")
-            return {"ok": True}
 
-        staff = await db.get_staff_by_tg_id(tg_user_id)
-        if not staff:
-            await _tg_answer_callback(cq_id,
-                "❌ Ваш Telegram не привязан к аккаунту сотрудника ARTEZ.\n"
-                "Обратитесь к администратору.", alert=True)
-            return {"ok": True}
-        if staff.get("role") == "agent":
-            await _tg_answer_callback(cq_id,
-                "❌ Агенты не могут брать лиды через Telegram.\n"
-                "Лиды берут только сотрудники.", alert=True)
-            return {"ok": True}
-
-        staff_id   = staff["id"]
-        staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get("login","")
-        took_verb  = "Взяла" if staff.get("gender") == "F" else "Взял"
-
-        if not db.pool:
-            await _tg_answer_callback(cq_id, "❌ Ошибка базы данных", alert=True)
-            return {"ok": True}
-
-        async with db.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT assigned_to, lead_code FROM leads WHERE id=$1", lead_id)
-            if not row:
-                await _tg_answer_callback(cq_id, "❌ Лид не найден", alert=True)
+            if not db.pool:
+                await _tg_answer_callback(cq_id, "❌ Ошибка базы данных", alert=True)
                 return {"ok": True}
 
-            if row["assigned_to"] and row["assigned_to"] != staff_id:
-                taker = await db.get_staff_by_id(row["assigned_to"])
-                taker_name = ""
-                taker_verb = "Взяла" if taker and taker.get("gender") == "F" else "Взял"
-                if taker:
-                    taker_name = f"{taker.get('first_name','')} {taker.get('last_name','')}".strip()
+            staff = await db.get_staff_by_tg_id(tg_user_id)
+            if not staff:
                 await _tg_answer_callback(cq_id,
-                    f"❌ Лид уже взят: {taker_name or 'другой сотрудник'}", alert=True)
-                new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {taker_verb}: {taker_name or 'другой сотрудник'}"
-                await _tg_edit_message(chat_id, msg_id, new_text)
+                    "❌ Ваш Telegram не привязан к аккаунту сотрудника ARTEZ.\n"
+                    "Обратитесь к администратору.", alert=True)
+                return {"ok": True}
+            if staff.get("role") == "agent":
+                await _tg_answer_callback(cq_id,
+                    "❌ Агенты не могут брать лиды через Telegram.", alert=True)
                 return {"ok": True}
 
-            if row["assigned_to"] == staff_id:
-                await _tg_answer_callback(cq_id, "✅ Этот лид уже ваш!")
-                return {"ok": True}
+            staff_id   = staff["id"]
+            staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get("login","")
+            took_verb  = "Взяла" if staff.get("gender") == "F" else "Взял"
 
-            await conn.execute(
-                "UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
+            async with db.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT assigned_to, lead_code FROM leads WHERE id=$1", lead_id)
+                if not row:
+                    await _tg_answer_callback(cq_id, "❌ Лид не найден", alert=True)
+                    return {"ok": True}
 
-        await db.add_lead_call(lead_id, staff_id, action="note",
-                               note=f"Лид взят через Telegram: {staff_name}")
-        await _tg_answer_callback(cq_id, "✅ Лид взят! Откройте приложение.")
-        new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {took_verb}: {staff_name}"
-        await _tg_edit_message(chat_id, msg_id, new_text)
+                if row["assigned_to"] and row["assigned_to"] != staff_id:
+                    taker = await db.get_staff_by_id(row["assigned_to"])
+                    taker_name = ""
+                    taker_verb = "Взяла" if taker and taker.get("gender") == "F" else "Взял"
+                    if taker:
+                        taker_name = f"{taker.get('first_name','')} {taker.get('last_name','')}".strip()
+                    await _tg_answer_callback(cq_id,
+                        f"❌ Лид уже взят: {taker_name or 'другой сотрудник'}", alert=True)
+                    new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {taker_verb}: {taker_name or 'другой сотрудник'}"
+                    await _tg_edit_message(chat_id, msg_id, new_text)
+                    return {"ok": True}
+
+                if row["assigned_to"] == staff_id:
+                    await _tg_answer_callback(cq_id, "✅ Этот лид уже ваш!")
+                    return {"ok": True}
+
+                await conn.execute(
+                    "UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
+
+            await db.add_lead_call(lead_id, staff_id, action="note",
+                                   note=f"Лид взят через Telegram: {staff_name}")
+            await _tg_answer_callback(cq_id, "✅ Лид взят! Откройте приложение.")
+            new_text = orig_text.rstrip("━━━━━━━━━━").rstrip() + f"\n━━━━━━━━━━\n✅ {took_verb}: {staff_name}"
+            await _tg_edit_message(chat_id, msg_id, new_text)
+
+        except Exception as e:
+            logging.warning(f"take_lead handler error: {e}")
+            try:
+                await _tg_answer_callback(cq_id, "❌ Ошибка сервера. Попробуйте ещё раз.", alert=True)
+            except Exception:
+                pass
         return {"ok": True}
 
     # ── Проверка оплаты (chk:) ─────────────────────────────────────
