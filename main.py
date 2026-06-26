@@ -4628,7 +4628,6 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     if order.pickup_date:  note_parts.append(f"Дата: {order.pickup_date}")
     if order.pickup_time:  note_parts.append(f"Время: {order.pickup_time}")
     if order.is_quick:     note_parts.append("Быстрая заявка")
-    if order.total_price:  note_parts.append(f"Расчёт: {order.total_price:,} сум")
     note = " · ".join(note_parts) if note_parts else None
 
     # Определяем агента: сначала по авторизованному пользователю, затем по телефону
