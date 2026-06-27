@@ -260,13 +260,22 @@ async def _send_tg_with_kb(chat_id, text: str, keyboard: dict) -> int | None:
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
         async with aiohttp.ClientSession() as s:
-            r = await s.post(url, json={
-                "chat_id": str(chat_id), "text": text,
-                "reply_markup": keyboard,
-                "disable_web_page_preview": True,
-            }, timeout=aiohttp.ClientTimeout(total=8))
+            payload = {"chat_id": str(chat_id), "text": text,
+                       "reply_markup": keyboard, "disable_web_page_preview": True}
+            r = await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
             d = await r.json()
             if not d.get("ok"):
+                # Группа мигрировала в супергруппу — повторяем с новым ID
+                new_id = (d.get("parameters") or {}).get("migrate_to_chat_id")
+                if new_id:
+                    logging.info(f"_send_tg_with_kb: group migrated → {new_id}, retrying")
+                    payload["chat_id"] = str(new_id)
+                    r2 = await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
+                    d2 = await r2.json()
+                    if d2.get("ok"):
+                        return d2.get("result", {}).get("message_id")
+                    logging.warning(f"_send_tg_with_kb retry error: {d2.get('description')}")
+                    return None
                 logging.warning(f"_send_tg_with_kb TG error: {d.get('description')}")
                 return None
             return d.get("result", {}).get("message_id")
