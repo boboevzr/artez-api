@@ -2609,6 +2609,28 @@ async def update_route_stop(route_id: int, order_id: int, data: dict) -> bool:
             route_id, order_id, *fields.values())
         return True
 
+async def get_channel_msg_for_order(order_id: int):
+    """Возвращает (branch, channel_msg_id) для обновления кнопок в канале."""
+    if not pool: return None, None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT r.branch, r.tg_delivery_msg_ids
+            FROM route_orders ro
+            JOIN routes r ON r.id = ro.route_id
+            WHERE ro.order_id = $1
+            ORDER BY ro.id DESC LIMIT 1
+        """, order_id)
+    if not row: return None, None
+    raw = row["tg_delivery_msg_ids"]
+    if not raw: return row["branch"], None
+    import json as _j
+    try:
+        msg_ids = _j.loads(raw) if isinstance(raw, str) else raw
+        return row["branch"], msg_ids.get(str(order_id))
+    except Exception:
+        return row["branch"], None
+
+
 # ── Касса / наличные ──────────────────────────────────────────────────────────
 
 async def get_cashiers() -> list:
