@@ -253,7 +253,7 @@ async def send_tg(chat_id, text: str):
         logging.warning(f"send_tg error: {e}")
 
 
-async def _send_tg_with_kb(chat_id, text: str, keyboard: dict) -> int | None:
+async def _send_tg_with_kb(chat_id, text: str, keyboard: dict, parse_mode: str | None = "HTML") -> int | None:
     """Отправить сообщение с inline-клавиатурой, вернуть message_id."""
     if not BOT_TOKEN or not chat_id:
         return None
@@ -262,6 +262,7 @@ async def _send_tg_with_kb(chat_id, text: str, keyboard: dict) -> int | None:
         async with aiohttp.ClientSession() as s:
             payload = {"chat_id": str(chat_id), "text": text,
                        "reply_markup": keyboard, "disable_web_page_preview": True}
+            if parse_mode: payload["parse_mode"] = parse_mode
             r = await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
             d = await r.json()
             if not d.get("ok"):
@@ -1189,7 +1190,10 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
     )
 
 def _build_stop_text_short(stop: dict, num: int) -> str:
-    """Компактный формат сообщения для группы водителей."""
+    """Компактный HTML-формат сообщения для группы водителей."""
+    import html as _html
+    def h(s): return _html.escape(str(s)) if s else ""
+
     order_num = (stop.get("order_num", "") or "").replace("ARTEZ-", "")
     addr  = stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
     first = (stop.get("client_first_name") or "").strip()
@@ -1197,11 +1201,16 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
     client = f"{first} {last}".strip() or "—"
     phone  = stop.get("client_phone", "") or ""
     loc    = _parse_loc_str(stop.get("location"))
-    lines  = [f"📦 #{num} · {order_num}   📍 {addr}"]
-    contact = f"👤 {client}"
-    if phone: contact += f"   📞 {phone}"
-    lines.append(contact)
-    if loc: lines.append(f"🗺 https://maps.google.com/?q={loc[0]},{loc[1]}")
+
+    if loc:
+        yandex = f"https://yandex.com/maps/?rtext=~{loc[0]},{loc[1]}&rtt=auto"
+        addr_part = f'📍 <a href="{yandex}">{h(addr)}</a>'
+    else:
+        addr_part = f"📍 {h(addr)}"
+
+    lines = [f"📦 #{num} · {h(order_num)}   {addr_part}",
+             f"👤 {h(client)}"]
+    if phone: lines.append(f"📞 {h(phone)}")
     return "\n".join(lines)
 
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
