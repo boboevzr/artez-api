@@ -4976,6 +4976,7 @@ async def get_site_settings():
         "contact_zarafshan_1", "contact_zarafshan_2", "contact_zarafshan_telegram", "contact_zarafshan_admin_tg", "contact_zarafshan_whatsapp", "contact_zarafshan_instagram",
         "contact_navoi_1", "contact_navoi_2", "contact_navoi_telegram", "contact_navoi_admin_tg", "contact_navoi_whatsapp", "contact_navoi_instagram",
         "yandex_maps_key",
+        "branch_zarafshan_location", "branch_navoi_location",
         "osago_partner_phone", "osago_partner_promo",
     ]
     result = {}
