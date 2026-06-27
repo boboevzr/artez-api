@@ -1188,6 +1188,22 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
         status=status,
     )
 
+def _build_stop_text_short(stop: dict, num: int) -> str:
+    """Компактный формат сообщения для группы водителей."""
+    order_num = (stop.get("order_num", "") or "").replace("ARTEZ-", "")
+    addr  = stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
+    first = (stop.get("client_first_name") or "").strip()
+    last  = (stop.get("client_last_name")  or "").strip()
+    client = f"{first} {last}".strip() or "—"
+    phone  = stop.get("client_phone", "") or ""
+    loc    = _parse_loc_str(stop.get("location"))
+    lines  = [f"📦 #{num} · {order_num}   📍 {addr}"]
+    contact = f"👤 {client}"
+    if phone: contact += f"   📞 {phone}"
+    lines.append(contact)
+    if loc: lines.append(f"🗺 https://maps.google.com/?q={loc[0]},{loc[1]}")
+    return "\n".join(lines)
+
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
 async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_staff)):
     route = await db.get_route(route_id)
@@ -1198,16 +1214,6 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     group_id = int(group_id_str) if group_id_str else 0
     if not group_id:
         raise HTTPException(400, "Группа водителей не настроена (Настройки → Telegram → Водители)")
-
-    template = await _get_cfg("delivery_group_template") or (
-        "🚗 {route_name} · {route_type} · {branch}\n"
-        "📅 {date}\n\n"
-        "📦 #{num} {order_num} — {client}\n"
-        "📍 {address}\n"
-        "{phone}"
-        "{map_link}"
-        "📌 Статус: {status}"
-    )
 
     stops = route.get("stops", [])
     if not stops:
@@ -1229,44 +1235,57 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
                         json={"chat_id": str(group_id), "message_id": int(msg_id_str)},
                         timeout=aiohttp.ClientTimeout(total=4))
                 except Exception:
-                    pass  # старше 48ч — молча пропускаем
+                    pass
 
-    sent = 0
+    # Заголовок
+    branch_label = {"zarafshan": "Зарафшан", "navoi": "Навои"}.get(route.get("branch", ""), route.get("branch", ""))
+    type_label   = {"pickup": "📥 Забор", "delivery": "📤 Доставка", "mixed": "🔄 Смешанный"}.get(route.get("type", ""), "")
+    route_date   = str(route.get("date", ""))
+    header_text  = (
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🚗 {route.get('name', '')} — {type_label} — {branch_label}\n"
+        f"📅 {route_date}   Точек: {len(stops)}\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
     new_msg_ids: dict = {}
     tg_error = None
+
+    # Отправляем заголовок
+    hdr_id = await _send_tg_with_kb(group_id, header_text, {"inline_keyboard": []})
+    if hdr_id:
+        new_msg_ids["__header__"] = hdr_id
+    elif tg_error is None:
+        tg_error = "Не удалось отправить заголовок"
+
+    sent = 0
     for i, s in enumerate(stops, 1):
-        text = _build_stop_text(route, s, i, template)
+        text     = _build_stop_text_short(s, i)
         order_id = s.get("order_id") or s.get("id")
         status   = s.get("order_status", "confirmed")
-        kb = _route_pickup_kb(order_id, status)
-        msg_id = await _send_tg_with_kb(group_id, text, kb)
+        kb       = _route_pickup_kb(order_id, status)
+        msg_id   = await _send_tg_with_kb(group_id, text, kb)
         if msg_id:
             sent += 1
             new_msg_ids[str(order_id)] = msg_id
         elif tg_error is None:
-            try:
-                async with aiohttp.ClientSession() as sess:
-                    r = await sess.post(
-                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                        json={"chat_id": str(group_id), "text": "test", "disable_notification": True},
-                        timeout=aiohttp.ClientTimeout(total=5))
-                    d = await r.json()
-                    if not d.get("ok"):
-                        tg_error = d.get("description", "Telegram error")
-            except Exception:
-                tg_error = "Нет ответа от Telegram"
+            tg_error = "Ошибка отправки остановки"
+
+    # Подвал
+    footer_text = f"━━━━━━━━━━━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)} отправлено\n━━━━━━━━━━━━━━━━━━━━"
+    ftr_id = await _send_tg_with_kb(group_id, footer_text, {"inline_keyboard": []})
+    if ftr_id:
+        new_msg_ids["__footer__"] = ftr_id
 
     if sent == 0 and tg_error:
         logging.error(f"send-to-delivery-group failed: {tg_error}")
         raise HTTPException(400, f"Telegram: {tg_error}")
 
-    # Сохраняем новые message_id в маршрут
     if new_msg_ids and db.pool:
-        import json as _json_mod
         async with db.pool.acquire() as conn:
             await conn.execute(
                 "UPDATE routes SET tg_delivery_msg_ids=$1 WHERE id=$2",
-                _json_mod.dumps(new_msg_ids), route_id)
+                _jmod.dumps(new_msg_ids), route_id)
 
     return {"ok": True, "sent": sent}
 
