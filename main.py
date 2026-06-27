@@ -3370,19 +3370,24 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
     # ── Обновить кнопки в канале водителей ───────────────────────────────────
     try:
         branch, ch_msg_id = await db.get_channel_msg_for_order(order_id)
-        if ch_msg_id and branch and BOT_TOKEN:
+        logging.info(f"[channel_kb] order={order_id} status={status} branch={branch!r} msg_id={ch_msg_id}")
+        if ch_msg_id and BOT_TOKEN:
             ch_key = "delivery_channel_navoi_id" if branch == "navoi" else "delivery_channel_zarafshan_id"
             ch_id_str = await _get_cfg(ch_key)
+            logging.info(f"[channel_kb] ch_key={ch_key} ch_id={ch_id_str!r}")
             if ch_id_str:
                 new_kb = _route_pickup_kb(order_id, status)
                 async with aiohttp.ClientSession() as _sess:
-                    await _sess.post(
+                    resp = await _sess.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
                         json={"chat_id": ch_id_str, "message_id": int(ch_msg_id),
                               "reply_markup": new_kb},
                         timeout=aiohttp.ClientTimeout(total=5))
+                    resp_json = await resp.json()
+                    if not resp_json.get("ok"):
+                        logging.warning(f"[channel_kb] TG error: {resp_json}")
     except Exception as e:
-        logging.warning(f"channel kb update failed for order {order_id}: {e}")
+        logging.warning(f"[channel_kb] failed order={order_id}: {e}", exc_info=True)
 
     return {"ok": True, "order": order}
 
