@@ -1318,7 +1318,10 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
             )
         except Exception:
             notify = f"🚗 {route_name}-{len(stops)} — {type_emoji} {type_label} · {date_short} {time_str}"
-        await _send_tg_with_kb(group_id, notify, {"inline_keyboard": []}, parse_mode=None)
+        ch_link_key = "delivery_channel_navoi_link" if branch == "navoi" else "delivery_channel_zarafshan_link"
+        ch_link = await _get_cfg(ch_link_key)
+        notify_kb = {"inline_keyboard": [[{"text": "↗️ Открыть канал", "url": ch_link}]]} if ch_link else {"inline_keyboard": []}
+        await _send_tg_with_kb(group_id, notify, notify_kb, parse_mode=None)
 
     if new_msg_ids and db.pool:
         async with db.pool.acquire() as conn:
@@ -4904,6 +4907,8 @@ SITE_SETTINGS_DEFAULTS = {
     "delivery_group_navoi_id":          GROUP_DELIVERY_NAVOI_ID,
     "delivery_channel_zarafshan_id":    GROUP_DELIVERY_ZARAFSHAN_CHANNEL,
     "delivery_channel_navoi_id":        GROUP_DELIVERY_NAVOI_CHANNEL,
+    "delivery_channel_zarafshan_link":  "https://t.me/+NmPO9-2PDYVlNzQy",
+    "delivery_channel_navoi_link":      "",
     "delivery_group_template": "🚗 {route_name}-{count} — {route_type} · {date} {time}",
     # Лиды — группы и шаблон уведомлений
     "leads_group_id":          LEADS_GROUP_ID,
@@ -4974,6 +4979,8 @@ class SiteSettings(BaseModel):
     delivery_group_navoi_id:          str | None = None
     delivery_channel_zarafshan_id:    str | None = None
     delivery_channel_navoi_id:        str | None = None
+    delivery_channel_zarafshan_link:  str | None = None
+    delivery_channel_navoi_link:      str | None = None
     delivery_group_template:          str | None = None
     tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
