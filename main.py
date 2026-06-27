@@ -1213,7 +1213,21 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     if not stops:
         raise HTTPException(400, "В маршруте нет заказов")
 
+    # Удаляем предыдущие сообщения если были
+    old_msg_ids: dict = route.get("tg_delivery_msg_ids") or {}
+    if old_msg_ids:
+        async with aiohttp.ClientSession() as sess:
+            for msg_id_str in old_msg_ids.values():
+                try:
+                    await sess.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                        json={"chat_id": str(group_id), "message_id": int(msg_id_str)},
+                        timeout=aiohttp.ClientTimeout(total=4))
+                except Exception:
+                    pass  # старше 48ч — молча пропускаем
+
     sent = 0
+    new_msg_ids: dict = {}
     tg_error = None
     for i, s in enumerate(stops, 1):
         text = _build_stop_text(route, s, i, template)
@@ -1223,8 +1237,8 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         msg_id = await _send_tg_with_kb(group_id, text, kb)
         if msg_id:
             sent += 1
+            new_msg_ids[str(order_id)] = msg_id
         elif tg_error is None:
-            # Попробуем получить причину ошибки
             try:
                 async with aiohttp.ClientSession() as sess:
                     r = await sess.post(
@@ -1240,6 +1254,14 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     if sent == 0 and tg_error:
         logging.error(f"send-to-delivery-group failed: {tg_error}")
         raise HTTPException(400, f"Telegram: {tg_error}")
+
+    # Сохраняем новые message_id в маршрут
+    if new_msg_ids and db.pool:
+        import json as _json_mod
+        async with db.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE routes SET tg_delivery_msg_ids=$1 WHERE id=$2",
+                _json_mod.dumps(new_msg_ids), route_id)
 
     return {"ok": True, "sent": sent}
 

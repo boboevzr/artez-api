@@ -204,6 +204,8 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS deadline DATE DEFAULT NULL",
         # Замеры: причина отклонения
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS reject_note TEXT DEFAULT NULL",
+        # Маршруты: хранить TG message_id отправленных сообщений водителям
+        "ALTER TABLE routes ADD COLUMN IF NOT EXISTS tg_delivery_msg_ids JSONB DEFAULT NULL",
         # Маршруты логистики
         """CREATE TABLE IF NOT EXISTS routes (
             id          SERIAL PRIMARY KEY,
