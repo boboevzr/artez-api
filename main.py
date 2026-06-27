@@ -39,7 +39,9 @@ GROUP_ID              = os.getenv("GROUP_ID", "")
 GROUP_ID_ZARAFSHAN    = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID        = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_NEW_CLIENTS_ID  = os.getenv("GROUP_NEW_CLIENTS_ID", "-1003768571929")
-GROUP_DELIVERY_ID     = os.getenv("GROUP_DELIVERY_ID", "-5434866533")
+GROUP_DELIVERY_ID            = os.getenv("GROUP_DELIVERY_ID", "-5434866533")
+GROUP_DELIVERY_ZARAFSHAN_ID  = os.getenv("GROUP_DELIVERY_ZARAFSHAN_ID", "-1004327266702")
+GROUP_DELIVERY_NAVOI_ID      = os.getenv("GROUP_DELIVERY_NAVOI_ID", "-1004327266702")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
 APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
@@ -1219,7 +1221,11 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     if not route:
         raise HTTPException(404, "Маршрут не найден")
 
-    group_id_str = await _get_cfg("delivery_group_id")
+    branch = route.get("branch", "")
+    if branch == "navoi":
+        group_id_str = await _get_cfg("delivery_group_navoi_id") or await _get_cfg("delivery_group_id")
+    else:
+        group_id_str = await _get_cfg("delivery_group_zarafshan_id") or await _get_cfg("delivery_group_id")
     group_id = int(group_id_str) if group_id_str else 0
     if not group_id:
         raise HTTPException(400, "Группа водителей не настроена (Настройки → Telegram → Водители)")
@@ -1247,14 +1253,17 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
                     pass
 
     # Заголовок
-    branch_label = {"zarafshan": "Зарафшан", "navoi": "Навои"}.get(route.get("branch", ""), route.get("branch", ""))
-    type_label   = {"pickup": "📥 Забор", "delivery": "📤 Доставка", "mixed": "🔄 Смешанный"}.get(route.get("type", ""), "")
-    route_date   = str(route.get("date", ""))
-    header_text  = (
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🚗 {route.get('name', '')} — {type_label} — {branch_label}\n"
-        f"📅 {route_date}   Точек: {len(stops)}\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    now_uz    = datetime.now(ZoneInfo("Asia/Tashkent"))
+    time_str  = now_uz.strftime("%H:%M:%S")
+    type_label = {"pickup": "📥 Забор", "delivery": "📤 Доставка", "mixed": "🔄 Смешанный"}.get(route.get("type", ""), "")
+    route_date = str(route.get("date", ""))
+    header_text = (
+        f"━━━━━━━━━━\n"
+        f"🚗 {route.get('name', '')}-{len(stops)} — {type_label}\n"
+        f"📅 {route_date}   {time_str}\n"
+        f"━━━━━━━━━━"
     )
 
     new_msg_ids: dict = {}
@@ -1281,7 +1290,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
             tg_error = "Ошибка отправки остановки"
 
     # Подвал
-    footer_text = f"━━━━━━━━━━━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)} отправлено\n━━━━━━━━━━━━━━━━━━━━"
+    footer_text = f"━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)}\n━━━━━━━━━━"
     ftr_id = await _send_tg_with_kb(group_id, footer_text, {"inline_keyboard": []})
     if ftr_id:
         new_msg_ids["__footer__"] = ftr_id
@@ -4869,7 +4878,9 @@ SITE_SETTINGS_DEFAULTS = {
     # Новые пользователи сайта — группа уведомлений
     "new_clients_group_id":    GROUP_NEW_CLIENTS_ID,
     # Группа водителей/доставщиков (маршруты)
-    "delivery_group_id":       GROUP_DELIVERY_ID,
+    "delivery_group_id":              GROUP_DELIVERY_ID,
+    "delivery_group_zarafshan_id":    GROUP_DELIVERY_ZARAFSHAN_ID,
+    "delivery_group_navoi_id":        GROUP_DELIVERY_NAVOI_ID,
     "delivery_group_template": (
         "🚗 {route_name} · {route_type} · {branch}\n"
         "📅 {date}\n\n"
@@ -4943,8 +4954,10 @@ class SiteSettings(BaseModel):
     contact_navoi_whatsapp:     str | None = None
     contact_navoi_instagram:    str | None = None
     branch_navoi_location:      str | None = None
-    delivery_group_id:          str | None = None
-    delivery_group_template:    str | None = None
+    delivery_group_id:              str | None = None
+    delivery_group_zarafshan_id:    str | None = None
+    delivery_group_navoi_id:        str | None = None
+    delivery_group_template:        str | None = None
     tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
     tg_group_zarafshan:  str | None = None
