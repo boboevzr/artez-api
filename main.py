@@ -1148,7 +1148,8 @@ def _route_pickup_kb(order_id: int, status: str) -> dict:
     h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
     if status == "confirmed":
         return {"inline_keyboard": [
-            [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"}],
+            [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
+             {"text": "⏭ Пропустить", "callback_data": f"rp:{order_id}:skip"}],
             [h],
         ]}
     elif status == "pickup":
