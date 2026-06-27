@@ -4565,12 +4565,14 @@ SITE_SETTINGS_DEFAULTS = {
     "contact_zarafshan_admin_tg":  "",
     "contact_zarafshan_whatsapp":  "",
     "contact_zarafshan_instagram": "",
+    "branch_zarafshan_location":   "",
     "contact_navoi_1":             "+998997500020",
     "contact_navoi_2":             "",
     "contact_navoi_telegram":      "",
     "contact_navoi_admin_tg":      "",
     "contact_navoi_whatsapp":      "",
     "contact_navoi_instagram":     "",
+    "branch_navoi_location":       "",
     # Telegram бот — fallback из env
     "tg_bot_token":        BOT_TOKEN,
     "tg_group_id":         GROUP_ID,
@@ -4649,12 +4651,14 @@ class SiteSettings(BaseModel):
     contact_zarafshan_admin_tg: str | None = None
     contact_zarafshan_whatsapp: str | None = None
     contact_zarafshan_instagram:str | None = None
+    branch_zarafshan_location:  str | None = None
     contact_navoi_1:            str | None = None
     contact_navoi_2:            str | None = None
     contact_navoi_telegram:     str | None = None
     contact_navoi_admin_tg:     str | None = None
     contact_navoi_whatsapp:     str | None = None
     contact_navoi_instagram:    str | None = None
+    branch_navoi_location:      str | None = None
     tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
     tg_group_zarafshan:  str | None = None
