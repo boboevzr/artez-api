@@ -1177,7 +1177,7 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
     )
 
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
-async def send_route_to_delivery_group(route_id: int, _=Depends(get_admin)):
+async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_staff)):
     route = await db.get_route(route_id)
     if not route:
         raise HTTPException(404, "Маршрут не найден")
