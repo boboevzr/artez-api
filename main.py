@@ -1250,20 +1250,23 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     route_date = str(route.get("date", ""))
     route_name = route.get("name", "")
 
-    # Удаляем предыдущие сообщения из канала
+    # Удаляем предыдущие сообщения (канал и группа)
     _raw = route.get("tg_delivery_msg_ids")
     if isinstance(_raw, str):
         try: _raw = _jmod.loads(_raw)
         except Exception: _raw = {}
     old_msg_ids: dict = _raw or {}
-    del_chat = channel_id or group_id
-    if old_msg_ids and del_chat:
+    if old_msg_ids:
         async with aiohttp.ClientSession() as sess:
-            for msg_id_str in old_msg_ids.values():
+            for key, msg_id_str in old_msg_ids.items():
+                # __group__ → удалять из группы, остальное → из канала
+                target = group_id if key == "__group__" else (channel_id or group_id)
+                if not target:
+                    continue
                 try:
                     await sess.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
-                        json={"chat_id": str(del_chat), "message_id": int(msg_id_str)},
+                        json={"chat_id": str(target), "message_id": int(msg_id_str)},
                         timeout=aiohttp.ClientTimeout(total=4))
                 except Exception:
                     pass
@@ -1321,7 +1324,9 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         ch_link_key = "delivery_channel_navoi_link" if branch == "navoi" else "delivery_channel_zarafshan_link"
         ch_link = await _get_cfg(ch_link_key)
         notify_kb = {"inline_keyboard": [[{"text": "↗️ Открыть канал", "url": ch_link}]]} if ch_link else {"inline_keyboard": []}
-        await _send_tg_with_kb(group_id, notify, notify_kb, parse_mode=None)
+        grp_msg_id = await _send_tg_with_kb(group_id, notify, notify_kb, parse_mode=None)
+        if grp_msg_id:
+            new_msg_ids["__group__"] = grp_msg_id
 
     if new_msg_ids and db.pool:
         async with db.pool.acquire() as conn:
