@@ -1214,7 +1214,12 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         raise HTTPException(400, "В маршруте нет заказов")
 
     # Удаляем предыдущие сообщения если были
-    old_msg_ids: dict = route.get("tg_delivery_msg_ids") or {}
+    import json as _jmod
+    _raw = route.get("tg_delivery_msg_ids")
+    if isinstance(_raw, str):
+        try: _raw = _jmod.loads(_raw)
+        except Exception: _raw = {}
+    old_msg_ids: dict = _raw or {}
     if old_msg_ids:
         async with aiohttp.ClientSession() as sess:
             for msg_id_str in old_msg_ids.values():
