@@ -39,6 +39,7 @@ GROUP_ID              = os.getenv("GROUP_ID", "")
 GROUP_ID_ZARAFSHAN    = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID        = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_NEW_CLIENTS_ID  = os.getenv("GROUP_NEW_CLIENTS_ID", "-1003768571929")
+GROUP_DELIVERY_ID     = os.getenv("GROUP_DELIVERY_ID", "-5434866533")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
 APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
@@ -251,6 +252,36 @@ async def send_tg(chat_id, text: str):
     except Exception as e:
         logging.warning(f"send_tg error: {e}")
 
+
+async def _send_tg_with_kb(chat_id, text: str, keyboard: dict) -> int | None:
+    """Отправить сообщение с inline-клавиатурой, вернуть message_id."""
+    if not BOT_TOKEN or not chat_id:
+        return None
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        async with aiohttp.ClientSession() as s:
+            r = await s.post(url, json={
+                "chat_id": str(chat_id), "text": text,
+                "parse_mode": "HTML", "reply_markup": keyboard,
+                "disable_web_page_preview": True,
+            }, timeout=aiohttp.ClientTimeout(total=8))
+            d = await r.json()
+            return d.get("result", {}).get("message_id")
+    except Exception as e:
+        logging.warning(f"_send_tg_with_kb error: {e}")
+        return None
+
+async def _edit_tg_with_kb(chat_id, message_id: int, text: str, keyboard: dict):
+    if not BOT_TOKEN: return
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id": str(chat_id), "message_id": message_id,
+                      "text": text, "parse_mode": "HTML",
+                      "reply_markup": keyboard, "disable_web_page_preview": True},
+                timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"_edit_tg_with_kb error: {e}")
 
 async def _tg_answer_callback(callback_query_id: str, text: str, alert: bool = False):
     if not BOT_TOKEN: return
@@ -1086,6 +1117,100 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
     text = "\n".join(lines)
     await send_tg(driver["tg_id"], text)
     return {"ok": True, "sent_to": driver["tg_id"]}
+
+
+_ORDER_STATUS_RU = {
+    "new": "Новый", "confirmed": "Подтверждён", "pickup": "Вывоз",
+    "received": "В мастерской", "washing": "Мойка", "drying": "Сушка",
+    "packing": "Упаковка", "ready": "Готов", "delivery": "Доставка",
+    "delivered": "Доставлен", "cancelled": "Отменён",
+}
+
+def _route_pickup_kb(order_id: int, status: str) -> dict:
+    """Inline-клавиатура для сообщения в группе водителей."""
+    if status == "confirmed":
+        return {"inline_keyboard": [[
+            {"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
+        ]]}
+    elif status == "pickup":
+        return {"inline_keyboard": [
+            [{"text": "🏭 Сдал в мастерскую", "callback_data": f"rp:{order_id}:deliver"}],
+            [{"text": "↩️ Не забирал (отменить)", "callback_data": f"rp:{order_id}:undo"}],
+        ]}
+    else:
+        return {"inline_keyboard": []}
+
+def _parse_loc_str(val: str | None):
+    if not val: return None
+    try:
+        import json as _j
+        j = _j.loads(val)
+        if j.get("lat") and j.get("lon"): return float(j["lat"]), float(j["lon"])
+    except Exception: pass
+    parts = str(val).split(",")
+    if len(parts) == 2:
+        try: return float(parts[0]), float(parts[1])
+        except Exception: pass
+    return None
+
+def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
+    branch_label = {"zarafshan": "Зарафшан", "navoi": "Навои"}.get(route.get("branch", ""), "")
+    type_label   = {"pickup": "📥 Забор", "delivery": "📤 Доставка", "mixed": "🔄 Смешанный"}.get(route.get("type", ""), "")
+    client = f"{stop.get('client_first_name', '')} {stop.get('client_last_name', '')}".strip() or "—"
+    addr   = stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
+    phone  = f"📞 {stop['client_phone']}\n" if stop.get("client_phone") else ""
+    loc    = _parse_loc_str(stop.get("location"))
+    map_link = f"🗺 https://maps.google.com/?q={loc[0]},{loc[1]}\n" if loc else ""
+    status = _ORDER_STATUS_RU.get(stop.get("order_status", ""), "—")
+    return template.format(
+        route_name=route.get("name", ""),
+        route_type=type_label,
+        branch=branch_label,
+        date=str(route.get("date", "")),
+        num=num,
+        order_num=stop.get("order_num", ""),
+        client=client,
+        address=addr,
+        phone=phone,
+        map_link=map_link,
+        status=status,
+    )
+
+@app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
+async def send_route_to_delivery_group(route_id: int, _=Depends(get_admin)):
+    route = await db.get_route(route_id)
+    if not route:
+        raise HTTPException(404, "Маршрут не найден")
+
+    group_id_str = await _get_cfg("delivery_group_id")
+    group_id = int(group_id_str) if group_id_str else 0
+    if not group_id:
+        raise HTTPException(400, "Группа водителей не настроена (Настройки → Telegram → Водители)")
+
+    template = await _get_cfg("delivery_group_template") or (
+        "🚗 {route_name} · {route_type} · {branch}\n"
+        "📅 {date}\n\n"
+        "📦 #{num} {order_num} — {client}\n"
+        "📍 {address}\n"
+        "{phone}"
+        "{map_link}"
+        "📌 Статус: {status}"
+    )
+
+    stops = route.get("stops", [])
+    if not stops:
+        raise HTTPException(400, "В маршруте нет заказов")
+
+    sent = 0
+    for i, s in enumerate(stops, 1):
+        text = _build_stop_text(route, s, i, template)
+        order_id = s.get("order_id") or s.get("id")
+        status   = s.get("order_status", "confirmed")
+        kb = _route_pickup_kb(order_id, status)
+        await _send_tg_with_kb(group_id, text, kb)
+        sent += 1
+
+    return {"ok": True, "sent": sent}
 
 
 @app.delete("/api/admin/staff/{staff_id}")
@@ -3517,6 +3642,68 @@ async def tg_webhook(request: Request):
                 pass
         return {"ok": True}
 
+    # ── Маршрут: забор/сдача (rp:) ────────────────────────────────
+    if cb_data.startswith("rp:"):
+        try:
+            parts   = cb_data.split(":")
+            order_id = int(parts[1])
+            action   = parts[2]  # take | undo | deliver
+
+            order_row = await db.get_order_by_id(order_id)
+            if not order_row:
+                await _tg_answer_callback(cq_id, "❌ Заказ не найден", alert=True)
+                return {"ok": True}
+
+            cur_status = order_row.get("status", "")
+
+            if action == "take":
+                if cur_status != "confirmed":
+                    await _tg_answer_callback(cq_id,
+                        f"ℹ️ Статус уже: {_ORDER_STATUS_RU.get(cur_status, cur_status)}", alert=False)
+                    return {"ok": True}
+                new_status = "pickup"
+                toast = "✅ Забрал — статус: Вывоз"
+
+            elif action == "undo":
+                if cur_status != "pickup":
+                    await _tg_answer_callback(cq_id,
+                        f"ℹ️ Статус уже: {_ORDER_STATUS_RU.get(cur_status, cur_status)}", alert=False)
+                    return {"ok": True}
+                new_status = "confirmed"
+                toast = "↩️ Отменено — статус: Подтверждён"
+
+            elif action == "deliver":
+                if cur_status != "pickup":
+                    await _tg_answer_callback(cq_id,
+                        f"ℹ️ Статус уже: {_ORDER_STATUS_RU.get(cur_status, cur_status)}", alert=False)
+                    return {"ok": True}
+                new_status = "received"
+                toast = "🏭 Сдан в мастерскую"
+
+            else:
+                return {"ok": True}
+
+            await db.update_order_status(order_id, new_status)
+
+            # Обновить клавиатуру сообщения
+            new_kb = _route_pickup_kb(order_id, new_status)
+            # Обновить текст: поменять строку статуса
+            new_text = orig_text
+            for old_s, new_s in _ORDER_STATUS_RU.items():
+                new_text = new_text.replace(f"📌 Статус: {_ORDER_STATUS_RU[old_s]}", f"📌 Статус: {_ORDER_STATUS_RU.get(new_status, new_status)}")
+            # Простая замена последней строки статуса
+            lines_t = orig_text.rsplit("📌 Статус:", 1)
+            if len(lines_t) == 2:
+                new_text = lines_t[0] + "📌 Статус: " + _ORDER_STATUS_RU.get(new_status, new_status)
+
+            await _edit_tg_with_kb(chat_id, msg_id, new_text, new_kb)
+            await _tg_answer_callback(cq_id, toast)
+
+        except Exception as e:
+            logging.warning(f"rp: callback error: {e}")
+            await _tg_answer_callback(cq_id, "❌ Ошибка сервера", alert=True)
+        return {"ok": True}
+
     # ── Проверка оплаты (chk:) ─────────────────────────────────────
     if cb_data.startswith("chk:"):
         parts  = cb_data.split(":")
@@ -4595,6 +4782,17 @@ SITE_SETTINGS_DEFAULTS = {
     "sheets_url":          SHEETS_URL,
     # Новые пользователи сайта — группа уведомлений
     "new_clients_group_id":    GROUP_NEW_CLIENTS_ID,
+    # Группа водителей/доставщиков (маршруты)
+    "delivery_group_id":       GROUP_DELIVERY_ID,
+    "delivery_group_template": (
+        "🚗 {route_name} · {route_type} · {branch}\n"
+        "📅 {date}\n\n"
+        "📦 #{num} {order_num} — {client}\n"
+        "📍 {address}\n"
+        "{phone}"
+        "{map_link}"
+        "📌 Статус: {status}"
+    ),
     # Лиды — группы и шаблон уведомлений
     "leads_group_id":          LEADS_GROUP_ID,
     "leads_group_zarafshan":   "",
@@ -4659,6 +4857,8 @@ class SiteSettings(BaseModel):
     contact_navoi_whatsapp:     str | None = None
     contact_navoi_instagram:    str | None = None
     branch_navoi_location:      str | None = None
+    delivery_group_id:          str | None = None
+    delivery_group_template:    str | None = None
     tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
     tg_group_zarafshan:  str | None = None
