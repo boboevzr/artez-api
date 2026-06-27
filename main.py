@@ -1194,7 +1194,7 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
     )
 
 def _build_stop_text_short(stop: dict, num: int) -> str:
-    """Компактный HTML-формат сообщения для группы водителей."""
+    """Компактный HTML-формат сообщения для канала водителей."""
     import html as _html
     def h(s): return _html.escape(str(s)) if s else ""
 
@@ -1208,14 +1208,14 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
 
     if loc:
         yandex = f"https://yandex.com/maps/?rtext=~{loc[0]},{loc[1]}&rtt=auto"
-        addr_part = f'📍 <a href="{yandex}">{h(addr)}</a>'
+        addr_part = f'📍<a href="{yandex}">{h(addr)}</a>'
     else:
-        addr_part = f"📍 {h(addr)}"
+        addr_part = f"📍{h(addr)}"
 
-    lines = [f"📦 #{num} · {h(order_num)}   {addr_part}",
-             f"👤 {h(client)}"]
-    if phone: lines.append(f"📞 {h(phone)}")
-    return "\n".join(lines)
+    contact = f"👤 {h(client)}"
+    if phone: contact += f" 📞{h(phone)}"
+
+    return f"📦 #{num}·{h(order_num)} {addr_part}\n{contact}"
 
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
 async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_staff)):
@@ -1309,7 +1309,15 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
 
     # ── Группа: короткое уведомление (только если есть и канал, и группа) ──
     if group_id and channel_id:
-        notify = f"🚗 {route_name}-{len(stops)} — {type_emoji} {type_label} · {date_short} {time_str}"
+        tpl = await _get_cfg("delivery_group_template") or "🚗 {route_name}-{count} — {route_type} · {date} {time}"
+        try:
+            notify = tpl.format(
+                route_name=route_name, count=len(stops),
+                route_type=f"{type_emoji} {type_label}",
+                date=date_short, time=time_str,
+            )
+        except Exception:
+            notify = f"🚗 {route_name}-{len(stops)} — {type_emoji} {type_label} · {date_short} {time_str}"
         await _send_tg_with_kb(group_id, notify, {"inline_keyboard": []}, parse_mode=None)
 
     if new_msg_ids and db.pool:
@@ -4896,15 +4904,7 @@ SITE_SETTINGS_DEFAULTS = {
     "delivery_group_navoi_id":          GROUP_DELIVERY_NAVOI_ID,
     "delivery_channel_zarafshan_id":    GROUP_DELIVERY_ZARAFSHAN_CHANNEL,
     "delivery_channel_navoi_id":        GROUP_DELIVERY_NAVOI_CHANNEL,
-    "delivery_group_template": (
-        "🚗 {route_name} · {route_type} · {branch}\n"
-        "📅 {date}\n\n"
-        "📦 #{num} {order_num} — {client}\n"
-        "📍 {address}\n"
-        "{phone}"
-        "{map_link}"
-        "📌 Статус: {status}"
-    ),
+    "delivery_group_template": "🚗 {route_name}-{count} — {route_type} · {date} {time}",
     # Лиды — группы и шаблон уведомлений
     "leads_group_id":          LEADS_GROUP_ID,
     "leads_group_zarafshan":   "",
