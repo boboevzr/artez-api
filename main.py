@@ -262,10 +262,13 @@ async def _send_tg_with_kb(chat_id, text: str, keyboard: dict) -> int | None:
         async with aiohttp.ClientSession() as s:
             r = await s.post(url, json={
                 "chat_id": str(chat_id), "text": text,
-                "parse_mode": "HTML", "reply_markup": keyboard,
+                "reply_markup": keyboard,
                 "disable_web_page_preview": True,
             }, timeout=aiohttp.ClientTimeout(total=8))
             d = await r.json()
+            if not d.get("ok"):
+                logging.warning(f"_send_tg_with_kb TG error: {d.get('description')}")
+                return None
             return d.get("result", {}).get("message_id")
     except Exception as e:
         logging.warning(f"_send_tg_with_kb error: {e}")
@@ -1226,7 +1229,8 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
                 tg_error = "Нет ответа от Telegram"
 
     if sent == 0 and tg_error:
-        raise HTTPException(400, f"Telegram: {tg_error}. Убедитесь что бот добавлен в группу и имеет право отправлять сообщения.")
+        logging.error(f"send-to-delivery-group failed: {tg_error}")
+        raise HTTPException(400, f"Telegram: {tg_error}")
 
     return {"ok": True, "sent": sent}
 
