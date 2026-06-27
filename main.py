@@ -1144,18 +1144,21 @@ _ORDER_STATUS_RU = {
 }
 
 def _route_pickup_kb(order_id: int, status: str) -> dict:
-    """Inline-клавиатура для сообщения в группе водителей."""
+    """Inline-клавиатура для сообщения в канале водителей."""
+    h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
     if status == "confirmed":
-        return {"inline_keyboard": [[
-            {"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
-        ]]}
+        return {"inline_keyboard": [
+            [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"}],
+            [h],
+        ]}
     elif status == "pickup":
         return {"inline_keyboard": [
             [{"text": "🏭 Сдал в мастерскую", "callback_data": f"rp:{order_id}:deliver"}],
-            [{"text": "↩️ Не забирал (отменить)", "callback_data": f"rp:{order_id}:undo"}],
+            [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo"}],
+            [h],
         ]}
     else:
-        return {"inline_keyboard": []}
+        return {"inline_keyboard": [[h]]}
 
 def _parse_loc_str(val: str | None):
     if not val: return None
