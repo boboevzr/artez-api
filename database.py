@@ -2498,7 +2498,7 @@ async def get_routes(date: str | None = None, driver_id: int | None = None,
                      branch: str | None = None, status: str | None = None) -> list:
     if not pool: return []
     filters, vals, i = [], [], 1
-    if date:      filters.append(f"r.date=${ i}"); vals.append(date); i+=1
+    if date:      filters.append(f"r.date=${i}::date"); vals.append(date); i+=1
     if driver_id: filters.append(f"r.driver_id=${i}"); vals.append(driver_id); i+=1
     if branch:    filters.append(f"r.branch=${i}"); vals.append(branch); i+=1
     if status:    filters.append(f"r.status=${i}"); vals.append(status); i+=1
