@@ -1202,13 +1202,31 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         raise HTTPException(400, "В маршруте нет заказов")
 
     sent = 0
+    tg_error = None
     for i, s in enumerate(stops, 1):
         text = _build_stop_text(route, s, i, template)
         order_id = s.get("order_id") or s.get("id")
         status   = s.get("order_status", "confirmed")
         kb = _route_pickup_kb(order_id, status)
-        await _send_tg_with_kb(group_id, text, kb)
-        sent += 1
+        msg_id = await _send_tg_with_kb(group_id, text, kb)
+        if msg_id:
+            sent += 1
+        elif tg_error is None:
+            # Попробуем получить причину ошибки
+            try:
+                async with aiohttp.ClientSession() as sess:
+                    r = await sess.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={"chat_id": str(group_id), "text": "test", "disable_notification": True},
+                        timeout=aiohttp.ClientTimeout(total=5))
+                    d = await r.json()
+                    if not d.get("ok"):
+                        tg_error = d.get("description", "Telegram error")
+            except Exception:
+                tg_error = "Нет ответа от Telegram"
+
+    if sent == 0 and tg_error:
+        raise HTTPException(400, f"Telegram: {tg_error}. Убедитесь что бот добавлен в группу и имеет право отправлять сообщения.")
 
     return {"ok": True, "sent": sent}
 
