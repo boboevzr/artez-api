@@ -40,8 +40,10 @@ GROUP_ID_ZARAFSHAN    = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID        = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_NEW_CLIENTS_ID  = os.getenv("GROUP_NEW_CLIENTS_ID", "-1003768571929")
 GROUP_DELIVERY_ID            = os.getenv("GROUP_DELIVERY_ID", "-5434866533")
-GROUP_DELIVERY_ZARAFSHAN_ID  = os.getenv("GROUP_DELIVERY_ZARAFSHAN_ID", "-1004327266702")
-GROUP_DELIVERY_NAVOI_ID      = os.getenv("GROUP_DELIVERY_NAVOI_ID", "-1004327266702")
+GROUP_DELIVERY_ZARAFSHAN_ID      = os.getenv("GROUP_DELIVERY_ZARAFSHAN_ID", "-1004327266702")
+GROUP_DELIVERY_NAVOI_ID          = os.getenv("GROUP_DELIVERY_NAVOI_ID", "-1004327266702")
+GROUP_DELIVERY_ZARAFSHAN_CHANNEL = os.getenv("GROUP_DELIVERY_ZARAFSHAN_CHANNEL", "-1004483444044")
+GROUP_DELIVERY_NAVOI_CHANNEL     = os.getenv("GROUP_DELIVERY_NAVOI_CHANNEL", "-1004483444044")
 GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
 APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
@@ -1223,58 +1225,65 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
 
     branch = route.get("branch", "")
     if branch == "navoi":
-        group_id_str = await _get_cfg("delivery_group_navoi_id") or await _get_cfg("delivery_group_id")
+        group_id_str   = await _get_cfg("delivery_group_navoi_id")   or await _get_cfg("delivery_group_id")
+        channel_id_str = await _get_cfg("delivery_channel_navoi_id")
     else:
-        group_id_str = await _get_cfg("delivery_group_zarafshan_id") or await _get_cfg("delivery_group_id")
-    group_id = int(group_id_str) if group_id_str else 0
-    if not group_id:
-        raise HTTPException(400, "Группа водителей не настроена (Настройки → Telegram → Водители)")
+        group_id_str   = await _get_cfg("delivery_group_zarafshan_id") or await _get_cfg("delivery_group_id")
+        channel_id_str = await _get_cfg("delivery_channel_zarafshan_id")
+    group_id   = int(group_id_str)   if group_id_str   else 0
+    channel_id = int(channel_id_str) if channel_id_str else 0
+    if not channel_id and not group_id:
+        raise HTTPException(400, "Канал/группа водителей не настроены (Настройки → Telegram → Водители)")
 
     stops = route.get("stops", [])
     if not stops:
         raise HTTPException(400, "В маршруте нет заказов")
 
-    # Удаляем предыдущие сообщения если были
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
     import json as _jmod
+    now_uz     = datetime.now(ZoneInfo("Asia/Tashkent"))
+    time_str   = now_uz.strftime("%H:%M:%S")
+    date_short = now_uz.strftime("%d.%m")
+    type_label = {"pickup": "Забор", "delivery": "Доставка", "mixed": "Смешанный"}.get(route.get("type", ""), "")
+    type_emoji = {"pickup": "📥", "delivery": "📤", "mixed": "🔄"}.get(route.get("type", ""), "🚗")
+    route_date = str(route.get("date", ""))
+    route_name = route.get("name", "")
+
+    # Удаляем предыдущие сообщения из канала
     _raw = route.get("tg_delivery_msg_ids")
     if isinstance(_raw, str):
         try: _raw = _jmod.loads(_raw)
         except Exception: _raw = {}
     old_msg_ids: dict = _raw or {}
-    if old_msg_ids:
+    del_chat = channel_id or group_id
+    if old_msg_ids and del_chat:
         async with aiohttp.ClientSession() as sess:
             for msg_id_str in old_msg_ids.values():
                 try:
                     await sess.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
-                        json={"chat_id": str(group_id), "message_id": int(msg_id_str)},
+                        json={"chat_id": str(del_chat), "message_id": int(msg_id_str)},
                         timeout=aiohttp.ClientTimeout(total=4))
                 except Exception:
                     pass
 
-    # Заголовок
-    from datetime import datetime
-    from zoneinfo import ZoneInfo
-    now_uz    = datetime.now(ZoneInfo("Asia/Tashkent"))
-    time_str  = now_uz.strftime("%H:%M:%S")
-    type_label = {"pickup": "📥 Забор", "delivery": "📤 Доставка", "mixed": "🔄 Смешанный"}.get(route.get("type", ""), "")
-    route_date = str(route.get("date", ""))
-    header_text = (
-        f"━━━━━━━━━━\n"
-        f"🚗 {route.get('name', '')}-{len(stops)} — {type_label}\n"
-        f"📅 {route_date}   {time_str}\n"
-        f"━━━━━━━━━━"
-    )
-
+    # ── Канал: заголовок + остановки + подвал ──
+    dest = channel_id or group_id
     new_msg_ids: dict = {}
     tg_error = None
 
-    # Отправляем заголовок
-    hdr_id = await _send_tg_with_kb(group_id, header_text, {"inline_keyboard": []})
+    header_text = (
+        f"━━━━━━━━━━\n"
+        f"🚗 {route_name}-{len(stops)} — {type_emoji} {type_label}\n"
+        f"📅 {route_date}   {time_str}\n"
+        f"━━━━━━━━━━"
+    )
+    hdr_id = await _send_tg_with_kb(dest, header_text, {"inline_keyboard": []})
     if hdr_id:
         new_msg_ids["__header__"] = hdr_id
     elif tg_error is None:
-        tg_error = "Не удалось отправить заголовок"
+        tg_error = "Не удалось отправить в канал"
 
     sent = 0
     for i, s in enumerate(stops, 1):
@@ -1282,22 +1291,26 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         order_id = s.get("order_id") or s.get("id")
         status   = s.get("order_status", "confirmed")
         kb       = _route_pickup_kb(order_id, status)
-        msg_id   = await _send_tg_with_kb(group_id, text, kb)
+        msg_id   = await _send_tg_with_kb(dest, text, kb)
         if msg_id:
             sent += 1
             new_msg_ids[str(order_id)] = msg_id
         elif tg_error is None:
             tg_error = "Ошибка отправки остановки"
 
-    # Подвал
     footer_text = f"━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)}\n━━━━━━━━━━"
-    ftr_id = await _send_tg_with_kb(group_id, footer_text, {"inline_keyboard": []})
+    ftr_id = await _send_tg_with_kb(dest, footer_text, {"inline_keyboard": []})
     if ftr_id:
         new_msg_ids["__footer__"] = ftr_id
 
     if sent == 0 and tg_error:
         logging.error(f"send-to-delivery-group failed: {tg_error}")
         raise HTTPException(400, f"Telegram: {tg_error}")
+
+    # ── Группа: короткое уведомление (только если есть и канал, и группа) ──
+    if group_id and channel_id:
+        notify = f"🚗 {route_name}-{len(stops)} — {type_emoji} {type_label} · {date_short} {time_str}"
+        await _send_tg_with_kb(group_id, notify, {"inline_keyboard": []}, parse_mode=None)
 
     if new_msg_ids and db.pool:
         async with db.pool.acquire() as conn:
@@ -4879,8 +4892,10 @@ SITE_SETTINGS_DEFAULTS = {
     "new_clients_group_id":    GROUP_NEW_CLIENTS_ID,
     # Группа водителей/доставщиков (маршруты)
     "delivery_group_id":              GROUP_DELIVERY_ID,
-    "delivery_group_zarafshan_id":    GROUP_DELIVERY_ZARAFSHAN_ID,
-    "delivery_group_navoi_id":        GROUP_DELIVERY_NAVOI_ID,
+    "delivery_group_zarafshan_id":      GROUP_DELIVERY_ZARAFSHAN_ID,
+    "delivery_group_navoi_id":          GROUP_DELIVERY_NAVOI_ID,
+    "delivery_channel_zarafshan_id":    GROUP_DELIVERY_ZARAFSHAN_CHANNEL,
+    "delivery_channel_navoi_id":        GROUP_DELIVERY_NAVOI_CHANNEL,
     "delivery_group_template": (
         "🚗 {route_name} · {route_type} · {branch}\n"
         "📅 {date}\n\n"
@@ -4955,9 +4970,11 @@ class SiteSettings(BaseModel):
     contact_navoi_instagram:    str | None = None
     branch_navoi_location:      str | None = None
     delivery_group_id:              str | None = None
-    delivery_group_zarafshan_id:    str | None = None
-    delivery_group_navoi_id:        str | None = None
-    delivery_group_template:        str | None = None
+    delivery_group_zarafshan_id:      str | None = None
+    delivery_group_navoi_id:          str | None = None
+    delivery_channel_zarafshan_id:    str | None = None
+    delivery_channel_navoi_id:        str | None = None
+    delivery_group_template:          str | None = None
     tg_bot_token:        str | None = None
     tg_group_id:         str | None = None
     tg_group_zarafshan:  str | None = None
