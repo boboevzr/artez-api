@@ -627,6 +627,25 @@ async def create_tables():
         ALTER TABLE leads ADD COLUMN IF NOT EXISTS pickup_time VARCHAR(100) DEFAULT '';
         """)
 
+    # ── Шаг 15: таблица услуг с именами RU/UZ ────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS services (
+            key       VARCHAR(30) PRIMARY KEY,
+            name_ru   VARCHAR(100) NOT NULL DEFAULT '',
+            name_uz   VARCHAR(100) NOT NULL DEFAULT '',
+            emoji     VARCHAR(10)  NOT NULL DEFAULT '',
+            order_idx INTEGER      NOT NULL DEFAULT 0
+        );
+        INSERT INTO services (key, name_ru, name_uz, emoji, order_idx) VALUES
+            ('carpet',      'Чистка ковра',         'Gilam tozalash',      '🧺', 1),
+            ('carpet_home', 'Чистка ковра на дому', 'Uyda gilam tozalash', '🏠', 2),
+            ('sofa',        'Диван, кресло',         'Divan, kreslo',       '🛋', 3),
+            ('mattress',    'Матрас, одеяло',        'Matras, ko''rpa',     '🛏', 4),
+            ('curtains',    'Шторы',                 'Pardalar',            '🪟', 5)
+        ON CONFLICT (key) DO NOTHING;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1035,6 +1054,38 @@ async def set_price(service_key: str, type_key: str, price: int,
         """, service_key, type_key, price, unit_key, min_order)
     return True
 
+
+# ══════════════════════════════════════
+#  УСЛУГИ (названия RU/UZ)
+# ══════════════════════════════════════
+async def get_services():
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM services ORDER BY order_idx, key")
+        return [dict(r) for r in rows]
+
+async def upsert_service(key: str, name_ru: str, name_uz: str, emoji: str = '', order_idx: int = 0):
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO services (key, name_ru, name_uz, emoji, order_idx)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (key) DO UPDATE SET
+                name_ru   = EXCLUDED.name_ru,
+                name_uz   = EXCLUDED.name_uz,
+                emoji     = EXCLUDED.emoji,
+                order_idx = EXCLUDED.order_idx
+        """, key, name_ru, name_uz, emoji, order_idx)
+        return True
+
+async def delete_service(key: str):
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        r = await conn.execute("DELETE FROM services WHERE key=$1", key)
+        return r == "DELETE 1"
 
 # ══════════════════════════════════════
 #  ЕДИНИЦЫ ИЗМЕРЕНИЯ (общая таблица с ботом)
