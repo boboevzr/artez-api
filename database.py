@@ -2809,12 +2809,13 @@ async def ensure_plans_table():
                 id          SERIAL PRIMARY KEY,
                 title       VARCHAR(500) NOT NULL,
                 description TEXT         DEFAULT '',
-                status      VARCHAR(20)  DEFAULT 'pending',
+                status      VARCHAR(20)  DEFAULT 'new',
                 priority    VARCHAR(20)  DEFAULT 'normal',
                 created_at  TIMESTAMPTZ  DEFAULT NOW(),
                 done_at     TIMESTAMPTZ  DEFAULT NULL
             )
         """)
+        await conn.execute("ALTER TABLE plans ALTER COLUMN status SET DEFAULT 'new'")
         count = await conn.fetchval("SELECT COUNT(*) FROM plans")
         if count == 0:
             seed = [
