@@ -3430,12 +3430,17 @@ async def admin_update_order_item(order_id: int, item_id: int,
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
-    # Fetch old values for diff logging
+    # Fetch old values + position number for diff logging
     old = {}
+    item_pos = None
     if db.pool:
         async with db.pool.acquire() as _c:
             _row = await _c.fetchrow("SELECT * FROM order_items WHERE id=$1", item_id)
             if _row: old = dict(_row)
+            item_pos = await _c.fetchval(
+                "SELECT COUNT(*) FROM order_items WHERE order_id=$1 AND id <= $2",
+                order_id, item_id
+            )
     updates = {"service": req.service, "price_per_sqm": req.price_per_sqm}
     if sqm: updates["sqm"] = sqm
     if req.width_cm: updates["width_cm"] = req.width_cm
@@ -3463,7 +3468,8 @@ async def admin_update_order_item(order_id: int, item_id: int,
     if not parts:
         parts = [req.service or '—']
         if sqm: parts.append(f"{sqm:.2f} м²")
-    await db.add_order_activity(order_id, staff.get("id"), sname, "item_edited", "; ".join(parts))
+    prefix = f"#{item_pos} {old.get('service') or req.service or '—'}: " if item_pos else ""
+    await db.add_order_activity(order_id, staff.get("id"), sname, "item_edited", prefix + "; ".join(parts))
     return {"ok": True, "item": item}
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}")
@@ -4800,13 +4806,16 @@ async def upload_item_media(
     row = await db.add_item_media(item_id, order_id, file_id, tg_type, staff_name)
     # Log to order activity
     sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
-    item_service = ''
+    item_service = ''; item_pos2 = None
     if db.pool:
         async with db.pool.acquire() as _c:
             _ir = await _c.fetchrow("SELECT service FROM order_items WHERE id=$1", item_id)
             if _ir: item_service = _ir['service'] or ''
+            item_pos2 = await _c.fetchval(
+                "SELECT COUNT(*) FROM order_items WHERE order_id=$1 AND id <= $2", order_id, item_id)
     media_label = "🎥 Видео добавлено" if tg_type == "video" else "📸 Фото добавлено"
-    act_detail = f"{media_label}" + (f" ({item_service})" if item_service else "")
+    pos_prefix = f"#{item_pos2} " if item_pos2 else ""
+    act_detail = f"{media_label} — {pos_prefix}{item_service}" if item_service else media_label
     await db.add_order_activity(order_id, staff.get("id"), sname, "item_media_added", act_detail)
     return {"ok": True, "media": row}
 
@@ -4816,14 +4825,17 @@ async def delete_item_media(order_id: int, item_id: int, media_id: int, staff=De
     media_row = await db.get_item_media_by_id(media_id)
     await db.delete_item_media(media_id)
     sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
-    item_service = ''
+    item_service = ''; item_pos3 = None
     if db.pool:
         async with db.pool.acquire() as _c:
             _ir = await _c.fetchrow("SELECT service FROM order_items WHERE id=$1", item_id)
             if _ir: item_service = _ir['service'] or ''
+            item_pos3 = await _c.fetchval(
+                "SELECT COUNT(*) FROM order_items WHERE order_id=$1 AND id <= $2", order_id, item_id)
     tg_type = (media_row.get('tg_file_type') or 'photo') if media_row else 'photo'
     media_label = "🎥 Видео удалено" if tg_type == "video" else "🗑 Фото удалено"
-    act_detail = f"{media_label}" + (f" ({item_service})" if item_service else "")
+    pos_prefix = f"#{item_pos3} " if item_pos3 else ""
+    act_detail = f"{media_label} — {pos_prefix}{item_service}" if item_service else media_label
     await db.add_order_activity(order_id, staff.get("id"), sname, "item_media_deleted", act_detail)
     return {"ok": True}
 
