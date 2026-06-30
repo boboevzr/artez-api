@@ -3430,6 +3430,12 @@ async def admin_update_order_item(order_id: int, item_id: int,
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
+    # Fetch old values for diff logging
+    old = {}
+    if db.pool:
+        async with db.pool.acquire() as _c:
+            _row = await _c.fetchrow("SELECT * FROM order_items WHERE id=$1", item_id)
+            if _row: old = dict(_row)
     updates = {"service": req.service, "price_per_sqm": req.price_per_sqm}
     if sqm: updates["sqm"] = sqm
     if req.width_cm: updates["width_cm"] = req.width_cm
@@ -3438,10 +3444,26 @@ async def admin_update_order_item(order_id: int, item_id: int,
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
-    parts = [req.service or '—']
-    if sqm: parts.append(f"{sqm:.2f} м²")
-    if req.price_per_sqm: parts.append(f"{int(req.price_per_sqm):,} сум/м²")
-    await db.add_order_activity(order_id, staff.get("id"), sname, "item_edited", ", ".join(parts))
+    parts = []
+    def _fmt_dim(w, l): return f"{int(w)}×{int(l)} см" if w and l else "—"
+    if old:
+        if (old.get('service') or '') != (req.service or ''):
+            parts.append(f"Услуга: {old.get('service') or '—'} → {req.service or '—'}")
+        old_sqm = float(old.get('sqm') or 0)
+        new_sqm = float(sqm or 0)
+        if abs(old_sqm - new_sqm) > 0.001:
+            parts.append(f"Площадь: {old_sqm:.2f} → {new_sqm:.2f} м²")
+        old_p = float(old.get('price_per_sqm') or 0)
+        new_p = float(req.price_per_sqm or 0)
+        if abs(old_p - new_p) > 0.5:
+            parts.append(f"Цена: {int(old_p):,} → {int(new_p):,} сум/м²")
+        old_w, old_l = old.get('width_cm'), old.get('length_cm')
+        if (old_w, old_l) != (req.width_cm, req.length_cm):
+            parts.append(f"Размер: {_fmt_dim(old_w, old_l)} → {_fmt_dim(req.width_cm, req.length_cm)}")
+    if not parts:
+        parts = [req.service or '—']
+        if sqm: parts.append(f"{sqm:.2f} м²")
+    await db.add_order_activity(order_id, staff.get("id"), sname, "item_edited", "; ".join(parts))
     return {"ok": True, "item": item}
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}")
@@ -3585,7 +3607,17 @@ async def edit_order_payment(
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
     pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
-    details = f"Изменён платёж: {int(amount):,} сум ({mLabel.get(method,method)}, {pLabel.get(purpose,purpose)})"
+    diff_parts = []
+    old_amt = float(existing.get("amount") or 0)
+    if abs(old_amt - amount) > 0.5:
+        diff_parts.append(f"Сумма: {int(old_amt):,} → {int(amount):,} сум")
+    old_method = existing.get("method") or ""
+    if old_method != method:
+        diff_parts.append(f"Способ: {mLabel.get(old_method, old_method)} → {mLabel.get(method, method)}")
+    old_purpose = existing.get("purpose") or ""
+    if old_purpose != purpose:
+        diff_parts.append(f"Вид: {pLabel.get(old_purpose, old_purpose)} → {pLabel.get(purpose, purpose)}")
+    details = "; ".join(diff_parts) if diff_parts else f"Платёж: {int(amount):,} сум ({mLabel.get(method,method)}, {pLabel.get(purpose,purpose)})"
     await db.add_order_activity(order_id, staff.get("id"), name, "payment_edited", details)
     ch = await db.get_cash_tg_channel()
     if ch:
@@ -4766,11 +4798,33 @@ async def upload_item_media(
     msg = result["result"]
     file_id = msg["photo"][-1]["file_id"] if tg_type == "photo" else msg[tg_type]["file_id"]
     row = await db.add_item_media(item_id, order_id, file_id, tg_type, staff_name)
+    # Log to order activity
+    sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
+    item_service = ''
+    if db.pool:
+        async with db.pool.acquire() as _c:
+            _ir = await _c.fetchrow("SELECT service FROM order_items WHERE id=$1", item_id)
+            if _ir: item_service = _ir['service'] or ''
+    media_label = "🎥 Видео добавлено" if tg_type == "video" else "📸 Фото добавлено"
+    act_detail = f"{media_label}" + (f" ({item_service})" if item_service else "")
+    await db.add_order_activity(order_id, staff.get("id"), sname, "item_media_added", act_detail)
     return {"ok": True, "media": row}
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}/media/{media_id}")
-async def delete_item_media(order_id: int, item_id: int, media_id: int, _=Depends(get_current_staff)):
+async def delete_item_media(order_id: int, item_id: int, media_id: int, staff=Depends(get_current_staff)):
+    # Fetch media type and item service before deleting
+    media_row = await db.get_item_media_by_id(media_id)
     await db.delete_item_media(media_id)
+    sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
+    item_service = ''
+    if db.pool:
+        async with db.pool.acquire() as _c:
+            _ir = await _c.fetchrow("SELECT service FROM order_items WHERE id=$1", item_id)
+            if _ir: item_service = _ir['service'] or ''
+    tg_type = (media_row.get('tg_file_type') or 'photo') if media_row else 'photo'
+    media_label = "🎥 Видео удалено" if tg_type == "video" else "🗑 Фото удалено"
+    act_detail = f"{media_label}" + (f" ({item_service})" if item_service else "")
+    await db.add_order_activity(order_id, staff.get("id"), sname, "item_media_deleted", act_detail)
     return {"ok": True}
 
 @app.patch("/api/admin/orders/{order_id}/items/{item_id}/washer")
