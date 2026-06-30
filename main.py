@@ -3426,7 +3426,7 @@ async def admin_bulk_create_items(order_id: int, count: int = Body(..., embed=Tr
 
 @app.put("/api/admin/orders/{order_id}/items/{item_id}")
 async def admin_update_order_item(order_id: int, item_id: int,
-                                   req: OrderItemRequest, _=Depends(get_current_staff)):
+                                   req: OrderItemRequest, staff=Depends(get_current_staff)):
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
@@ -3437,6 +3437,11 @@ async def admin_update_order_item(order_id: int, item_id: int,
     item = await db.update_order_item(item_id, **updates)
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
+    sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
+    parts = [req.service or '—']
+    if sqm: parts.append(f"{sqm:.2f} м²")
+    if req.price_per_sqm: parts.append(f"{int(req.price_per_sqm):,} сум/м²")
+    await db.add_order_activity(order_id, staff.get("id"), sname, "item_edited", ", ".join(parts))
     return {"ok": True, "item": item}
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}")
