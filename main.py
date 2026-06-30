@@ -2655,6 +2655,13 @@ class SetPriceRequest(BaseModel):
     unit_key: str = None
     min_order: float = None
 
+class ServiceRequest(BaseModel):
+    key: str
+    name_ru: str
+    name_uz: str
+    emoji: str = ''
+    order_idx: int = 0
+
 class UnitRequest(BaseModel):
     key: str
     name_ru: str
@@ -3164,6 +3171,36 @@ async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
     if req.min_order is not None and req.min_order <= 0:
         raise HTTPException(status_code=400, detail="Минимальный заказ должен быть > 0")
     await db.set_price(req.service_key, req.type_key, req.price, unit_key=req.unit_key, min_order=req.min_order)
+    return {"ok": True}
+
+@app.get("/api/services")
+async def get_services_public():
+    """Публичный эндпоинт — список услуг с именами RU/UZ"""
+    svcs = await db.get_services()
+    return {"ok": True, "services": svcs}
+
+@app.get("/api/admin/services")
+async def admin_get_services(_=Depends(get_admin)):
+    svcs = await db.get_services()
+    return {"ok": True, "services": svcs}
+
+@app.put("/api/admin/services")
+async def admin_upsert_service(req: ServiceRequest, _=Depends(get_admin)):
+    if not req.key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключ услуги")
+    if not req.name_ru.strip():
+        raise HTTPException(status_code=400, detail="Укажите название на RU")
+    if not req.name_uz.strip():
+        raise HTTPException(status_code=400, detail="Укажите название на UZ")
+    await db.upsert_service(req.key.strip(), req.name_ru.strip(), req.name_uz.strip(),
+                            req.emoji.strip(), req.order_idx)
+    return {"ok": True}
+
+@app.delete("/api/admin/services/{key}")
+async def admin_delete_service(key: str, _=Depends(get_admin)):
+    ok = await db.delete_service(key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Услуга не найдена")
     return {"ok": True}
 
 @app.get("/api/units")
