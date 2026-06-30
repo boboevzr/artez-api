@@ -3180,8 +3180,7 @@ async def get_sessions_to_warn() -> list:
             FROM chat_sessions cs
             LEFT JOIN staff s ON s.id = cs.claimed_by
             WHERE cs.status = 'active'
-              AND cs.last_client_msg_at IS NOT NULL
-              AND cs.last_client_msg_at < NOW() - INTERVAL '10 minutes'
+              AND COALESCE(cs.last_client_msg_at, cs.created_at) < NOW() - INTERVAL '10 minutes'
               AND cs.warned_at IS NULL
         """)
         return [dict(r) for r in rows]
