@@ -620,6 +620,13 @@ async def create_tables():
         ALTER TABLE leads ADD COLUMN IF NOT EXISTS client_tg_id BIGINT DEFAULT NULL;
         """)
 
+    # ── Шаг 14: дата и время вывоза в лидах ─────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE leads ADD COLUMN IF NOT EXISTS pickup_date VARCHAR(20)  DEFAULT '';
+        ALTER TABLE leads ADD COLUMN IF NOT EXISTS pickup_time VARCHAR(100) DEFAULT '';
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1244,15 +1251,16 @@ async def create_lead(data: dict) -> dict:
             INSERT INTO leads (client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
                                created_by, volunteer_id, location, location_address,
-                               source, client_tg_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+                               source, client_tg_id, pickup_date, pickup_time)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
             RETURNING *
         """, data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
             data.get("volunteer_id"), data.get("location"), data.get("location_address"),
-            data.get("source", "staff"), data.get("client_tg_id"))
+            data.get("source", "staff"), data.get("client_tg_id"),
+            data.get("pickup_date", ""), data.get("pickup_time", ""))
         rid      = row["id"]
         lead_num = f"LEAD-{rid:04d}"
         lead_code = f"L-{rid:04d}"
@@ -1311,7 +1319,7 @@ async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None
-    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id","pickup_type","delivery_type"}
+    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))

@@ -614,6 +614,8 @@ class StaffOrderRequest(BaseModel):
     location: str = ""
     location_address: str = ""
     note: str = ""
+    pickup_date: str = ""
+    pickup_time: str = ""
 
 
 # ══════════════════════════════════════
@@ -1393,6 +1395,8 @@ class LeadCreateRequest(BaseModel):
     location: str | None = None
     location_address: str | None = None
     notify_group: bool = True
+    pickup_date: str = ""
+    pickup_time: str = ""
 
 @app.get("/api/staff/search")
 async def staff_search(q: str = "", limit: int = 8, _=Depends(get_current_staff)):
@@ -1442,6 +1446,8 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
         "volunteer_id": agent_id,
         "location": req.location, "location_address": req.location_address,
         "source": lead_source,
+        "pickup_date": req.pickup_date or "",
+        "pickup_time": req.pickup_time or "",
     })
     if lead:
         await db.add_lead_call(lead["id"], creator_id, action="created",
@@ -1473,7 +1479,7 @@ async def get_leads(status: str = None, branch: str = None,
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
-    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id","location","location_address","pickup_type","delivery_type"}
+    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id","location","location_address","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
@@ -1922,8 +1928,8 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "service_type": req.service_type or "standard",
             "pickup_type":  req.pickup_type or "courier",
             "delivery_type": req.delivery_type or "courier",
-            "pickup_date": "",
-            "pickup_time": "",
+            "pickup_date": req.pickup_date or "",
+            "pickup_time": req.pickup_time or "",
             "note":        note_full,
             "total_price": None,
         }, source="staff")
@@ -3276,8 +3282,8 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "service":       "",
         "pickup_type":   lead.get("pickup_type", "courier"),
         "delivery_type": lead.get("delivery_type", "courier"),
-        "pickup_date":   "",
-        "pickup_time":   "",
+        "pickup_date":   lead.get("pickup_date", ""),
+        "pickup_time":   lead.get("pickup_time", ""),
         "note":          note_text,
         "total_price":   None,
     }, source="staff")
