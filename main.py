@@ -5262,6 +5262,8 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         "location_address": order.location_address,
         "source":        lead_source,
         "client_tg_id":  order.client_tg_id,
+        "pickup_date":   order.pickup_date or "",
+        "pickup_time":   order.pickup_time or "",
     })
     lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
     if lead:
