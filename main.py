@@ -5341,6 +5341,8 @@ async def create_bot_lead(req: BotLeadRequest, x_bot_token: str = Header(None, a
         "location_address": req.location_address,
         "source":          "bot",
         "client_tg_id":    req.client_tg_id,
+        "pickup_date":     req.pickup_date or "",
+        "pickup_time":     req.pickup_time or "",
     })
     lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
     if lead:
