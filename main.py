@@ -6193,7 +6193,7 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
                     group_ids
                 )
             for m in members:
-                p = (m["phone"] or "").strip()
+                p = _ami_phone((m["phone"] or "").strip())
                 if p and p not in phones_seen:
                     phones_seen.add(p)
                     rows_to_insert.append((m["source_type"], m["source_id"], p, m["name"] or ""))
@@ -6204,7 +6204,7 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
                     "SELECT id, phone, first_name, last_name FROM crm_clients WHERE phone IS NOT NULL AND phone != '' ORDER BY id"
                 )
             for r in crows:
-                p = (r["phone"] or "").strip()
+                p = _ami_phone((r["phone"] or "").strip())
                 if p and p not in phones_seen:
                     phones_seen.add(p)
                     rows_to_insert.append(("clients", r["id"], p, f"{r['first_name'] or ''} {r['last_name'] or ''}".strip()))
@@ -6321,6 +6321,14 @@ async def adg_members(gid: int, _=Depends(_get_admin)):
         )
     return [dict(r) for r in rows]
 
+def _ami_phone(phone: str) -> str:
+    """Возвращает номер для AMI: только цифры, без 998 (9 цифр)."""
+    import re
+    p = re.sub(r'\D', '', phone)
+    if p.startswith('998') and len(p) >= 11:
+        p = p[3:]
+    return p
+
 @app.post("/api/admin/autodial/groups/{gid}/members")
 async def adg_add_members(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
     """Добавляет участников в группу. phones: [{phone,name,source_type,source_id}]"""
@@ -6329,7 +6337,7 @@ async def adg_add_members(gid: int, body: dict = Body(...), _=Depends(_get_admin
     inserted = 0
     async with db.pool.acquire() as conn:
         for m in members:
-            phone = (m.get("phone") or "").strip()
+            phone = _ami_phone((m.get("phone") or "").strip())
             if not phone: continue
             try:
                 await conn.execute(
@@ -6401,7 +6409,7 @@ async def adg_contacts_browse(
 @app.get("/api/admin/autodial/callerids")
 async def ad_callerids(_=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM autodial_callerids ORDER BY sort_order,id")
+        rows = await conn.fetch("SELECT * FROM autodial_callerids ORDER BY (regexp_replace(number,'[^0-9]','','g'))::bigint ASC, id")
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/callerids")
@@ -6434,7 +6442,7 @@ async def ad_callerid_delete(cid: int, _=Depends(_get_admin)):
 @app.get("/api/admin/autodial/ivrs")
 async def ad_ivrs(_=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM autodial_ivrs ORDER BY sort_order,id")
+        rows = await conn.fetch("SELECT * FROM autodial_ivrs ORDER BY (regexp_replace(exten,'[^0-9]','','g'))::bigint ASC, id")
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/ivrs")
