@@ -868,9 +868,10 @@ def _staff_public(s: dict) -> dict:
         "tg_username":s.get("tg_username"),
         "active":         s["active"],
         "permissions":    ROLE_PERMISSIONS.get(s["role"], []),
-        "can_edit_items":      s.get("can_edit_items", True),
-        "can_measure":         s.get("can_measure", False),
-        "can_approve_measure": s.get("can_approve_measure", False),
+        "can_edit_items":       s.get("can_edit_items", True),
+        "can_measure":          s.get("can_measure", False),
+        "can_approve_measure":  s.get("can_approve_measure", False),
+        "can_override_measure": s.get("can_override_measure", False),
         "can_create_order":    s.get("can_create_order", True),
         "can_confirm_order":   s.get("can_confirm_order", True),
         "can_edit_confirmed":  s.get("can_edit_confirmed", False),
@@ -4904,32 +4905,36 @@ async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),
 
 @app.patch("/api/admin/staff/{staff_id}/permissions")
 async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
-    can_edit_items:      bool = Body(True,  embed=True),
-    can_measure:         bool = Body(False, embed=True),
-    can_approve_measure: bool = Body(False, embed=True),
-    can_create_order:    bool = Body(True,  embed=True),
-    can_confirm_order:   bool = Body(True,  embed=True),
-    can_edit_confirmed:  bool = Body(False, embed=True),
-    can_send_pickup:     bool = Body(False, embed=True),
-    can_edit_delivery:   bool = Body(False, embed=True),
-    can_accept_payment:  bool = Body(False, embed=True),
-    can_manage_cash:     bool = Body(False, embed=True),
-    notify_new_users:    bool = Body(False, embed=True),
-    order_stages:        str  = Body(None,  embed=True)):
+    can_edit_items:       bool = Body(True,  embed=True),
+    can_measure:          bool = Body(False, embed=True),
+    can_approve_measure:  bool = Body(False, embed=True),
+    can_override_measure: bool = Body(False, embed=True),
+    can_create_order:     bool = Body(True,  embed=True),
+    can_confirm_order:    bool = Body(True,  embed=True),
+    can_edit_confirmed:   bool = Body(False, embed=True),
+    can_send_pickup:      bool = Body(False, embed=True),
+    can_edit_delivery:    bool = Body(False, embed=True),
+    can_accept_payment:   bool = Body(False, embed=True),
+    can_manage_cash:      bool = Body(False, embed=True),
+    notify_new_users:     bool = Body(False, embed=True),
+    order_stages:         str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
             """UPDATE staff
                SET can_edit_items=$2, can_measure=$3, can_approve_measure=$4,
-                   can_create_order=$5, can_confirm_order=$6, order_stages=$7,
-                   can_edit_confirmed=$8, can_send_pickup=$9, can_edit_delivery=$10,
-                   can_accept_payment=$11, can_manage_cash=$12, notify_new_users=$13
+                   can_override_measure=$5,
+                   can_create_order=$6, can_confirm_order=$7, order_stages=$8,
+                   can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
+                   can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
+                         can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
+            can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
             can_accept_payment, can_manage_cash, notify_new_users)
