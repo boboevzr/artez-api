@@ -312,6 +312,19 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_agm_group ON autodial_group_members(group_id)",
         "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS group_ids JSONB DEFAULT '[]'",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS caller_id VARCHAR(20) DEFAULT '1000'",
+        """CREATE TABLE IF NOT EXISTS autodial_callerids (
+            id         SERIAL PRIMARY KEY,
+            number     VARCHAR(20) NOT NULL,
+            label      VARCHAR(100) DEFAULT '',
+            sort_order INT DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS autodial_ivrs (
+            id         SERIAL PRIMARY KEY,
+            exten      VARCHAR(20) NOT NULL,
+            label      VARCHAR(100) DEFAULT '',
+            sort_order INT DEFAULT 0
+        )""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -319,6 +332,20 @@ async def create_tables():
                 await c.execute(sql)
             except Exception:
                 pass
+        # Начальные данные CallerID / IVR (только если пусто)
+        cnt = await c.fetchval("SELECT COUNT(*) FROM autodial_callerids")
+        if cnt == 0:
+            await c.executemany(
+                "INSERT INTO autodial_callerids (number,label,sort_order) VALUES ($1,$2,$3)",
+                [("2001","Оператор 1",1),("2002","Оператор 2",2),("2003","Оператор 3",3),
+                 ("2004","Оператор 4",4),("2005","Оператор 5",5)]
+            )
+        cnt = await c.fetchval("SELECT COUNT(*) FROM autodial_ivrs")
+        if cnt == 0:
+            await c.executemany(
+                "INSERT INTO autodial_ivrs (exten,label,sort_order) VALUES ($1,$2,$3)",
+                [("7000","Общее приветствие",1),("7001","Акция / скидки",2),("7002","Напоминание о заказе",3)]
+            )
 
     # ── Шаг 2: миграции staff (добавляем недостающие колонки) ────────────
     staff_migrations = [

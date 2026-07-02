@@ -6133,6 +6133,7 @@ async def _autodial_campaign_task(campaign_id: int):
 class _AutodialCreate(BaseModel):
     name:         str
     ivr_exten:    str = "7000"
+    caller_id:    str = "1000"
     max_parallel: int = 3
     group_ids:    list = []
 
@@ -6147,9 +6148,9 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
     import json as _json
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,group_ids) "
-            "VALUES ($1,$2,$3,$4) RETURNING *",
-            body.name, body.ivr_exten, body.max_parallel,
+            "INSERT INTO autodial_campaigns (name,ivr_exten,caller_id,max_parallel,group_ids) "
+            "VALUES ($1,$2,$3,$4,$5) RETURNING *",
+            body.name, body.ivr_exten, body.caller_id, body.max_parallel,
             _json.dumps(body.group_ids)
         )
     return dict(row)
@@ -6393,3 +6394,72 @@ async def adg_contacts_browse(
                     "company": r.get("company") or ""})
 
     return results
+
+
+# ── CallerID и IVR списки ──────────────────────────────────────────────────
+
+@app.get("/api/admin/autodial/callerids")
+async def ad_callerids(_=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM autodial_callerids ORDER BY sort_order,id")
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/autodial/callerids")
+async def ad_callerid_create(body: dict = Body(...), _=Depends(_get_admin)):
+    num = (body.get("number") or "").strip()
+    if not num: raise HTTPException(400, "number required")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO autodial_callerids (number,label,sort_order) VALUES ($1,$2,$3) RETURNING *",
+            num, (body.get("label") or "").strip(), body.get("sort_order") or 0
+        )
+    return dict(row)
+
+@app.put("/api/admin/autodial/callerids/{cid}")
+async def ad_callerid_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE autodial_callerids SET number=$1,label=$2,sort_order=$3 WHERE id=$4",
+            (body.get("number") or "").strip(), (body.get("label") or "").strip(),
+            body.get("sort_order") or 0, cid
+        )
+    return {"ok": True}
+
+@app.delete("/api/admin/autodial/callerids/{cid}")
+async def ad_callerid_delete(cid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM autodial_callerids WHERE id=$1", cid)
+    return {"ok": True}
+
+@app.get("/api/admin/autodial/ivrs")
+async def ad_ivrs(_=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM autodial_ivrs ORDER BY sort_order,id")
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/autodial/ivrs")
+async def ad_ivr_create(body: dict = Body(...), _=Depends(_get_admin)):
+    exten = (body.get("exten") or "").strip()
+    if not exten: raise HTTPException(400, "exten required")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO autodial_ivrs (exten,label,sort_order) VALUES ($1,$2,$3) RETURNING *",
+            exten, (body.get("label") or "").strip(), body.get("sort_order") or 0
+        )
+    return dict(row)
+
+@app.put("/api/admin/autodial/ivrs/{iid}")
+async def ad_ivr_update(iid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE autodial_ivrs SET exten=$1,label=$2,sort_order=$3 WHERE id=$4",
+            (body.get("exten") or "").strip(), (body.get("label") or "").strip(),
+            body.get("sort_order") or 0, iid
+        )
+    return {"ok": True}
+
+@app.delete("/api/admin/autodial/ivrs/{iid}")
+async def ad_ivr_delete(iid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM autodial_ivrs WHERE id=$1", iid)
+    return {"ok": True}
