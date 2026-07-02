@@ -258,6 +258,41 @@ async def create_tables():
         # Уведомления о новых пользователях сайта
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_new_users BOOLEAN DEFAULT FALSE",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS blocked BOOLEAN DEFAULT FALSE",
+        # Автодозвон: кампании
+        """CREATE TABLE IF NOT EXISTS autodial_campaigns (
+            id             SERIAL PRIMARY KEY,
+            name           VARCHAR(200) NOT NULL,
+            status         VARCHAR(20) DEFAULT 'draft',
+            ivr_exten      VARCHAR(20) DEFAULT '1000',
+            max_parallel   INT DEFAULT 3,
+            source_type    VARCHAR(20) DEFAULT 'both',
+            manual_phones  TEXT DEFAULT '',
+            created_at     TIMESTAMPTZ DEFAULT NOW(),
+            started_at     TIMESTAMPTZ,
+            finished_at    TIMESTAMPTZ,
+            total_count    INT DEFAULT 0,
+            dialed_count   INT DEFAULT 0,
+            answered_count INT DEFAULT 0,
+            failed_count   INT DEFAULT 0
+        )""",
+        # Автодозвон: записи звонков
+        """CREATE TABLE IF NOT EXISTS autodial_calls (
+            id            SERIAL PRIMARY KEY,
+            campaign_id   INT REFERENCES autodial_campaigns(id) ON DELETE CASCADE,
+            source_type   VARCHAR(20) DEFAULT 'manual',
+            source_id     INT DEFAULT NULL,
+            phone         VARCHAR(20) NOT NULL,
+            name          VARCHAR(200) DEFAULT '',
+            status        VARCHAR(30) DEFAULT 'pending',
+            ami_action_id VARCHAR(100),
+            started_at    TIMESTAMPTZ,
+            answered_at   TIMESTAMPTZ,
+            hangup_at     TIMESTAMPTZ,
+            hangup_cause  VARCHAR(50),
+            pressed_key   VARCHAR(5),
+            created_at    TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_autodial_calls_campaign ON autodial_calls(campaign_id)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
