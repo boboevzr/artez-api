@@ -4584,6 +4584,10 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                     )
         except Exception as _pe:
             logging.warning(f"measure approved push error: {_pe}")
+    elif action == "direct_approve":
+        if not actual_width_cm or not actual_length_cm:
+            raise HTTPException(status_code=400, detail="Укажите ширину и длину")
+        item = await db.direct_approve_measure(item_id, actual_width_cm, actual_length_cm)
     elif action == "reject":
         if not note:
             raise HTTPException(status_code=400, detail="Укажите причину отклонения")

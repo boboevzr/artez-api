@@ -2537,6 +2537,18 @@ async def approve_item_measure(item_id: int) -> dict:
         """, item_id)
         return dict(row) if row else {}
 
+async def direct_approve_measure(item_id: int, width_cm: float, length_cm: float) -> dict:
+    if not pool: return {}
+    sqm = round(width_cm * length_cm / 10000, 3)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items
+               SET width_cm=$2, length_cm=$3, sqm=$4,
+                   measure_status='approved', reject_note=NULL
+             WHERE id=$1 RETURNING *
+        """, item_id, width_cm, length_cm, sqm)
+        return dict(row) if row else {}
+
 async def reject_item_measure(item_id: int, note: str) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
