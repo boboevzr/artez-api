@@ -6248,14 +6248,25 @@ async def autodial_delete(cid: int, _=Depends(_get_admin)):
 
 @app.post("/api/admin/autodial/test")
 async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
+    """
+    Создаёт одноразовую кампанию с одним номером — агент (autodial_agent.py)
+    подхватит её и позвонит. Агент должен работать ЛОКАЛЬНО (в сети АТС 192.168.1.x).
+    """
     phone = (body.get("phone") or "").strip()
     exten = (body.get("exten") or "1000").strip()
     if not phone: raise HTTPException(400, "phone required")
-    try:
-        if not _ami._connected:
-            await _ami.connect()
-        action_id = f"test_{_uuid.uuid4().hex[:12]}"
-        await _ami.originate(phone, exten, action_id)
-        return {"ok": True, "action_id": action_id}
-    except Exception as e:
-        raise HTTPException(500, str(e))
+    async with db.pool.acquire() as conn:
+        camp = await conn.fetchrow(
+            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
+            "VALUES ($1,$2,1,'manual','running') RETURNING *",
+            f"Тест {phone}", exten
+        )
+        await conn.execute(
+            "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'manual',$2,'Тест')",
+            camp["id"], phone
+        )
+        await conn.execute(
+            "UPDATE autodial_campaigns SET total_count=1 WHERE id=$1", camp["id"]
+        )
+    return {"ok": True, "campaign_id": camp["id"],
+            "note": "Агент autodial_agent.py должен быть запущен в локальной сети АТС"}
