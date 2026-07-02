@@ -6132,10 +6132,9 @@ async def _autodial_campaign_task(campaign_id: int):
 
 class _AutodialCreate(BaseModel):
     name:         str
-    ivr_exten:    str = "1000"
+    ivr_exten:    str = "7000"
     max_parallel: int = 3
-    source_type:  str = "both"
-    manual_phones: str = ""
+    group_ids:    list = []
 
 @app.get("/api/admin/autodial/campaigns")
 async def autodial_list(_=Depends(_get_admin)):
@@ -6145,11 +6144,13 @@ async def autodial_list(_=Depends(_get_admin)):
 
 @app.post("/api/admin/autodial/campaigns")
 async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
+    import json as _json
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,manual_phones) "
-            "VALUES ($1,$2,$3,$4,$5) RETURNING *",
-            body.name, body.ivr_exten, body.max_parallel, body.source_type, body.manual_phones
+            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,group_ids) "
+            "VALUES ($1,$2,$3,$4) RETURNING *",
+            body.name, body.ivr_exten, body.max_parallel,
+            _json.dumps(body.group_ids)
         )
     return dict(row)
 
@@ -6172,11 +6173,31 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
         cnt = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", cid)
 
     if cnt == 0:
+        import json as _json
         phones_seen = set()
         rows_to_insert = []
-        src = campaign["source_type"]
 
-        if src in ("clients", "both"):
+        group_ids = []
+        try:
+            gids = campaign["group_ids"]
+            group_ids = _json.loads(gids) if isinstance(gids, str) else (gids or [])
+        except Exception:
+            group_ids = []
+
+        if group_ids:
+            async with db.pool.acquire() as conn:
+                members = await conn.fetch(
+                    "SELECT phone, name, source_type, source_id FROM autodial_group_members "
+                    "WHERE group_id = ANY($1::int[]) ORDER BY id",
+                    group_ids
+                )
+            for m in members:
+                p = (m["phone"] or "").strip()
+                if p and p not in phones_seen:
+                    phones_seen.add(p)
+                    rows_to_insert.append((m["source_type"], m["source_id"], p, m["name"] or ""))
+        else:
+            # Fallback: старая логика если группы не выбраны
             async with db.pool.acquire() as conn:
                 crows = await conn.fetch(
                     "SELECT id, phone, first_name, last_name FROM crm_clients WHERE phone IS NOT NULL AND phone != '' ORDER BY id"
@@ -6186,25 +6207,6 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
                 if p and p not in phones_seen:
                     phones_seen.add(p)
                     rows_to_insert.append(("clients", r["id"], p, f"{r['first_name'] or ''} {r['last_name'] or ''}".strip()))
-
-        if src in ("contacts", "both"):
-            async with db.pool.acquire() as conn:
-                crows = await conn.fetch(
-                    "SELECT id, phone, first_name, last_name FROM contacts WHERE phone IS NOT NULL AND phone != '' ORDER BY id"
-                )
-            for r in crows:
-                p = (r["phone"] or "").strip()
-                if p and p not in phones_seen:
-                    phones_seen.add(p)
-                    rows_to_insert.append(("contacts", r["id"], p, f"{r['first_name'] or ''} {r['last_name'] or ''}".strip()))
-
-        manual = campaign["manual_phones"] or ""
-        if src in ("manual", "both") and manual:
-            for line in manual.splitlines():
-                p = line.strip()
-                if p and p not in phones_seen:
-                    phones_seen.add(p)
-                    rows_to_insert.append(("manual", None, p, ""))
 
         if rows_to_insert:
             async with db.pool.acquire() as conn:
@@ -6270,3 +6272,124 @@ async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
         )
     return {"ok": True, "campaign_id": camp["id"],
             "note": "Агент autodial_agent.py должен быть запущен в локальной сети АТС"}
+
+
+# ── Группы контактов автодозвона ───────────────────────────────────────────
+
+@app.get("/api/admin/autodial/groups")
+async def adg_list(_=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT g.*, COUNT(m.id) AS member_count FROM autodial_groups g "
+            "LEFT JOIN autodial_group_members m ON m.group_id = g.id "
+            "GROUP BY g.id ORDER BY g.name"
+        )
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/autodial/groups")
+async def adg_create(body: dict = Body(...), _=Depends(_get_admin)):
+    name  = (body.get("name") or "").strip()
+    notes = (body.get("notes") or "").strip()
+    if not name: raise HTTPException(400, "name required")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO autodial_groups (name,notes) VALUES ($1,$2) RETURNING *", name, notes
+        )
+    return dict(row)
+
+@app.put("/api/admin/autodial/groups/{gid}")
+async def adg_update(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    name  = (body.get("name") or "").strip()
+    notes = (body.get("notes") or "").strip()
+    if not name: raise HTTPException(400, "name required")
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE autodial_groups SET name=$1,notes=$2 WHERE id=$3", name, notes, gid)
+    return {"ok": True}
+
+@app.delete("/api/admin/autodial/groups/{gid}")
+async def adg_delete(gid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM autodial_groups WHERE id=$1", gid)
+    return {"ok": True}
+
+@app.get("/api/admin/autodial/groups/{gid}/members")
+async def adg_members(gid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM autodial_group_members WHERE group_id=$1 ORDER BY name, phone", gid
+        )
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/autodial/groups/{gid}/members")
+async def adg_add_members(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    """Добавляет участников в группу. phones: [{phone,name,source_type,source_id}]"""
+    members = body.get("members") or []
+    if not members: raise HTTPException(400, "members required")
+    inserted = 0
+    async with db.pool.acquire() as conn:
+        for m in members:
+            phone = (m.get("phone") or "").strip()
+            if not phone: continue
+            try:
+                await conn.execute(
+                    "INSERT INTO autodial_group_members (group_id,phone,name,source_type,source_id) "
+                    "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (group_id,phone) DO NOTHING",
+                    gid, phone, (m.get("name") or "").strip(),
+                    m.get("source_type") or "manual", m.get("source_id")
+                )
+                inserted += 1
+            except Exception:
+                pass
+    return {"ok": True, "inserted": inserted}
+
+@app.delete("/api/admin/autodial/groups/{gid}/members/{mid}")
+async def adg_del_member(gid: int, mid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM autodial_group_members WHERE id=$1 AND group_id=$2", mid, gid)
+    return {"ok": True}
+
+@app.get("/api/admin/autodial/contacts-browse")
+async def adg_contacts_browse(
+    q: str = "", prefix: str = "", letter: str = "", source: str = "both",
+    limit: int = 200, offset: int = 0, _=Depends(_get_admin)
+):
+    """Поиск клиентов/контактов для импорта в группу."""
+    results = []
+    async with db.pool.acquire() as conn:
+        if source in ("clients", "both"):
+            where, params = ["phone IS NOT NULL AND phone != ''"], []
+            i = 1
+            if q:
+                where.append(f"(phone ILIKE ${i} OR first_name ILIKE ${i} OR last_name ILIKE ${i})")
+                params.append(f"%{q}%"); i += 1
+            if prefix:
+                where.append(f"phone LIKE ${i}"); params.append(f"{prefix}%"); i += 1
+            if letter:
+                where.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
+                params.append(f"{letter}%"); i += 1
+            sql = f"SELECT id,'clients' AS src,phone,first_name,last_name,company FROM crm_clients WHERE {' AND '.join(where)} ORDER BY first_name,last_name LIMIT {limit} OFFSET {offset}"
+            rows = await conn.fetch(sql, *params)
+            for r in rows:
+                results.append({"id": r["id"], "source": "clients", "phone": r["phone"],
+                    "name": f"{r['first_name'] or ''} {r['last_name'] or ''}".strip(),
+                    "company": r.get("company") or ""})
+
+        if source in ("contacts", "both"):
+            where, params = ["phone IS NOT NULL AND phone != ''"], []
+            i = 1
+            if q:
+                where.append(f"(phone ILIKE ${i} OR first_name ILIKE ${i} OR last_name ILIKE ${i})")
+                params.append(f"%{q}%"); i += 1
+            if prefix:
+                where.append(f"phone LIKE ${i}"); params.append(f"{prefix}%"); i += 1
+            if letter:
+                where.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
+                params.append(f"{letter}%"); i += 1
+            sql = f"SELECT id,'contacts' AS src,phone,first_name,last_name,'' AS company FROM contacts WHERE {' AND '.join(where)} ORDER BY first_name,last_name LIMIT {limit} OFFSET {offset}"
+            rows = await conn.fetch(sql, *params)
+            for r in rows:
+                results.append({"id": r["id"], "source": "contacts", "phone": r["phone"],
+                    "name": f"{r['first_name'] or ''} {r['last_name'] or ''}".strip(),
+                    "company": r.get("company") or ""})
+
+    return results

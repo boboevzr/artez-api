@@ -293,6 +293,25 @@ async def create_tables():
             created_at    TIMESTAMPTZ DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS idx_autodial_calls_campaign ON autodial_calls(campaign_id)",
+        # Автодозвон: группы контактов
+        """CREATE TABLE IF NOT EXISTS autodial_groups (
+            id         SERIAL PRIMARY KEY,
+            name       VARCHAR(200) NOT NULL,
+            notes      TEXT DEFAULT '',
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS autodial_group_members (
+            id          SERIAL PRIMARY KEY,
+            group_id    INT REFERENCES autodial_groups(id) ON DELETE CASCADE,
+            phone       VARCHAR(20) NOT NULL,
+            name        VARCHAR(200) DEFAULT '',
+            source_type VARCHAR(20) DEFAULT 'manual',
+            source_id   INT DEFAULT NULL,
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(group_id, phone)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_agm_group ON autodial_group_members(group_id)",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS group_ids JSONB DEFAULT '[]'",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
