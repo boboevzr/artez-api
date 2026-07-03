@@ -6552,6 +6552,58 @@ async def adg_add_members(gid: int, body: dict = Body(...), _=Depends(_get_admin
                 pass
     return {"ok": True, "inserted": inserted}
 
+@app.post("/api/admin/autodial/groups/{gid}/members/import-all")
+async def adg_import_all(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    """Серверный массовый импорт по фильтру — для любого объёма без загрузки в браузер."""
+    src    = body.get("source", "both")
+    q      = (body.get("q") or "").strip()
+    prefix = (body.get("prefix") or "").strip()
+    letter = (body.get("letter") or "").strip()
+    async with db.pool.acquire() as conn:
+        where_parts = ["phone IS NOT NULL AND phone != ''"]
+        params: list = []
+        i = 1
+        if q:
+            where_parts.append(f"(phone ILIKE ${i} OR first_name ILIKE ${i} OR last_name ILIKE ${i})")
+            params.append(f"%{q}%"); i += 1
+        if prefix:
+            where_parts.append(f"phone LIKE ${i}"); params.append(f"{prefix}%"); i += 1
+        if letter:
+            where_parts.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
+            params.append(f"{letter}%"); i += 1
+        w = ' AND '.join(where_parts)
+        # нормализация телефона: убрать не-цифры, срезать +998 если 11+ цифр
+        phone_expr = (
+            "CASE WHEN regexp_replace(phone,'[^0-9]','','g') ~ '^998' "
+            "AND length(regexp_replace(phone,'[^0-9]','','g')) >= 11 "
+            "THEN substring(regexp_replace(phone,'[^0-9]','','g'),4) "
+            "ELSE regexp_replace(phone,'[^0-9]','','g') END"
+        )
+        parts = []
+        if src in ("clients", "both"):
+            parts.append(
+                f"SELECT {phone_expr} AS np, "
+                f"trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) AS nm, "
+                f"'clients'::text AS st, id AS sid FROM crm_clients WHERE {w}"
+            )
+        if src in ("contacts", "both"):
+            parts.append(
+                f"SELECT {phone_expr} AS np, "
+                f"trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) AS nm, "
+                f"'contacts'::text AS st, id AS sid FROM contacts WHERE {w}"
+            )
+        union_sql = ' UNION ALL '.join(parts)
+        gid_idx = i
+        params.append(gid)
+        result = await conn.execute(
+            f"INSERT INTO autodial_group_members (group_id,phone,name,source_type,source_id) "
+            f"SELECT ${gid_idx}::int, np, nm, st, sid FROM ({union_sql}) t WHERE length(np) >= 7 "
+            f"ON CONFLICT (group_id,phone) DO NOTHING",
+            *params
+        )
+    inserted = int(result.split()[-1]) if result else 0
+    return {"ok": True, "inserted": inserted}
+
 @app.delete("/api/admin/autodial/groups/{gid}/members/{mid}")
 async def adg_del_member(gid: int, mid: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
