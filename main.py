@@ -5276,6 +5276,26 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     asyncio.create_task(_notify_new_lead(lead or {}, creator_staff))
     await notify_sheets_new_order(lead_code, order)
 
+    # Автозвонок при быстрой заявке (обратный звонок)
+    if order.is_quick and lead:
+        try:
+            cb_phone = _ami_phone(order.phone)
+            async with db.pool.acquire() as conn:
+                camp = await conn.fetchrow(
+                    "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
+                    "VALUES ($1,'7000',1,'callback','running') RETURNING id",
+                    f"Обратный звонок {lead_code}"
+                )
+                await conn.execute(
+                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'callback',$2,$3)",
+                    camp["id"], cb_phone, full_name or order.phone
+                )
+                await conn.execute(
+                    "UPDATE autodial_campaigns SET total_count=1 WHERE id=$1", camp["id"]
+                )
+        except Exception as e:
+            logging.warning(f"Автозвонок callback failed: {e}")
+
     await db.upsert_crm_client(
         phone=order.phone,
         first_name=order.first_name,
