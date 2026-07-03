@@ -6429,8 +6429,8 @@ async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
     if not phone: raise HTTPException(400, "phone required")
     async with db.pool.acquire() as conn:
         camp = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
-            "VALUES ($1,$2,1,'manual','running') RETURNING *",
+            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status,sched_time_from,sched_time_to) "
+            "VALUES ($1,$2,1,'manual','running','00:00','23:59') RETURNING *",
             f"Тест {phone}", exten
         )
         await conn.execute(
