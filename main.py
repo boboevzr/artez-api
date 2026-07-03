@@ -6312,6 +6312,14 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
     if not campaign: raise HTTPException(404)
     if campaign["status"] == "running": raise HTTPException(400, "Already running")
 
+    # Повтор: очищаем старые звонки если кампания уже завершалась
+    if campaign["status"] in ("done", "stopped", "error"):
+        async with db.pool.acquire() as conn:
+            await conn.execute("DELETE FROM autodial_calls WHERE campaign_id=$1", cid)
+            await conn.execute(
+                "UPDATE autodial_campaigns SET dialed_count=0,answered_count=0,failed_count=0,total_count=0,started_at=NOW(),finished_at=NULL WHERE id=$1", cid
+            )
+
     # Build call list if empty
     async with db.pool.acquire() as conn:
         cnt = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", cid)
