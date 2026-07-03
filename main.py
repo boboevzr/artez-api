@@ -6326,6 +6326,22 @@ async def autodial_list(_=Depends(_get_admin)):
         rows = await conn.fetch("SELECT * FROM autodial_campaigns ORDER BY created_at DESC")
     return [dict(r) for r in rows]
 
+def _parse_time(s):
+    """'HH:MM' → datetime.time для asyncpg."""
+    from datetime import time as _time
+    if not s: return None
+    try:
+        h, m = s.split(':'); return _time(int(h), int(m))
+    except Exception: return None
+
+def _parse_date(s):
+    """'YYYY-MM-DD' → datetime.date для asyncpg."""
+    from datetime import date as _date
+    if not s: return None
+    try:
+        y, mo, d = s.split('-'); return _date(int(y), int(mo), int(d))
+    except Exception: return None
+
 @app.post("/api/admin/autodial/campaigns")
 async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
     import json as _json
@@ -6336,10 +6352,11 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
             "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
             body.name, body.ivr_exten, body.max_parallel,
             _json.dumps(body.group_ids),
-            body.sched_time_from, body.sched_time_to,
+            _parse_time(body.sched_time_from) or _parse_time("09:00"),
+            _parse_time(body.sched_time_to)   or _parse_time("21:00"),
             body.sched_days or [0,1,2,3,4,5,6],
-            body.sched_date_from or None,
-            body.sched_date_to or None,
+            _parse_date(body.sched_date_from),
+            _parse_date(body.sched_date_to),
         )
     return dict(row)
 
@@ -6347,13 +6364,19 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
 async def autodial_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
     allowed = {'name','ivr_exten','max_parallel','sched_time_from','sched_time_to',
                'sched_days','sched_date_from','sched_date_to'}
-    fields = {k: (v or None) for k, v in body.items() if k in allowed}
-    if not fields:
-        raise HTTPException(400, "no updatable fields")
-    sets  = ', '.join(f"{k}=${i+2}" for i, k in enumerate(fields))
-    vals  = list(fields.values())
+    raw = {k: v for k, v in body.items() if k in allowed}
+    if not raw: raise HTTPException(400, "no updatable fields")
+    fields = {}
+    for k, v in raw.items():
+        if k in ('sched_time_from', 'sched_time_to'):
+            fields[k] = _parse_time(v)
+        elif k in ('sched_date_from', 'sched_date_to'):
+            fields[k] = _parse_date(v)
+        else:
+            fields[k] = v or None
+    sets = ', '.join(f"{k}=${i+2}" for i, k in enumerate(fields))
     async with db.pool.acquire() as conn:
-        await conn.execute(f"UPDATE autodial_campaigns SET {sets} WHERE id=$1", cid, *vals)
+        await conn.execute(f"UPDATE autodial_campaigns SET {sets} WHERE id=$1", cid, *fields.values())
     return {"ok": True}
 
 @app.get("/api/admin/autodial/campaigns/{cid}")
