@@ -2192,48 +2192,6 @@ async def contacts_bulk(req: ContactsBulkRequest, _=Depends(_get_admin)):
     result = await db.bulk_insert_contacts(req.rows)
     return {"ok": True, **result}
 
-@app.get("/api/contacts/{contact_id}")
-async def contact_get(contact_id: int, _=Depends(_get_admin)):
-    async with db.pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM contacts WHERE id=$1", contact_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Контакт не найден")
-    return {"ok": True, "contact": dict(row)}
-
-@app.put("/api/contacts/{contact_id}")
-async def contact_update(contact_id: int, req: ContactUpdateRequest,
-                         _=Depends(_get_admin)):
-    data = {k: v for k, v in req.dict().items() if v is not None}
-    contact = await db.update_contact(contact_id, **data)
-    if not contact:
-        raise HTTPException(status_code=404, detail="Контакт не найден")
-    return {"ok": True, "contact": contact}
-
-class ContactDeleteRequest(BaseModel):
-    password: str
-
-@app.post("/api/contacts/{contact_id}/delete")
-async def contact_delete(contact_id: int, req: ContactDeleteRequest):
-    if not (apass := await get_admin_pass()) or req.password != apass:
-        raise HTTPException(status_code=403, detail="Неверный пароль")
-    ok = await db.delete_contact(contact_id)
-    if not ok:
-        raise HTTPException(status_code=404, detail="Контакт не найден")
-    return {"ok": True}
-
-
-class ContactsPurgeRequest(BaseModel):
-    password: str
-
-@app.post("/api/contacts/purge")
-async def contacts_purge(req: ContactsPurgeRequest):
-    """Удалить все контакты — только по паролю администратора."""
-    if not (apass := await get_admin_pass()) or req.password != apass:
-        raise HTTPException(status_code=403, detail="Неверный пароль")
-    deleted = await db.delete_all_contacts()
-    return {"ok": True, "deleted": deleted}
-
-
 @app.get("/api/contacts/export")
 async def contacts_export(
     search: str = "", source: str = "",
@@ -2328,6 +2286,48 @@ async def contacts_duplicates(_=Depends(_get_admin)):
             for r in short_phones
         ],
     }
+
+
+@app.get("/api/contacts/{contact_id}")
+async def contact_get(contact_id: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM contacts WHERE id=$1", contact_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Контакт не найден")
+    return {"ok": True, "contact": dict(row)}
+
+@app.put("/api/contacts/{contact_id}")
+async def contact_update(contact_id: int, req: ContactUpdateRequest,
+                         _=Depends(_get_admin)):
+    data = {k: v for k, v in req.dict().items() if v is not None}
+    contact = await db.update_contact(contact_id, **data)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Контакт не найден")
+    return {"ok": True, "contact": contact}
+
+class ContactDeleteRequest(BaseModel):
+    password: str
+
+@app.post("/api/contacts/{contact_id}/delete")
+async def contact_delete(contact_id: int, req: ContactDeleteRequest):
+    if not (apass := await get_admin_pass()) or req.password != apass:
+        raise HTTPException(status_code=403, detail="Неверный пароль")
+    ok = await db.delete_contact(contact_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Контакт не найден")
+    return {"ok": True}
+
+
+class ContactsPurgeRequest(BaseModel):
+    password: str
+
+@app.post("/api/contacts/purge")
+async def contacts_purge(req: ContactsPurgeRequest):
+    """Удалить все контакты — только по паролю администратора."""
+    if not (apass := await get_admin_pass()) or req.password != apass:
+        raise HTTPException(status_code=403, detail="Неверный пароль")
+    deleted = await db.delete_all_contacts()
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/api/prices")
