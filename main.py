@@ -6537,48 +6537,53 @@ async def adg_del_member(gid: int, mid: int, _=Depends(_get_admin)):
 @app.get("/api/admin/autodial/contacts-browse")
 async def adg_contacts_browse(
     q: str = "", prefix: str = "", letter: str = "", source: str = "both",
-    limit: int = 200, offset: int = 0, _=Depends(_get_admin)
+    limit: int = 100, offset: int = 0, _=Depends(_get_admin)
 ):
-    """Поиск клиентов/контактов для импорта в группу."""
-    results = []
+    """Поиск клиентов/контактов для импорта — с пагинацией и общим счётчиком."""
     async with db.pool.acquire() as conn:
+        where_parts = ["phone IS NOT NULL AND phone != ''"]
+        params: list = []
+        i = 1
+        if q:
+            where_parts.append(f"(phone ILIKE ${i} OR first_name ILIKE ${i} OR last_name ILIKE ${i})")
+            params.append(f"%{q}%"); i += 1
+        if prefix:
+            where_parts.append(f"phone LIKE ${i}"); params.append(f"{prefix}%"); i += 1
+        if letter:
+            where_parts.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
+            params.append(f"{letter}%"); i += 1
+        w = ' AND '.join(where_parts)
+
+        parts = []
         if source in ("clients", "both"):
-            where, params = ["phone IS NOT NULL AND phone != ''"], []
-            i = 1
-            if q:
-                where.append(f"(phone ILIKE ${i} OR first_name ILIKE ${i} OR last_name ILIKE ${i})")
-                params.append(f"%{q}%"); i += 1
-            if prefix:
-                where.append(f"phone LIKE ${i}"); params.append(f"{prefix}%"); i += 1
-            if letter:
-                where.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
-                params.append(f"{letter}%"); i += 1
-            sql = f"SELECT id,'clients' AS src,phone,first_name,last_name,company FROM crm_clients WHERE {' AND '.join(where)} ORDER BY first_name,last_name LIMIT {limit} OFFSET {offset}"
-            rows = await conn.fetch(sql, *params)
-            for r in rows:
-                results.append({"id": r["id"], "source": "clients", "phone": r["phone"],
-                    "name": f"{r['first_name'] or ''} {r['last_name'] or ''}".strip(),
-                    "company": r.get("company") or ""})
-
+            parts.append(
+                f"SELECT id, 'clients'::text AS source, phone, "
+                f"trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) AS name, "
+                f"coalesce(company,'') AS company FROM crm_clients WHERE {w}"
+            )
         if source in ("contacts", "both"):
-            where, params = ["phone IS NOT NULL AND phone != ''"], []
-            i = 1
-            if q:
-                where.append(f"(phone ILIKE ${i} OR first_name ILIKE ${i} OR last_name ILIKE ${i})")
-                params.append(f"%{q}%"); i += 1
-            if prefix:
-                where.append(f"phone LIKE ${i}"); params.append(f"{prefix}%"); i += 1
-            if letter:
-                where.append(f"(first_name ILIKE ${i} OR last_name ILIKE ${i})")
-                params.append(f"{letter}%"); i += 1
-            sql = f"SELECT id,'contacts' AS src,phone,first_name,last_name,'' AS company FROM contacts WHERE {' AND '.join(where)} ORDER BY first_name,last_name LIMIT {limit} OFFSET {offset}"
-            rows = await conn.fetch(sql, *params)
-            for r in rows:
-                results.append({"id": r["id"], "source": "contacts", "phone": r["phone"],
-                    "name": f"{r['first_name'] or ''} {r['last_name'] or ''}".strip(),
-                    "company": r.get("company") or ""})
+            parts.append(
+                f"SELECT id, 'contacts'::text AS source, phone, "
+                f"trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) AS name, "
+                f"''::text AS company FROM contacts WHERE {w}"
+            )
 
-    return results
+        union_sql = ' UNION ALL '.join(parts)
+        rows = await conn.fetch(
+            f"SELECT *, COUNT(*) OVER() AS total_count FROM ({union_sql}) t "
+            f"ORDER BY name, phone LIMIT {limit} OFFSET {offset}",
+            *params
+        )
+
+    total = int(rows[0]["total_count"]) if rows else 0
+    return {
+        "results": [
+            {"id": r["id"], "source": r["source"], "phone": r["phone"],
+             "name": r["name"], "company": r["company"]}
+            for r in rows
+        ],
+        "total": total,
+    }
 
 
 # ── CallerID и IVR списки ──────────────────────────────────────────────────
