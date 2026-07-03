@@ -6394,6 +6394,12 @@ async def autodial_retry(cid: int, _=Depends(_get_admin)):
         )
     return {"ok": True}
 
+@app.post("/api/admin/autodial/campaigns/{cid}/pause")
+async def autodial_pause(cid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE autodial_campaigns SET status='paused' WHERE id=$1", cid)
+    return {"ok": True}
+
 @app.post("/api/admin/autodial/campaigns/{cid}/stop")
 async def autodial_stop(cid: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
