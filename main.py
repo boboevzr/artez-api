@@ -6374,6 +6374,26 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
         )
     return {"ok": True}
 
+@app.post("/api/admin/autodial/campaigns/{cid}/retry")
+async def autodial_retry(cid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+    if not campaign: raise HTTPException(404)
+    if campaign["status"] == "running": raise HTTPException(400, "Already running")
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE autodial_calls SET status='pending', ami_action_id=NULL, started_at=NULL, hangup_at=NULL, hangup_cause=NULL "
+            "WHERE campaign_id=$1 AND status='no_answer'", cid
+        )
+        pending = await conn.fetchval(
+            "SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1 AND status='pending'", cid
+        )
+        await conn.execute(
+            "UPDATE autodial_campaigns SET status='running', dialed_count=0, answered_count=0, failed_count=0, "
+            "total_count=$2, started_at=NOW(), finished_at=NULL WHERE id=$1", cid, pending
+        )
+    return {"ok": True}
+
 @app.post("/api/admin/autodial/campaigns/{cid}/stop")
 async def autodial_stop(cid: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
