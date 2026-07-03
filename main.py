@@ -6309,10 +6309,15 @@ async def _autodial_campaign_task(campaign_id: int):
 # ── Endpoints ─────────────────────────────────────────────────────────────
 
 class _AutodialCreate(BaseModel):
-    name:         str
-    ivr_exten:    str = "7001"
-    max_parallel: int = 3
-    group_ids:    list = []
+    name:            str
+    ivr_exten:       str = "7000"
+    max_parallel:    int = 4
+    group_ids:       list = []
+    sched_time_from: str = "09:00"
+    sched_time_to:   str = "21:00"
+    sched_days:      list = [0, 1, 2, 3, 4, 5, 6]
+    sched_date_from: Optional[str] = None
+    sched_date_to:   Optional[str] = None
 
 @app.get("/api/admin/autodial/campaigns")
 async def autodial_list(_=Depends(_get_admin)):
@@ -6325,12 +6330,30 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
     import json as _json
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,group_ids) "
-            "VALUES ($1,$2,$3,$4) RETURNING *",
+            "INSERT INTO autodial_campaigns "
+            "(name,ivr_exten,max_parallel,group_ids,sched_time_from,sched_time_to,sched_days,sched_date_from,sched_date_to) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *",
             body.name, body.ivr_exten, body.max_parallel,
-            _json.dumps(body.group_ids)
+            _json.dumps(body.group_ids),
+            body.sched_time_from, body.sched_time_to,
+            body.sched_days or [0,1,2,3,4,5,6],
+            body.sched_date_from or None,
+            body.sched_date_to or None,
         )
     return dict(row)
+
+@app.put("/api/admin/autodial/campaigns/{cid}")
+async def autodial_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    allowed = {'name','ivr_exten','max_parallel','sched_time_from','sched_time_to',
+               'sched_days','sched_date_from','sched_date_to'}
+    fields = {k: (v or None) for k, v in body.items() if k in allowed}
+    if not fields:
+        raise HTTPException(400, "no updatable fields")
+    sets  = ', '.join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    vals  = list(fields.values())
+    async with db.pool.acquire() as conn:
+        await conn.execute(f"UPDATE autodial_campaigns SET {sets} WHERE id=$1", cid, *vals)
+    return {"ok": True}
 
 @app.get("/api/admin/autodial/campaigns/{cid}")
 async def autodial_get(cid: int, _=Depends(_get_admin)):

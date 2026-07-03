@@ -313,6 +313,11 @@ async def create_tables():
         "CREATE INDEX IF NOT EXISTS idx_agm_group ON autodial_group_members(group_id)",
         "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS group_ids JSONB DEFAULT '[]'",
         "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS caller_id VARCHAR(20) DEFAULT '1000'",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS sched_time_from TIME DEFAULT '09:00'",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS sched_time_to   TIME DEFAULT '21:00'",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS sched_days SMALLINT[] DEFAULT '{0,1,2,3,4,5,6}'",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS sched_date_from DATE",
+        "ALTER TABLE autodial_campaigns ADD COLUMN IF NOT EXISTS sched_date_to   DATE",
         """CREATE TABLE IF NOT EXISTS autodial_callerids (
             id         SERIAL PRIMARY KEY,
             number     VARCHAR(20) NOT NULL,
