@@ -5279,22 +5279,28 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     # Автозвонок при быстрой заявке (обратный звонок)
     if order.is_quick and lead:
         try:
-            cb_phone = _ami_phone(order.phone)
-            async with db.pool.acquire() as conn:
-                camp = await conn.fetchrow(
-                    "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
-                    "VALUES ($1,'7000',1,'callback','running') RETURNING id",
-                    f"Обратный звонок {lead_code}"
-                )
-                await conn.execute(
-                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'callback',$2,$3)",
-                    camp["id"], cb_phone, full_name or order.phone
-                )
-                await conn.execute(
-                    "UPDATE autodial_campaigns SET total_count=1 WHERE id=$1", camp["id"]
-                )
+            raw_phone = (user["phone"] if user and user.get("phone") else order.phone) or ""
+            cb_phone = _ami_phone(raw_phone)
+            logging.info(f"Callback autodial: raw={raw_phone!r} → ami={cb_phone!r} lead={lead_code}")
+            if cb_phone and len(cb_phone) >= 9:
+                async with db.pool.acquire() as conn:
+                    camp = await conn.fetchrow(
+                        "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
+                        "VALUES ($1,'7000',1,'callback','running') RETURNING id",
+                        f"Обратный звонок {lead_code}"
+                    )
+                    await conn.execute(
+                        "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'callback',$2,$3)",
+                        camp["id"], cb_phone, full_name or raw_phone
+                    )
+                    await conn.execute(
+                        "UPDATE autodial_campaigns SET total_count=1 WHERE id=$1", camp["id"]
+                    )
+                    logging.info(f"Callback campaign created: id={camp['id']} phone={cb_phone}")
+            else:
+                logging.warning(f"Callback: телефон слишком короткий {raw_phone!r}")
         except Exception as e:
-            logging.warning(f"Автозвонок callback failed: {e}")
+            logging.error(f"Автозвонок callback failed: {e}", exc_info=True)
 
     await db.upsert_crm_client(
         phone=order.phone,
