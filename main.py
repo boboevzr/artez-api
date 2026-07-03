@@ -2234,6 +2234,72 @@ async def contacts_purge(req: ContactsPurgeRequest):
     return {"ok": True, "deleted": deleted}
 
 
+@app.get("/api/contacts/duplicates")
+async def contacts_duplicates(_=Depends(_get_admin)):
+    """Анализ дублирующих телефонных номеров в справочнике."""
+    async with db.pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM contacts")
+
+        # Одинаковые номера (разные форматы записи)
+        format_dups = await conn.fetch("""
+            WITH n AS (
+                SELECT id, phone, first_name, last_name,
+                       regexp_replace(regexp_replace(phone, '[^0-9]', '', 'g'), '^998', '') AS norm
+                FROM contacts WHERE phone IS NOT NULL AND phone != ''
+            )
+            SELECT norm, COUNT(*) AS cnt,
+                   array_agg(id    ORDER BY id) AS ids,
+                   array_agg(phone ORDER BY id) AS phones,
+                   array_agg(trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) ORDER BY id) AS names
+            FROM n WHERE length(norm) >= 7
+            GROUP BY norm HAVING COUNT(*) > 1
+            ORDER BY cnt DESC, norm
+        """)
+
+        # Основной номер одного контакта = доп. номер другого
+        phone2_cross = await conn.fetch("""
+            SELECT c1.id AS id1, c1.phone AS phone1,
+                   trim(coalesce(c1.first_name,'')||' '||coalesce(c1.last_name,'')) AS name1,
+                   c2.id AS id2, c2.phone2 AS phone2_raw,
+                   trim(coalesce(c2.first_name,'')||' '||coalesce(c2.last_name,'')) AS name2
+            FROM contacts c1
+            JOIN contacts c2
+              ON regexp_replace(regexp_replace(c1.phone,'[^0-9]','','g'),'^998','')
+               = regexp_replace(regexp_replace(c2.phone2,'[^0-9]','','g'),'^998','')
+            WHERE c1.id != c2.id AND c2.phone2 IS NOT NULL AND c2.phone2 != ''
+            ORDER BY c1.phone, c1.id
+        """)
+
+        # Короткие / некорректные номера (< 7 цифр после нормализации)
+        short_phones = await conn.fetch("""
+            SELECT id, phone, trim(coalesce(first_name,'')||' '||coalesce(last_name,'')) AS name,
+                   length(regexp_replace(regexp_replace(phone,'[^0-9]','','g'),'^998','')) AS norm_len
+            FROM contacts
+            WHERE phone IS NOT NULL AND phone != ''
+              AND length(regexp_replace(regexp_replace(phone,'[^0-9]','','g'),'^998','')) < 7
+            ORDER BY norm_len, phone
+        """)
+
+    return {
+        "ok": True,
+        "total": total,
+        "format_duplicates": [
+            {"norm": r["norm"], "cnt": r["cnt"],
+             "ids": list(r["ids"]), "phones": list(r["phones"]), "names": list(r["names"])}
+            for r in format_dups
+        ],
+        "phone2_matches": [
+            {"id1": r["id1"], "phone1": r["phone1"], "name1": r["name1"],
+             "id2": r["id2"], "phone2_raw": r["phone2_raw"], "name2": r["name2"]}
+            for r in phone2_cross
+        ],
+        "short_phones": [
+            {"id": r["id"], "phone": r["phone"], "name": r["name"], "norm_len": r["norm_len"]}
+            for r in short_phones
+        ],
+    }
+
+
 @app.get("/api/prices")
 async def get_prices():
     """Возвращает актуальные цены из БД для калькулятора и прайс-листа на сайте"""
