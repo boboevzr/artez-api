@@ -6424,21 +6424,24 @@ async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
     Создаёт одноразовую кампанию с одним номером — агент (autodial_agent.py)
     подхватит её и позвонит. Агент должен работать ЛОКАЛЬНО (в сети АТС 192.168.1.x).
     """
-    phone = (body.get("phone") or "").strip()
     exten = (body.get("exten") or "1000").strip()
-    if not phone: raise HTTPException(400, "phone required")
+    raw_phones = body.get("phones") or ([body.get("phone")] if body.get("phone") else [])
+    phones = [p.strip() for p in raw_phones if p and str(p).strip()][:5]
+    if not phones: raise HTTPException(400, "phone required")
     async with db.pool.acquire() as conn:
+        label = phones[0] if len(phones) == 1 else f"{phones[0]} +{len(phones)-1}"
         camp = await conn.fetchrow(
             "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status,sched_time_from,sched_time_to) "
-            "VALUES ($1,$2,1,'manual','running','00:00','23:59') RETURNING *",
-            f"Тест {phone}", exten
+            "VALUES ($1,$2,$3,'manual','running','00:01','23:59') RETURNING *",
+            f"Тест {label}", exten, len(phones)
         )
+        for p in phones:
+            await conn.execute(
+                "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'manual',$2,'Тест')",
+                camp["id"], p
+            )
         await conn.execute(
-            "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'manual',$2,'Тест')",
-            camp["id"], phone
-        )
-        await conn.execute(
-            "UPDATE autodial_campaigns SET total_count=1 WHERE id=$1", camp["id"]
+            "UPDATE autodial_campaigns SET total_count=$1 WHERE id=$2", len(phones), camp["id"]
         )
     return {"ok": True, "campaign_id": camp["id"],
             "note": "Агент autodial_agent.py должен быть запущен в локальной сети АТС"}
