@@ -2234,6 +2234,36 @@ async def contacts_purge(req: ContactsPurgeRequest):
     return {"ok": True, "deleted": deleted}
 
 
+@app.get("/api/contacts/export")
+async def contacts_export(
+    search: str = "", source: str = "",
+    has_phone2: bool = False, has_address: bool = False, valid_phone: bool = False,
+    _=Depends(_get_admin)
+):
+    """Экспорт контактов без лимита с фильтрами."""
+    async with db.pool.acquire() as conn:
+        conditions = ["1=1"]
+        params: list = []
+        i = 1
+        if search:
+            conditions.append(
+                f"(phone ILIKE ${i} OR phone2 ILIKE ${i} OR first_name ILIKE ${i} "
+                f"OR last_name ILIKE ${i} OR middle_name ILIKE ${i} OR address ILIKE ${i} OR short_address ILIKE ${i})"
+            )
+            params.append(f"%{search}%"); i += 1
+        if source:
+            conditions.append(f"source = ${i}"); params.append(source); i += 1
+        if has_phone2:
+            conditions.append("phone2 IS NOT NULL AND phone2 != ''")
+        if has_address:
+            conditions.append("(address IS NOT NULL AND address != '' OR short_address IS NOT NULL AND short_address != '')")
+        if valid_phone:
+            conditions.append("length(regexp_replace(regexp_replace(phone,'[^0-9]','','g'),'^998','')) >= 9")
+        sql = f"SELECT * FROM contacts WHERE {' AND '.join(conditions)} ORDER BY id DESC"
+        rows = await conn.fetch(sql, *params)
+    return {"ok": True, "contacts": [dict(r) for r in rows], "total": len(rows)}
+
+
 @app.get("/api/contacts/duplicates")
 async def contacts_duplicates(_=Depends(_get_admin)):
     """Анализ дублирующих телефонных номеров в справочнике."""
