@@ -6,6 +6,7 @@ import asyncio
 import random
 import string
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import json as _json
 import aiohttp
