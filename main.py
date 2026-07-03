@@ -6103,7 +6103,7 @@ async def ws_chat_staff(websocket: WebSocket, token: str):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# AUTODIAL — AMI КЛИЕНТ + АВТОДОЗВОН
+# AUTODIAL — управление кампаниями (AMI вызовы делает autodial_agent.py локально)
 # ══════════════════════════════════════════════════════════════════════════
 import uuid as _uuid
 
@@ -6223,88 +6223,7 @@ class AMIClient:
 
 
 _ami = AMIClient()
-_active_campaigns: dict = {}   # campaign_id -> asyncio.Task
 
-
-async def _autodial_campaign_task(campaign_id: int):
-    try:
-        async with db.pool.acquire() as conn:
-            campaign = dict(await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", campaign_id))
-        ivr_exten    = campaign.get("ivr_exten") or "7001"
-        max_parallel = campaign.get("max_parallel") or 3
-
-        if not _ami._connected:
-            await _ami.connect()
-
-        async with db.pool.acquire() as conn:
-            pending = await conn.fetch(
-                "SELECT id, phone, name FROM autodial_calls WHERE campaign_id=$1 AND status='pending' ORDER BY id",
-                campaign_id
-            )
-
-        if not pending:
-            async with db.pool.acquire() as conn:
-                await conn.execute("UPDATE autodial_campaigns SET status='done', finished_at=NOW() WHERE id=$1", campaign_id)
-            return
-
-        sem = asyncio.Semaphore(max_parallel)
-
-        async def dial_one(row):
-            async with sem:
-                call_id   = row["id"]
-                phone     = row["phone"]
-                action_id = f"ad_{call_id}_{_uuid.uuid4().hex[:8]}"
-
-                async with db.pool.acquire() as conn:
-                    await conn.execute(
-                        "UPDATE autodial_calls SET status='calling', ami_action_id=$1, started_at=NOW() WHERE id=$2",
-                        action_id, call_id
-                    )
-                    await conn.execute(
-                        "UPDATE autodial_campaigns SET dialed_count=dialed_count+1 WHERE id=$1", campaign_id
-                    )
-                try:
-                    await _ami.originate(phone, ivr_exten, action_id)
-                    resp = await _ami.wait_response(action_id, timeout=40.0)
-                    if resp.get("Response") == "Success":
-                        status = "answered"
-                    else:
-                        reason = (resp.get("Reason") or "").lower()
-                        status = "busy" if "busy" in reason else "no_answer"
-
-                    async with db.pool.acquire() as conn:
-                        await conn.execute(
-                            "UPDATE autodial_calls SET status=$1, hangup_at=NOW(), hangup_cause=$2 WHERE id=$3",
-                            status, resp.get("Reason", ""), call_id
-                        )
-                        col = "answered_count" if status == "answered" else "failed_count"
-                        await conn.execute(f"UPDATE autodial_campaigns SET {col}={col}+1 WHERE id=$1", campaign_id)
-                except Exception as e:
-                    logging.error(f"autodial call {call_id}: {e}")
-                    async with db.pool.acquire() as conn:
-                        await conn.execute("UPDATE autodial_calls SET status='failed', hangup_at=NOW() WHERE id=$1", call_id)
-                        await conn.execute("UPDATE autodial_campaigns SET failed_count=failed_count+1 WHERE id=$1", campaign_id)
-                await asyncio.sleep(1)
-
-        await asyncio.gather(*[asyncio.create_task(dial_one(r)) for r in pending], return_exceptions=True)
-
-        async with db.pool.acquire() as conn:
-            cur = await conn.fetchrow("SELECT status FROM autodial_campaigns WHERE id=$1", campaign_id)
-        if cur and cur["status"] == "running":
-            async with db.pool.acquire() as conn:
-                await conn.execute("UPDATE autodial_campaigns SET status='done', finished_at=NOW() WHERE id=$1", campaign_id)
-
-    except asyncio.CancelledError:
-        async with db.pool.acquire() as conn:
-            await conn.execute("UPDATE autodial_campaigns SET status='stopped', finished_at=NOW() WHERE id=$1", campaign_id)
-    except Exception as e:
-        logging.error(f"Campaign {campaign_id} error: {e}")
-        async with db.pool.acquire() as conn:
-            await conn.execute("UPDATE autodial_campaigns SET status='error' WHERE id=$1", campaign_id)
-    finally:
-        _active_campaigns.pop(campaign_id, None)
-        if not _active_campaigns and _ami._connected:
-            await _ami.disconnect()
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────
@@ -6445,16 +6364,10 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
         await conn.execute(
             "UPDATE autodial_campaigns SET status='running', started_at=COALESCE(started_at,NOW()) WHERE id=$1", cid
         )
-
-    if cid in _active_campaigns:
-        _active_campaigns[cid].cancel()
-    _active_campaigns[cid] = asyncio.create_task(_autodial_campaign_task(cid))
     return {"ok": True}
 
 @app.post("/api/admin/autodial/campaigns/{cid}/stop")
 async def autodial_stop(cid: int, _=Depends(_get_admin)):
-    task = _active_campaigns.get(cid)
-    if task: task.cancel()
     async with db.pool.acquire() as conn:
         await conn.execute("UPDATE autodial_campaigns SET status='stopped', finished_at=NOW() WHERE id=$1", cid)
     return {"ok": True}
@@ -6467,8 +6380,6 @@ async def autodial_calls(cid: int, _=Depends(_get_admin)):
 
 @app.delete("/api/admin/autodial/campaigns/{cid}")
 async def autodial_delete(cid: int, _=Depends(_get_admin)):
-    task = _active_campaigns.get(cid)
-    if task: task.cancel()
     async with db.pool.acquire() as conn:
         await conn.execute("DELETE FROM autodial_campaigns WHERE id=$1", cid)
     return {"ok": True}
