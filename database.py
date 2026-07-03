@@ -325,6 +325,7 @@ async def create_tables():
             label      VARCHAR(100) DEFAULT '',
             sort_order INT DEFAULT 0
         )""",
+        "ALTER TABLE autodial_ivrs ADD COLUMN IF NOT EXISTS ivr_group VARCHAR(30) DEFAULT 'promo'",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -332,19 +333,24 @@ async def create_tables():
                 await c.execute(sql)
             except Exception:
                 pass
-        # Начальные данные CallerID / IVR (только если пусто)
-        cnt = await c.fetchval("SELECT COUNT(*) FROM autodial_callerids")
-        if cnt == 0:
+        # IVR: если нет записей с группами — чистим старые и засеваем новые
+        cnt_grouped = await c.fetchval("SELECT COUNT(*) FROM autodial_ivrs WHERE ivr_group IS NOT NULL AND ivr_group != ''")
+        if cnt_grouped == 0:
+            await c.execute("DELETE FROM autodial_ivrs")
+            ivr_seeds = [
+                # 📢 Рекламные (7001–7005)
+                ("7001","Реклама 1","promo"),("7002","Реклама 2","promo"),
+                ("7003","Реклама 3","promo"),("7004","Реклама 4","promo"),("7005","Реклама 5","promo"),
+                # 🎉 Поздравления (7011–7015)
+                ("7011","Поздравление 1","greetings"),("7012","Поздравление 2","greetings"),
+                ("7013","Поздравление 3","greetings"),("7014","Поздравление 4","greetings"),("7015","Поздравление 5","greetings"),
+                # 🔔 Напоминания (7021–7025)
+                ("7021","Напоминание 1","reminders"),("7022","Напоминание 2","reminders"),
+                ("7023","Напоминание 3","reminders"),("7024","Напоминание 4","reminders"),("7025","Напоминание 5","reminders"),
+            ]
             await c.executemany(
-                "INSERT INTO autodial_callerids (number,label,sort_order) VALUES ($1,$2,$3)",
-                [("2001","Оператор 1",1),("2002","Оператор 2",2),("2003","Оператор 3",3),
-                 ("2004","Оператор 4",4),("2005","Оператор 5",5)]
-            )
-        cnt = await c.fetchval("SELECT COUNT(*) FROM autodial_ivrs")
-        if cnt == 0:
-            await c.executemany(
-                "INSERT INTO autodial_ivrs (exten,label,sort_order) VALUES ($1,$2,$3)",
-                [("7000","Общее приветствие",1),("7001","Акция / скидки",2),("7002","Напоминание о заказе",3)]
+                "INSERT INTO autodial_ivrs (exten,label,ivr_group) VALUES ($1,$2,$3)",
+                ivr_seeds
             )
 
     # ── Шаг 2: миграции staff (добавляем недостающие колонки) ────────────

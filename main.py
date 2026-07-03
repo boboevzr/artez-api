@@ -6051,7 +6051,7 @@ async def _autodial_campaign_task(campaign_id: int):
     try:
         async with db.pool.acquire() as conn:
             campaign = dict(await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", campaign_id))
-        ivr_exten    = campaign.get("ivr_exten") or "1000"
+        ivr_exten    = campaign.get("ivr_exten") or "7001"
         max_parallel = campaign.get("max_parallel") or 3
 
         if not _ami._connected:
@@ -6132,8 +6132,7 @@ async def _autodial_campaign_task(campaign_id: int):
 
 class _AutodialCreate(BaseModel):
     name:         str
-    ivr_exten:    str = "7000"
-    caller_id:    str = "1000"
+    ivr_exten:    str = "7001"
     max_parallel: int = 3
     group_ids:    list = []
 
@@ -6148,9 +6147,9 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
     import json as _json
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,caller_id,max_parallel,group_ids) "
-            "VALUES ($1,$2,$3,$4,$5) RETURNING *",
-            body.name, body.ivr_exten, body.caller_id, body.max_parallel,
+            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,group_ids) "
+            "VALUES ($1,$2,$3,$4) RETURNING *",
+            body.name, body.ivr_exten, body.max_parallel,
             _json.dumps(body.group_ids)
         )
     return dict(row)
@@ -6442,7 +6441,7 @@ async def ad_callerid_delete(cid: int, _=Depends(_get_admin)):
 @app.get("/api/admin/autodial/ivrs")
 async def ad_ivrs(_=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
-        rows = await conn.fetch("SELECT * FROM autodial_ivrs ORDER BY (regexp_replace(exten,'[^0-9]','','g'))::bigint ASC, id")
+        rows = await conn.fetch("SELECT * FROM autodial_ivrs ORDER BY ivr_group, (regexp_replace(exten,'[^0-9]','','g'))::bigint ASC, id")
     return [dict(r) for r in rows]
 
 @app.post("/api/admin/autodial/ivrs")
@@ -6451,8 +6450,8 @@ async def ad_ivr_create(body: dict = Body(...), _=Depends(_get_admin)):
     if not exten: raise HTTPException(400, "exten required")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO autodial_ivrs (exten,label,sort_order) VALUES ($1,$2,$3) RETURNING *",
-            exten, (body.get("label") or "").strip(), body.get("sort_order") or 0
+            "INSERT INTO autodial_ivrs (exten,label,ivr_group) VALUES ($1,$2,$3) RETURNING *",
+            exten, (body.get("label") or "").strip(), (body.get("ivr_group") or "promo").strip()
         )
     return dict(row)
 
@@ -6460,9 +6459,9 @@ async def ad_ivr_create(body: dict = Body(...), _=Depends(_get_admin)):
 async def ad_ivr_update(iid: int, body: dict = Body(...), _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "UPDATE autodial_ivrs SET exten=$1,label=$2,sort_order=$3 WHERE id=$4",
+            "UPDATE autodial_ivrs SET exten=$1,label=$2,ivr_group=$3 WHERE id=$4",
             (body.get("exten") or "").strip(), (body.get("label") or "").strip(),
-            body.get("sort_order") or 0, iid
+            (body.get("ivr_group") or "promo").strip(), iid
         )
     return {"ok": True}
 
