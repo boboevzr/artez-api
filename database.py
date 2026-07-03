@@ -333,6 +333,12 @@ async def create_tables():
                 await c.execute(sql)
             except Exception:
                 pass
+        # IVR 7000 — основной, всегда должен быть в списке
+        await c.execute(
+            "INSERT INTO autodial_ivrs (exten,label,ivr_group) "
+            "SELECT '7000','Общее приветствие','promo' WHERE NOT EXISTS "
+            "(SELECT 1 FROM autodial_ivrs WHERE exten='7000')"
+        )
         # IVR: если нет записей с группами — чистим старые и засеваем новые
         cnt_grouped = await c.fetchval("SELECT COUNT(*) FROM autodial_ivrs WHERE ivr_group IS NOT NULL AND ivr_group != ''")
         if cnt_grouped == 0:
