@@ -5222,6 +5222,62 @@ async def tg_client_delete(tg_id: int, body: dict, _=Depends(get_admin)):
     return {"ok": True}
 
 
+@app.post("/api/callback")
+async def site_callback_request(body: dict = Body(...)):
+    """Обратный звонок с сайта — создаёт лид и запускает автодозвон."""
+    phone        = (body.get("phone") or "").strip()
+    profile_phone = (body.get("profile_phone") or "").strip()
+    name         = (body.get("name") or "").strip()
+    branch       = (body.get("branch") or "").strip()
+
+    # Звоним на зарегистрированный номер если есть, иначе на введённый
+    raw_phone = profile_phone or phone
+    cb_phone  = _ami_phone(raw_phone)
+    logging.info(f"Callback request: name={name!r} raw={raw_phone!r} ami={cb_phone!r} branch={branch!r}")
+
+    if not cb_phone or len(cb_phone) < 9:
+        raise HTTPException(400, detail="Неверный номер телефона")
+
+    # Создаём лид
+    lead = None
+    try:
+        lead = await db.create_lead({
+            "client_name":  name or phone,
+            "client_phone": phone or profile_phone,
+            "service":      "Обратный звонок",
+            "branch":       branch,
+            "note":         "Обратный звонок с сайта",
+            "status":       "new",
+            "source":       "site",
+        })
+    except Exception as e:
+        logging.warning(f"Callback lead create failed: {e}")
+
+    lead_code = (lead or {}).get("lead_code") or "?"
+
+    # Запускаем автодозвон
+    try:
+        async with db.pool.acquire() as conn:
+            camp = await conn.fetchrow(
+                "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
+                "VALUES ($1,'7000',1,'callback','running') RETURNING id",
+                f"Обратный звонок {lead_code}"
+            )
+            await conn.execute(
+                "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'callback',$2,$3)",
+                camp["id"], cb_phone, name or phone
+            )
+            await conn.execute(
+                "UPDATE autodial_campaigns SET total_count=1 WHERE id=$1", camp["id"]
+            )
+        logging.info(f"Callback campaign created: id={camp['id']} phone={cb_phone}")
+    except Exception as e:
+        logging.error(f"Callback autodial failed: {e}", exc_info=True)
+        raise HTTPException(500, detail="Ошибка создания звонка")
+
+    return {"ok": True, "lead": lead_code}
+
+
 @app.post("/api/orders")
 async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_user)):
     """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
