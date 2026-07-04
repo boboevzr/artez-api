@@ -628,7 +628,8 @@ async def _eskiz_get_token() -> str:
     email    = await _get_cfg("eskiz_email")
     password = await _get_cfg("eskiz_password")
     if not email or not password:
-        return ""
+        # Fallback: прямой токен сохранённый в config
+        return await db.get_config("eskiz_token") or ""
 
     if not _eskiz_token:
         _eskiz_token = await db.get_config("eskiz_token") or ""
@@ -6700,3 +6701,105 @@ async def ad_ivr_delete(iid: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
         await conn.execute("DELETE FROM autodial_ivrs WHERE id=$1", iid)
     return {"ok": True}
+
+
+# ══════════════════════════════════════
+#  ADMIN SMS
+# ══════════════════════════════════════
+
+@app.get("/api/admin/sms/settings")
+async def sms_settings_get(_=Depends(_get_admin)):
+    token = await db.get_config("eskiz_token") or ""
+    frm   = await db.get_config("eskiz_from") or "ARTEZ"
+    return {"token": token, "from": frm}
+
+@app.post("/api/admin/sms/settings")
+async def sms_settings_save(body: dict = Body(...), _=Depends(_get_admin)):
+    global _eskiz_token
+    token = (body.get("token") or "").strip()
+    frm   = (body.get("from") or "ARTEZ").strip()
+    if token:
+        await db.set_config("eskiz_token", token)
+        _eskiz_token = token
+    if frm:
+        await db.set_config("eskiz_from", frm)
+    return {"ok": True}
+
+@app.get("/api/admin/sms/balance")
+async def sms_balance(_=Depends(_get_admin)):
+    token = await _eskiz_get_token()
+    if not token:
+        raise HTTPException(400, "Eskiz токен не настроен")
+    async with aiohttp.ClientSession() as s:
+        r = await s.get(
+            "https://notify.eskiz.uz/api/user/get-limit",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=aiohttp.ClientTimeout(total=10),
+        )
+        data = await r.json()
+    return data
+
+@app.post("/api/admin/sms/send")
+async def sms_send_admin(body: dict = Body(...), _=Depends(_get_admin)):
+    token = await _eskiz_get_token()
+    if not token:
+        raise HTTPException(400, "Eskiz токен не настроен")
+    phone   = re.sub(r"\D", "", (body.get("phone") or "").strip())
+    message = (body.get("message") or "").strip()
+    if not phone or not message:
+        raise HTTPException(400, "phone и message обязательны")
+    if not phone.startswith("998"):
+        phone = "998" + phone
+    frm = await db.get_config("eskiz_from") or "ARTEZ"
+    async with aiohttp.ClientSession() as s:
+        r = await s.post(
+            "https://notify.eskiz.uz/api/message/sms/send",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"mobile_phone": phone, "message": message, "from": frm, "callback_url": ""},
+            timeout=aiohttp.ClientTimeout(total=15),
+        )
+        data = await r.json()
+    return data
+
+@app.post("/api/admin/sms/send-group")
+async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
+    """Рассылка всем участникам autodial-группы."""
+    token = await _eskiz_get_token()
+    if not token:
+        raise HTTPException(400, "Eskiz токен не настроен")
+    gid     = int(body.get("group_id") or 0)
+    message = (body.get("message") or "").strip()
+    if not gid or not message:
+        raise HTTPException(400, "group_id и message обязательны")
+    frm = await db.get_config("eskiz_from") or "ARTEZ"
+
+    async with db.pool.acquire() as conn:
+        members = await conn.fetch(
+            "SELECT phone FROM autodial_group_members WHERE group_id=$1", gid
+        )
+    if not members:
+        raise HTTPException(404, "Группа пуста")
+
+    phones_seen = set()
+    messages = []
+    for m in members:
+        p = re.sub(r"\D", "", m["phone"] or "")
+        if not p: continue
+        if not p.startswith("998"): p = "998" + p
+        if p in phones_seen: continue
+        phones_seen.add(p)
+        messages.append({"user_sms_id": str(len(messages)+1), "to": p, "text": message})
+
+    if not messages:
+        raise HTTPException(400, "Нет валидных номеров в группе")
+
+    import json as _json
+    async with aiohttp.ClientSession() as s:
+        r = await s.post(
+            "https://notify.eskiz.uz/api/message/sms/send-batch",
+            headers={"Authorization": f"Bearer {token}"},
+            data={"messages": _json.dumps(messages), "from": frm},
+            timeout=aiohttp.ClientTimeout(total=60),
+        )
+        data = await r.json()
+    return {"ok": True, "total": len(messages), "response": data}
