@@ -6386,6 +6386,7 @@ async def autodial_retry(cid: int, _=Depends(_get_admin)):
         campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
     if not campaign: raise HTTPException(404)
     if campaign["status"] == "running": raise HTTPException(400, "Already running")
+    if campaign["source_type"] == "manual": raise HTTPException(400, "Тест-кампания не поддерживает повтор")
     async with db.pool.acquire() as conn:
         await conn.execute(
             "UPDATE autodial_calls SET status='pending', ami_action_id=NULL, started_at=NULL, hangup_at=NULL, hangup_cause=NULL "
