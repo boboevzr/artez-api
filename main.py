@@ -6739,6 +6739,140 @@ async def sms_balance(_=Depends(_get_admin)):
         data = await r.json()
     return data
 
+
+# ── SMS ГРУППЫ И КОНТАКТЫ ─────────────────────────────────────────────────
+
+@app.get("/api/admin/sms/groups")
+async def sms_groups_list(_=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT g.id, g.name, g.description, g.created_at,
+                   COUNT(c.id) AS member_count
+            FROM sms_groups g
+            LEFT JOIN sms_contacts c ON c.group_id = g.id
+            GROUP BY g.id ORDER BY g.created_at DESC
+        """)
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/sms/groups")
+async def sms_groups_create(body: dict = Body(...), _=Depends(_get_admin)):
+    name = (body.get("name") or "").strip()
+    desc = (body.get("description") or "").strip()
+    if not name:
+        raise HTTPException(400, "name обязателен")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO sms_groups(name,description) VALUES($1,$2) RETURNING *", name, desc
+        )
+    return dict(row)
+
+@app.put("/api/admin/sms/groups/{gid}")
+async def sms_groups_update(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE sms_groups SET name=$2, description=$3 WHERE id=$1 RETURNING *",
+            gid, (body.get("name") or "").strip(), (body.get("description") or "").strip()
+        )
+    if not row:
+        raise HTTPException(404, "Группа не найдена")
+    return dict(row)
+
+@app.delete("/api/admin/sms/groups/{gid}")
+async def sms_groups_delete(gid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM sms_groups WHERE id=$1", gid)
+    return {"ok": True}
+
+@app.post("/api/admin/sms/groups/{gid}/copy-from-autodial/{ad_gid}")
+async def sms_groups_copy_autodial(gid: int, ad_gid: int, _=Depends(_get_admin)):
+    """Скопировать участников из autodial-группы в SMS-группу."""
+    async with db.pool.acquire() as conn:
+        # Проверка
+        grp = await conn.fetchrow("SELECT id FROM sms_groups WHERE id=$1", gid)
+        if not grp:
+            raise HTTPException(404, "SMS-группа не найдена")
+        members = await conn.fetch(
+            "SELECT phone, name FROM autodial_group_members WHERE group_id=$1", ad_gid
+        )
+        if not members:
+            raise HTTPException(404, "Autodial-группа пуста")
+        added = 0
+        for m in members:
+            try:
+                await conn.execute(
+                    "INSERT INTO sms_contacts(group_id,phone,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+                    gid, m["phone"], m["name"]
+                )
+                added += 1
+            except Exception:
+                pass
+    return {"ok": True, "added": added, "total": len(members)}
+
+@app.get("/api/admin/sms/groups/{gid}/contacts")
+async def sms_contacts_list(gid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM sms_contacts WHERE group_id=$1 ORDER BY created_at DESC", gid
+        )
+    return [dict(r) for r in rows]
+
+@app.post("/api/admin/sms/groups/{gid}/contacts")
+async def sms_contacts_add(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    phone = re.sub(r"\D", "", (body.get("phone") or "").strip())
+    name  = (body.get("name") or "").strip()
+    if not phone:
+        raise HTTPException(400, "phone обязателен")
+    if not phone.startswith("998"):
+        phone = "998" + phone
+    async with db.pool.acquire() as conn:
+        try:
+            row = await conn.fetchrow(
+                "INSERT INTO sms_contacts(group_id,phone,name) VALUES($1,$2,$3) "
+                "ON CONFLICT(group_id,phone) DO UPDATE SET name=EXCLUDED.name RETURNING *",
+                gid, phone, name
+            )
+        except Exception as e:
+            raise HTTPException(400, str(e))
+    return dict(row)
+
+@app.put("/api/admin/sms/contacts/{cid}")
+async def sms_contacts_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE sms_contacts SET name=$2, status=$3 WHERE id=$1 RETURNING *",
+            cid, (body.get("name") or "").strip(), (body.get("status") or "active")
+        )
+    if not row:
+        raise HTTPException(404, "Контакт не найден")
+    return dict(row)
+
+@app.delete("/api/admin/sms/contacts/{cid}")
+async def sms_contacts_delete(cid: int, _=Depends(_get_admin)):
+    async with db.pool.acquire() as conn:
+        await conn.execute("DELETE FROM sms_contacts WHERE id=$1", cid)
+    return {"ok": True}
+
+@app.post("/api/admin/sms/groups/{gid}/contacts/bulk")
+async def sms_contacts_bulk(gid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    """Массовое добавление: [{phone, name}, ...]"""
+    contacts = body.get("contacts") or []
+    added = 0
+    async with db.pool.acquire() as conn:
+        for c in contacts:
+            phone = re.sub(r"\D", "", (c.get("phone") or "").strip())
+            if not phone: continue
+            if not phone.startswith("998"): phone = "998" + phone
+            try:
+                await conn.execute(
+                    "INSERT INTO sms_contacts(group_id,phone,name) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
+                    gid, phone, (c.get("name") or "").strip()
+                )
+                added += 1
+            except Exception:
+                pass
+    return {"ok": True, "added": added}
+
+
 @app.get("/api/admin/sms/nicks")
 async def sms_nicks(_=Depends(_get_admin)):
     """Список доступных ников/alpha-name из Eskiz."""
@@ -6786,10 +6920,10 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
 
     async with db.pool.acquire() as conn:
         members = await conn.fetch(
-            "SELECT phone FROM autodial_group_members WHERE group_id=$1", gid
+            "SELECT phone, id FROM sms_contacts WHERE group_id=$1 AND status != 'blacklist'", gid
         )
     if not members:
-        raise HTTPException(404, "Группа пуста")
+        raise HTTPException(404, "Группа пуста или все контакты в чёрном списке")
 
     phones_seen = set()
     phones = []

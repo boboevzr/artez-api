@@ -331,6 +331,26 @@ async def create_tables():
             sort_order INT DEFAULT 0
         )""",
         "ALTER TABLE autodial_ivrs ADD COLUMN IF NOT EXISTS ivr_group VARCHAR(30) DEFAULT 'promo'",
+        # SMS группы и контакты (отдельно от автодозвона)
+        """CREATE TABLE IF NOT EXISTS sms_groups (
+            id          SERIAL PRIMARY KEY,
+            name        VARCHAR(200) NOT NULL,
+            description TEXT DEFAULT '',
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        """CREATE TABLE IF NOT EXISTS sms_contacts (
+            id               SERIAL PRIMARY KEY,
+            group_id         INT REFERENCES sms_groups(id) ON DELETE CASCADE,
+            phone            VARCHAR(20) NOT NULL,
+            name             VARCHAR(200) DEFAULT '',
+            status           VARCHAR(20) DEFAULT 'active',
+            last_sms_at      TIMESTAMPTZ,
+            last_sms_status  VARCHAR(20),
+            created_at       TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(group_id, phone)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_sms_contacts_group ON sms_contacts(group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_sms_contacts_status ON sms_contacts(status)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
