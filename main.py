@@ -6739,6 +6739,15 @@ async def sms_balance(_=Depends(_get_admin)):
         data = await r.json()
     return data
 
+@app.get("/api/admin/sms/nicks")
+async def sms_nicks(_=Depends(_get_admin)):
+    """Список доступных ников/alpha-name из Eskiz."""
+    try:
+        data = await _eskiz_get("/nick/list")
+        return data
+    except Exception:
+        return {"data": []}
+
 @app.post("/api/admin/sms/send")
 async def sms_send_admin(body: dict = Body(...), _=Depends(_get_admin)):
     token = await _eskiz_get_token()
@@ -6750,7 +6759,7 @@ async def sms_send_admin(body: dict = Body(...), _=Depends(_get_admin)):
         raise HTTPException(400, "phone и message обязательны")
     if not phone.startswith("998"):
         phone = "998" + phone
-    frm = await db.get_config("eskiz_from") or "ARTEZ"
+    frm = (body.get("nick") or "").strip() or await db.get_config("eskiz_from") or "ARTEZ"
     async with aiohttp.ClientSession() as s:
         r = await s.post(
             "https://notify.eskiz.uz/api/message/sms/send",
@@ -6763,15 +6772,17 @@ async def sms_send_admin(body: dict = Body(...), _=Depends(_get_admin)):
 
 @app.post("/api/admin/sms/send-group")
 async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
-    """Рассылка всем участникам autodial-группы."""
+    """Рассылка всем участникам autodial-группы (сейчас или по расписанию)."""
     token = await _eskiz_get_token()
     if not token:
         raise HTTPException(400, "Eskiz токен не настроен")
-    gid     = int(body.get("group_id") or 0)
-    message = (body.get("message") or "").strip()
+    gid           = int(body.get("group_id") or 0)
+    message       = (body.get("message") or "").strip()
+    name          = (body.get("name") or "Рассылка").strip()
+    schedule_time = (body.get("schedule_time") or "").strip()  # "YYYY-MM-DD HH:MM"
     if not gid or not message:
         raise HTTPException(400, "group_id и message обязательны")
-    frm = await db.get_config("eskiz_from") or "ARTEZ"
+    frm = (body.get("nick") or "").strip() or await db.get_config("eskiz_from") or "ARTEZ"
 
     async with db.pool.acquire() as conn:
         members = await conn.fetch(
@@ -6781,6 +6792,7 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
         raise HTTPException(404, "Группа пуста")
 
     phones_seen = set()
+    phones = []
     messages = []
     for m in members:
         p = re.sub(r"\D", "", m["phone"] or "")
@@ -6788,21 +6800,37 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
         if not p.startswith("998"): p = "998" + p
         if p in phones_seen: continue
         phones_seen.add(p)
+        phones.append(p)
         messages.append({"user_sms_id": str(len(messages)+1), "to": p, "text": message})
 
     if not messages:
         raise HTTPException(400, "Нет валидных номеров в группе")
 
-    import json as _json
     async with aiohttp.ClientSession() as s:
-        r = await s.post(
-            "https://notify.eskiz.uz/api/message/sms/send-batch",
-            headers={"Authorization": f"Bearer {token}"},
-            data={"messages": _json.dumps(messages), "from": frm},
-            timeout=aiohttp.ClientTimeout(total=60),
-        )
+        if schedule_time:
+            # Dispatch API для отложенной отправки
+            r = await s.post(
+                "https://notify.eskiz.uz/api/message/dispatch/create",
+                headers={"Authorization": f"Bearer {token}"},
+                data={
+                    "name":       name,
+                    "message":    message,
+                    "from":       frm,
+                    "phones":     _json.dumps(phones),
+                    "start_time": schedule_time,
+                },
+                timeout=aiohttp.ClientTimeout(total=30),
+            )
+        else:
+            # Batch — отправить сейчас
+            r = await s.post(
+                "https://notify.eskiz.uz/api/message/sms/send-batch",
+                headers={"Authorization": f"Bearer {token}"},
+                data={"messages": _json.dumps(messages), "from": frm},
+                timeout=aiohttp.ClientTimeout(total=60),
+            )
         data = await r.json()
-    return {"ok": True, "total": len(messages), "response": data}
+    return {"ok": True, "total": len(messages), "scheduled": bool(schedule_time), "response": data}
 
 
 @app.get("/api/admin/sms/templates")
