@@ -6857,3 +6857,100 @@ async def sms_templates_delete(tid: int, _=Depends(_get_admin)):
     items = [x for x in items if x.get("id") != tid]
     await db.set_config("sms_templates_v1", _json.dumps(items))
     return {"ok": True}
+
+
+# ── SMS ОТЧЁТЫ (прокси к Eskiz API) ──────────────────────────────────────
+
+async def _eskiz_post(path: str, data: dict) -> dict:
+    token = await _eskiz_get_token()
+    if not token:
+        raise HTTPException(400, "Eskiz токен не настроен")
+    async with aiohttp.ClientSession() as s:
+        r = await s.post(
+            f"https://notify.eskiz.uz/api{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            data=data,
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        return await r.json()
+
+async def _eskiz_get(path: str) -> dict:
+    token = await _eskiz_get_token()
+    if not token:
+        raise HTTPException(400, "Eskiz токен не настроен")
+    async with aiohttp.ClientSession() as s:
+        r = await s.get(
+            f"https://notify.eskiz.uz/api{path}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=aiohttp.ClientTimeout(total=30),
+        )
+        return await r.json()
+
+@app.post("/api/admin/sms/reports/messages")
+async def sms_report_messages(body: dict = Body(...), _=Depends(_get_admin)):
+    return await _eskiz_post("/message/sms/get-user-messages", {
+        "start_date": body.get("start_date", ""),
+        "end_date":   body.get("end_date", ""),
+        "page_size":  str(body.get("page_size", 100)),
+        "count":      str(body.get("count", 0)),
+        "status":     body.get("status", ""),
+        "smsc":       body.get("smsc", ""),
+        "user":       body.get("user", ""),
+    })
+
+@app.post("/api/admin/sms/reports/export")
+async def sms_report_export(body: dict = Body(...), _=Depends(_get_admin)):
+    from fastapi.responses import StreamingResponse
+    token = await _eskiz_get_token()
+    if not token:
+        raise HTTPException(400, "Eskiz токен не настроен")
+    async with aiohttp.ClientSession() as s:
+        r = await s.post(
+            "https://notify.eskiz.uz/api/message/sms/export",
+            headers={"Authorization": f"Bearer {token}"},
+            data={
+                "start_date": body.get("start_date", ""),
+                "end_date":   body.get("end_date", ""),
+                "status":     body.get("status", ""),
+            },
+            timeout=aiohttp.ClientTimeout(total=60),
+        )
+        content = await r.read()
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=sms_export.csv"},
+    )
+
+@app.get("/api/admin/sms/reports/by-month")
+async def sms_report_by_month(_=Depends(_get_admin)):
+    return await _eskiz_get("/message/sms/get-user-messages-by-month")
+
+@app.post("/api/admin/sms/reports/by-company")
+async def sms_report_by_company(body: dict = Body(...), _=Depends(_get_admin)):
+    return await _eskiz_post("/message/sms/totals", {
+        "start_date": body.get("start_date", ""),
+        "end_date":   body.get("end_date", ""),
+    })
+
+@app.post("/api/admin/sms/reports/by-date")
+async def sms_report_by_date(body: dict = Body(...), _=Depends(_get_admin)):
+    return await _eskiz_post("/message/sms/get-user-totals", {
+        "start_date": body.get("start_date", ""),
+        "end_date":   body.get("end_date", ""),
+    })
+
+@app.post("/api/admin/sms/reports/by-dispatch")
+async def sms_report_by_dispatch(body: dict = Body(...), _=Depends(_get_admin)):
+    return await _eskiz_post("/message/dispatch/get-totals", {
+        "start_date": body.get("start_date", ""),
+        "end_date":   body.get("end_date", ""),
+    })
+
+@app.get("/api/admin/sms/reports/status/{msg_id}")
+async def sms_report_status(msg_id: str, _=Depends(_get_admin)):
+    return await _eskiz_get(f"/message/sms/{msg_id}")
+
+@app.get("/api/admin/sms/reports/prices")
+async def sms_report_prices(_=Depends(_get_admin)):
+    return await _eskiz_get("/nick/list")
