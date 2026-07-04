@@ -6803,3 +6803,57 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
         )
         data = await r.json()
     return {"ok": True, "total": len(messages), "response": data}
+
+
+@app.get("/api/admin/sms/templates")
+async def sms_templates_get(_=Depends(_get_admin)):
+    raw = await db.get_config("sms_templates_v1") or "[]"
+    try:
+        return _json.loads(raw)
+    except Exception:
+        return []
+
+@app.post("/api/admin/sms/templates")
+async def sms_templates_create(body: dict = Body(...), _=Depends(_get_admin)):
+    raw = await db.get_config("sms_templates_v1") or "[]"
+    try:
+        items = _json.loads(raw)
+    except Exception:
+        items = []
+    new_id = (max((x.get("id", 0) for x in items), default=0) + 1)
+    item = {
+        "id": new_id,
+        "category": (body.get("category") or "other").strip(),
+        "title":    (body.get("title") or "").strip(),
+        "text":     (body.get("text") or "").strip(),
+    }
+    items.append(item)
+    await db.set_config("sms_templates_v1", _json.dumps(items))
+    return item
+
+@app.put("/api/admin/sms/templates/{tid}")
+async def sms_templates_update(tid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    raw = await db.get_config("sms_templates_v1") or "[]"
+    try:
+        items = _json.loads(raw)
+    except Exception:
+        items = []
+    for item in items:
+        if item.get("id") == tid:
+            if "category" in body: item["category"] = body["category"].strip()
+            if "title"    in body: item["title"]    = body["title"].strip()
+            if "text"     in body: item["text"]     = body["text"].strip()
+            await db.set_config("sms_templates_v1", _json.dumps(items))
+            return item
+    raise HTTPException(404, "Шаблон не найден")
+
+@app.delete("/api/admin/sms/templates/{tid}")
+async def sms_templates_delete(tid: int, _=Depends(_get_admin)):
+    raw = await db.get_config("sms_templates_v1") or "[]"
+    try:
+        items = _json.loads(raw)
+    except Exception:
+        items = []
+    items = [x for x in items if x.get("id") != tid]
+    await db.set_config("sms_templates_v1", _json.dumps(items))
+    return {"ok": True}
