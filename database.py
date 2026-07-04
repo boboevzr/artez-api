@@ -2733,7 +2733,9 @@ async def get_route(route_id: int) -> dict | None:
             SELECT ro.*, o.order_num, o.client_first_name, o.client_last_name,
                    o.client_phone, o.address, o.short_address,
                    o.location, o.location_address, o.status AS order_status,
-                   o.service, o.branch
+                   o.service, o.branch,
+                   o.pickup_date, o.deadline,
+                   o.total_price, o.prepaid_amount, o.payment_status, o.discount_sum
             FROM route_orders ro
             JOIN orders o ON o.id=ro.order_id
             WHERE ro.route_id=$1
