@@ -5357,8 +5357,8 @@ async def site_callback_request(body: dict = Body(...)):
     try:
         async with db.pool.acquire() as conn:
             camp = await conn.fetchrow(
-                "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
-                "VALUES ($1,'7000',1,'callback','running') RETURNING id",
+                "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status,sched_time_from,sched_time_to) "
+                "VALUES ($1,'7000',1,'callback','running','00:01','23:59') RETURNING id",
                 f"Обратный звонок {lead_code}"
             )
             await conn.execute(
@@ -5373,7 +5373,14 @@ async def site_callback_request(body: dict = Body(...)):
         logging.error(f"Callback autodial failed: {e}", exc_info=True)
         raise HTTPException(500, detail="Ошибка создания звонка")
 
-    return {"ok": True, "lead": lead_code}
+    # TG-уведомление о новом лиде
+    if lead:
+        site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
+        asyncio.create_task(_notify_new_lead(lead, site_staff))
+        await db.upsert_crm_client(phone=phone or profile_phone, first_name=name or phone, last_name="", source="callback")
+        await db.refresh_crm_client_stats(phone or profile_phone)
+
+    return {"ok": True, "lead_code": lead_code}
 
 
 @app.post("/api/orders")
@@ -5544,51 +5551,6 @@ async def create_bot_lead(req: BotLeadRequest, x_bot_token: str = Header(None, a
 
     return {"ok": True, "lead_code": lead_code, "lead_id": (lead or {}).get("id")}
 
-
-class CallbackRequest(BaseModel):
-    phone: str
-    branch: str = ""
-    name: str = ""
-    profile_phone: str = ""  # зарегистрированный телефон пользователя
-
-    @field_validator("phone")
-    @classmethod
-    def validate_phone(cls, v):
-        v = normalize_phone(v)
-        if not PHONE_RE.match(v):
-            raise ValueError("Неверный формат номера. Используйте +998XXXXXXXXX")
-        return v
-
-@app.post("/api/callback")
-async def request_callback(req: CallbackRequest, user=Depends(get_optional_user)):
-    """Обратный звонок с сайта → лид в группу лидов филиала."""
-    client_name = req.name.strip() or (user.get("first_name", "") if user else "") or req.phone
-    note_parts = ["🔔 Обратный звонок с сайта"]
-    if req.profile_phone and req.profile_phone != req.phone:
-        note_parts.append(f"Тел. в профиле: {req.profile_phone}")
-
-    lead = await db.create_lead({
-        "client_name":  client_name,
-        "client_phone": req.phone,
-        "service":      "callback",
-        "branch":       req.branch,
-        "note":         " · ".join(note_parts),
-        "status":       "new",
-        "created_by":   None,
-        "volunteer_id": None,
-    })
-    lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
-    if lead:
-        await db.add_lead_call(lead["id"], None, action="created",
-                               note=f"Обратный звонок с сайта ({lead_code})")
-
-    site_staff = {"role": "site", "first_name": "Сайт", "last_name": "", "login": "site"}
-    asyncio.create_task(_notify_new_lead(lead or {}, site_staff))
-
-    await db.upsert_crm_client(phone=req.phone, first_name=client_name, last_name="", source="callback")
-    await db.refresh_crm_client_stats(req.phone)
-
-    return {"ok": True, "lead_code": lead_code}
 
 
 async def _notify_group_site_lead(lead_code: str, data: "OrderRequest", lead_id: int = None):
