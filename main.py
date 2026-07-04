@@ -5357,8 +5357,8 @@ async def site_callback_request(body: dict = Body(...)):
     try:
         async with db.pool.acquire() as conn:
             camp = await conn.fetchrow(
-                "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status,sched_time_from,sched_time_to) "
-                "VALUES ($1,'7000',1,'callback','running','00:01','23:59') RETURNING id",
+                "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
+                "VALUES ($1,'7000',1,'callback','running') RETURNING id",
                 f"Обратный звонок {lead_code}"
             )
             await conn.execute(
