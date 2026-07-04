@@ -6412,8 +6412,8 @@ async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
         label = phones[0] if len(phones) == 1 else f"{phones[0]} +{len(phones)-1}"
         camp = await conn.fetchrow(
-            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status,sched_time_from,sched_time_to) "
-            "VALUES ($1,$2,$3,'manual','running','00:01','23:59') RETURNING *",
+            "INSERT INTO autodial_campaigns (name,ivr_exten,max_parallel,source_type,status) "
+            "VALUES ($1,$2,$3,'manual','running') RETURNING *",
             f"Тест {label}", exten, len(phones)
         )
         for p in phones:
