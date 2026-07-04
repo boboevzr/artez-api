@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 import secrets
 import logging
@@ -6321,7 +6321,12 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
                 "UPDATE autodial_campaigns SET dialed_count=0,answered_count=0,failed_count=0,total_count=0,started_at=NOW(),finished_at=NULL WHERE id=$1", cid
             )
 
-    # Build call list if empty
+    # Build call list if empty (manual/test-кампании не пересобираем из CRM)
+    if campaign["source_type"] == "manual":
+        async with db.pool.acquire() as conn:
+            await conn.execute("UPDATE autodial_campaigns SET status='running', started_at=NOW() WHERE id=$1", cid)
+        return {"ok": True}
+
     async with db.pool.acquire() as conn:
         cnt = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", cid)
 
