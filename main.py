@@ -6313,19 +6313,26 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
     if not campaign: raise HTTPException(404)
     if campaign["status"] == "running": raise HTTPException(400, "Already running")
 
-    # Повтор: очищаем старые звонки если кампания уже завершалась
+    # Manual/test-кампании: сбрасываем все звонки в pending и перезапускаем
+    if campaign["source_type"] == "manual":
+        async with db.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE autodial_calls SET status='pending', ami_action_id=NULL, started_at=NULL, hangup_at=NULL, hangup_cause=NULL WHERE campaign_id=$1", cid
+            )
+            cnt = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1 AND status='pending'", cid)
+            await conn.execute(
+                "UPDATE autodial_campaigns SET status='running', dialed_count=0, answered_count=0, failed_count=0, total_count=$2, started_at=NOW(), finished_at=NULL WHERE id=$1",
+                cid, cnt
+            )
+        return {"ok": True}
+
+    # Обычные кампании: очищаем старые звонки если кампания уже завершалась
     if campaign["status"] in ("done", "stopped", "error"):
         async with db.pool.acquire() as conn:
             await conn.execute("DELETE FROM autodial_calls WHERE campaign_id=$1", cid)
             await conn.execute(
                 "UPDATE autodial_campaigns SET dialed_count=0,answered_count=0,failed_count=0,total_count=0,started_at=NOW(),finished_at=NULL WHERE id=$1", cid
             )
-
-    # Build call list if empty (manual/test-кампании не пересобираем из CRM)
-    if campaign["source_type"] == "manual":
-        async with db.pool.acquire() as conn:
-            await conn.execute("UPDATE autodial_campaigns SET status='running', started_at=NOW() WHERE id=$1", cid)
-        return {"ok": True}
 
     async with db.pool.acquire() as conn:
         cnt = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", cid)
@@ -6386,12 +6393,17 @@ async def autodial_retry(cid: int, _=Depends(_get_admin)):
         campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
     if not campaign: raise HTTPException(404)
     if campaign["status"] == "running": raise HTTPException(400, "Already running")
-    if campaign["source_type"] == "manual": raise HTTPException(400, "Тест-кампания не поддерживает повтор")
     async with db.pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE autodial_calls SET status='pending', ami_action_id=NULL, started_at=NULL, hangup_at=NULL, hangup_cause=NULL "
-            "WHERE campaign_id=$1 AND status='no_answer'", cid
-        )
+        # Для manual (тест): сбрасываем все звонки; для обычных — только no_answer
+        if campaign["source_type"] == "manual":
+            await conn.execute(
+                "UPDATE autodial_calls SET status='pending', ami_action_id=NULL, started_at=NULL, hangup_at=NULL, hangup_cause=NULL WHERE campaign_id=$1", cid
+            )
+        else:
+            await conn.execute(
+                "UPDATE autodial_calls SET status='pending', ami_action_id=NULL, started_at=NULL, hangup_at=NULL, hangup_cause=NULL "
+                "WHERE campaign_id=$1 AND status='no_answer'", cid
+            )
         pending = await conn.fetchval(
             "SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1 AND status='pending'", cid
         )
