@@ -1164,6 +1164,18 @@ def _route_pickup_kb(order_id: int, status: str) -> dict:
             [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo"}],
             [h],
         ]}
+    elif status == "ready":
+        return {"inline_keyboard": [
+            [{"text": "🚗 Везу клиенту", "callback_data": f"rp:{order_id}:take_delivery"},
+             {"text": "⏭ Пропустить", "callback_data": f"rp:{order_id}:skip"}],
+            [h],
+        ]}
+    elif status == "delivery":
+        return {"inline_keyboard": [
+            [{"text": "✅ Доставил клиенту", "callback_data": f"rp:{order_id}:mark_delivered"}],
+            [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo_delivery"}],
+            [h],
+        ]}
     else:
         return {"inline_keyboard": [[h]]}
 
