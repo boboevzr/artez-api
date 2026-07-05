@@ -1248,7 +1248,12 @@ async def get_admin_orders(status: str = None, limit: int = 50):
         q = """
             SELECT o.*,
                    COALESCE(i.cnt, 0)::int AS item_count,
-                   COALESCE(i.corr, 0)::int AS corrected_count
+                   COALESCE(i.corr, 0)::int AS corrected_count,
+                   COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                              FROM order_items WHERE order_id=o.id), 0) AS items_total,
+                   COALESCE((SELECT SUM(amount) FROM order_payments
+                              WHERE order_id=o.id
+                                AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount
             FROM orders o
             LEFT JOIN (
                 SELECT order_id, COUNT(*) AS cnt,
@@ -2512,9 +2517,15 @@ async def _recalc_payment_status(conn, order_id: int):
     total_row = await conn.fetchrow(
         "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1 AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)", order_id)
     paid = float(total_row['paid'])
-    order = await conn.fetchrow("SELECT total_price, discount_sum, delivery_discount, manual_discount FROM orders WHERE id=$1", order_id)
+    order = await conn.fetchrow("""
+        SELECT total_price, discount_sum, delivery_discount, manual_discount,
+               COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                         FROM order_items WHERE order_id=$1), 0) AS items_total
+        FROM orders WHERE id=$1
+    """, order_id)
     if order:
-        net = float(order['total_price'] or 0) - float(order['discount_sum'] or 0) - float(order['delivery_discount'] or 0) - float(order['manual_discount'] or 0)
+        base = float(order['total_price'] or 0) or float(order['items_total'] or 0)
+        net = base - float(order['discount_sum'] or 0) - float(order['delivery_discount'] or 0) - float(order['manual_discount'] or 0)
         status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
         await conn.execute("UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
 
@@ -2736,7 +2747,13 @@ async def get_route(route_id: int) -> dict | None:
                    o.location, o.location_address, o.status AS order_status,
                    o.service, o.branch,
                    o.pickup_date, o.deadline,
-                   o.total_price, o.prepaid_amount, o.payment_status, o.discount_sum
+                   o.total_price, o.prepaid_amount, o.payment_status,
+                   o.discount_sum, o.delivery_discount, o.manual_discount,
+                   COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                              FROM order_items WHERE order_id=o.id), 0) AS items_total,
+                   COALESCE((SELECT SUM(amount) FROM order_payments
+                              WHERE order_id=o.id
+                                AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount
             FROM route_orders ro
             JOIN orders o ON o.id=ro.order_id
             WHERE ro.route_id=$1
