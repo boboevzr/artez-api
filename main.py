@@ -1242,7 +1242,16 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
     contact = f"👤 {h(client)}"
     if phone: contact += f" 📞{h(phone)}"
 
-    return f"📦 #{num}·{h(order_num)} {addr_part}\n{contact}"
+    total = float(stop.get("items_total") or stop.get("total_price") or 0)
+    disc  = (float(stop.get("discount_sum") or 0) + float(stop.get("delivery_discount") or 0)
+             + float(stop.get("manual_discount") or 0))
+    net   = max(0.0, total - disc)
+    paid  = float(stop.get("paid_amount") or 0)
+    debt  = max(0.0, net - paid)
+    def _fmt(n): return f"{int(n):,}".replace(",", " ") + " с" if n > 0 else "—"
+    pay_line = f"💰 {_fmt(net)} · Опл: {_fmt(paid)} · Долг: {_fmt(debt)}"
+
+    return f"📦 #{num}·{h(order_num)} {addr_part}\n{contact}\n{pay_line}"
 
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
 async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_staff)):
