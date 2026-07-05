@@ -800,7 +800,7 @@ async def get_current_staff(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Недействительный токен")
     # Admin panel token — treat as super-admin staff
     if payload.get("sub") == "admin":
-        return {"id": 0, "login": "admin", "role": "admin", "active": True,
+        return {"id": 0, "login": "admin", "role": "admin", "sub": "admin", "active": True,
                 "first_name": "Admin", "last_name": None, "phone": None,
                 "branch": None, "tg_username": None, "position": None}
     if payload.get("type") != "staff":
