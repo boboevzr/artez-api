@@ -4225,6 +4225,42 @@ async def get_receipt_file(order_id: int, payment_id: int, staff=Depends(get_cur
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/staff/payments/{payment_id}/receipt")
+async def get_driver_payment_receipt(payment_id: int, _=Depends(get_current_staff)):
+    """Отдаёт фото квитанции, сохранённое водителем через Telegram (receipt_file_id)."""
+    if not db.pool:
+        raise HTTPException(status_code=503)
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT receipt_file_id FROM order_payments WHERE id=$1", payment_id)
+    if not row or not row["receipt_file_id"]:
+        raise HTTPException(status_code=404, detail="Квитанция не найдена")
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="Бот не настроен")
+    try:
+        from fastapi.responses import StreamingResponse
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                             params={"file_id": row["receipt_file_id"]},
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                data = await r.json()
+            if not data.get("ok"):
+                raise HTTPException(status_code=404, detail="Файл не найден в TG")
+            file_path = data["result"]["file_path"]
+            file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+            ctype = ("image/jpeg" if ext in ("jpg","jpeg") else
+                     "image/png"  if ext == "png" else "image/jpeg")
+            async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
+                content = await fr.read()
+        return StreamingResponse(iter([content]), media_type=ctype,
+                                 headers={"Content-Disposition": "inline"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/admin/orders/{order_id}/payments/{payment_id}/receipt")
 async def upload_payment_receipt(
     order_id:   int,

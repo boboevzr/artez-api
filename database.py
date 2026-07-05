@@ -248,6 +248,7 @@ async def create_tables():
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS receipt_url TEXT DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS reject_note TEXT DEFAULT NULL",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS receipt_file_id TEXT DEFAULT NULL",
         # Таблица настроек (создаём если не существует + гарантируем одну строку)
         "CREATE TABLE IF NOT EXISTS settings (id SERIAL PRIMARY KEY)",
         "INSERT INTO settings DEFAULT VALUES ON CONFLICT DO NOTHING",
