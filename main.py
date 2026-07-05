@@ -258,7 +258,9 @@ async def send_tg(chat_id, text: str):
         logging.warning(f"send_tg error: {e}")
 
 
-async def _send_tg_with_kb(chat_id, text: str, keyboard: dict, parse_mode: str | None = "HTML") -> int | None:
+async def _send_tg_with_kb(chat_id, text: str, keyboard: dict,
+                           parse_mode: str | None = "HTML",
+                           silent: bool = False, protect: bool = False) -> int | None:
     """Отправить сообщение с inline-клавиатурой, вернуть message_id."""
     if not BOT_TOKEN or not chat_id:
         return None
@@ -268,6 +270,8 @@ async def _send_tg_with_kb(chat_id, text: str, keyboard: dict, parse_mode: str |
             payload = {"chat_id": str(chat_id), "text": text,
                        "reply_markup": keyboard, "disable_web_page_preview": True}
             if parse_mode: payload["parse_mode"] = parse_mode
+            if silent:  payload["disable_notification"] = True
+            if protect: payload["protect_content"]      = True
             r = await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
             d = await r.json()
             if not d.get("ok"):
@@ -1305,7 +1309,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         f"📅 {route_date}   {time_str}\n"
         f"━━━━━━━━━━"
     )
-    hdr_id = await _send_tg_with_kb(dest, header_text, {"inline_keyboard": []})
+    hdr_id = await _send_tg_with_kb(dest, header_text, {"inline_keyboard": []}, silent=True, protect=True)
     if hdr_id:
         new_msg_ids["__header__"] = hdr_id
     elif tg_error is None:
@@ -1317,7 +1321,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         order_id = s.get("order_id") or s.get("id")
         status   = s.get("order_status", "confirmed")
         kb       = _route_pickup_kb(order_id, status)
-        msg_id   = await _send_tg_with_kb(dest, text, kb)
+        msg_id   = await _send_tg_with_kb(dest, text, kb, silent=True, protect=True)
         if msg_id:
             sent += 1
             new_msg_ids[str(order_id)] = msg_id
@@ -1325,7 +1329,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
             tg_error = "Ошибка отправки остановки"
 
     footer_text = f"━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)}\n━━━━━━━━━━"
-    ftr_id = await _send_tg_with_kb(dest, footer_text, {"inline_keyboard": []})
+    ftr_id = await _send_tg_with_kb(dest, footer_text, {"inline_keyboard": []}, silent=True, protect=True)
     if ftr_id:
         new_msg_ids["__footer__"] = ftr_id
 
