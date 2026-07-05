@@ -1173,6 +1173,7 @@ def _route_pickup_kb(order_id: int, status: str) -> dict:
     elif status == "delivery":
         return {"inline_keyboard": [
             [{"text": "✅ Доставил клиенту", "callback_data": f"rp:{order_id}:mark_delivered"}],
+            [{"text": "💳 Оплата", "callback_data": f"rp:{order_id}:pay_init"}],
             [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo_delivery"}],
             [h],
         ]}
