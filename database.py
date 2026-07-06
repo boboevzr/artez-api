@@ -2421,32 +2421,38 @@ async def update_order_payment(order_id: int, payment_method: str, payment_statu
 
 async def get_cash_summary(date_from: str, date_to: str) -> dict:
     if not pool: return {}
+    TZ = "Asia/Tashkent"
     async with pool.acquire() as conn:
-        # Суммы по методу из order_payments (источник правды)
-        rows = await conn.fetch("""
+        # Суммы по методу оплаты (из order_payments)
+        rows = await conn.fetch(f"""
             SELECT
-                op.method AS payment_method,
-                COALESCE(SUM(op.amount), 0) AS amount,
-                COUNT(DISTINCT op.order_id) AS cnt
-            FROM order_payments op
-            WHERE (op.created_at AT TIME ZONE 'Asia/Tashkent')::date BETWEEN $1 AND $2
-              AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
-            GROUP BY op.method
+                method AS payment_method,
+                COALESCE(SUM(amount), 0) AS amount,
+                COUNT(DISTINCT order_id) AS cnt
+            FROM order_payments
+            WHERE date_trunc('day', created_at AT TIME ZONE '{TZ}') BETWEEN $1::date AND $2::date
+              AND NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
+            GROUP BY method
         """, date_from, date_to)
-        # Список заказов у которых были платежи в этот период
-        orders = await conn.fetch("""
-            SELECT DISTINCT ON (o.id)
+        # Заказы с оплатами за период
+        orders = await conn.fetch(f"""
+            SELECT
                 o.id, o.order_num, o.created_at, o.total_price, o.discount_sum,
                 o.payment_method, o.payment_status, o.prepaid_amount, o.paid_at,
-                op.created_at AS payment_at,
-                COALESCE(SUM(op.amount) FILTER (
-                    WHERE NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
-                ) OVER (PARTITION BY o.id), 0) AS paid_total
+                sub.paid_total,
+                sub.last_payment_at AS payment_at
             FROM orders o
-            JOIN order_payments op ON op.order_id = o.id
-            WHERE (op.created_at AT TIME ZONE 'Asia/Tashkent')::date BETWEEN $1 AND $2
-              AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
-            ORDER BY o.id, op.created_at DESC
+            JOIN (
+                SELECT
+                    order_id,
+                    SUM(amount) AS paid_total,
+                    MAX(created_at) AS last_payment_at
+                FROM order_payments
+                WHERE date_trunc('day', created_at AT TIME ZONE '{TZ}') BETWEEN $1::date AND $2::date
+                  AND NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
+                GROUP BY order_id
+            ) sub ON sub.order_id = o.id
+            ORDER BY sub.last_payment_at DESC
         """, date_from, date_to)
         return {
             "summary": [dict(r) for r in rows],
