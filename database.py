@@ -2852,6 +2852,40 @@ async def get_channel_msg_for_order(order_id: int):
         return row["branch"], None
 
 
+async def get_channel_stop_full(order_id: int) -> dict | None:
+    """Полные данные стопа для перестройки текста сообщения в канале после изменения оплаты."""
+    if not pool: return None
+    import json as _j
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT r.branch, r.tg_delivery_msg_ids, ro.sort_order,
+                   o.id AS order_id, o.order_num, o.status,
+                   o.client_first_name, o.client_last_name, o.client_phone,
+                   o.address, o.short_address, o.location, o.location_address,
+                   COALESCE(o.total_price, 0) AS total_price,
+                   COALESCE(o.discount_sum, 0) AS discount_sum,
+                   COALESCE(o.delivery_discount, 0) AS delivery_discount,
+                   COALESCE(o.manual_discount, 0) AS manual_discount,
+                   COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                              FROM order_items WHERE order_id=o.id), 0) AS items_total,
+                   COALESCE((SELECT SUM(amount) FROM order_payments
+                              WHERE order_id=o.id
+                                AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount
+            FROM route_orders ro
+            JOIN routes r ON r.id = ro.route_id
+            JOIN orders o ON o.id = ro.order_id
+            WHERE ro.order_id = $1
+            ORDER BY ro.id DESC LIMIT 1
+        """, order_id)
+    if not row: return None
+    d = dict(row)
+    raw = d.get("tg_delivery_msg_ids") or "{}"
+    try: msg_ids = _j.loads(raw) if isinstance(raw, str) else (raw or {})
+    except: msg_ids = {}
+    d["msg_id"] = msg_ids.get(str(order_id))
+    return d
+
+
 # ── Касса / наличные ──────────────────────────────────────────────────────────
 
 async def get_cashiers() -> list:

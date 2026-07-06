@@ -4147,6 +4147,32 @@ async def get_pending_handovers(staff=Depends(get_current_staff)):
     return {"ok": True, "handovers": rows}
 
 
+async def _update_api_channel_stop(order_id: int):
+    """Обновляет текст+кнопки сообщения заказа в канале после изменения оплаты."""
+    try:
+        info = await db.get_channel_stop_full(order_id)
+        if not info or not info.get("msg_id"):
+            return
+        branch = info.get("branch", "")
+        ch_key = "delivery_channel_navoi_id" if branch == "navoi" else "delivery_channel_zarafshan_id"
+        ch_id_str = await _get_cfg(ch_key)
+        if not ch_id_str:
+            return
+        num = (info.get("sort_order") or 1)
+        new_text = _build_stop_text_short(info, num)
+        status = info.get("status", "delivery")
+        new_kb = _route_pickup_kb(order_id, status)
+        async with aiohttp.ClientSession() as _sess:
+            await _sess.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id": ch_id_str, "message_id": int(info["msg_id"]),
+                      "text": new_text, "reply_markup": new_kb,
+                      "parse_mode": "HTML", "disable_web_page_preview": True},
+                timeout=aiohttp.ClientTimeout(total=5))
+    except Exception as e:
+        logging.warning(f"_update_api_channel_stop order={order_id}: {e}")
+
+
 async def _get_order_channel_url(order_id: int) -> str | None:
     """Строит ссылку на сообщение заказа в канале водителей."""
     branch, msg_id = await db.get_channel_msg_for_order(order_id)
@@ -4211,6 +4237,7 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
         f"✅ <b>Платёж подтверждён</b> · {order_label2}\n"
         f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
         f"Подтвердил: {name}"))
+    asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True, "payment": row}
 
 
@@ -4239,6 +4266,7 @@ async def reject_payment(order_id: int, payment_id: int,
             + (f"\n📝 {note}" if note else ""))
     asyncio.create_task(_send_tg_cash(ch, text))
     asyncio.create_task(_notify_driver_payment(dict(row), order_id, text))
+    asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True, "payment": row}
 
 
