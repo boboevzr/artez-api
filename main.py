@@ -4192,9 +4192,11 @@ async def reject_payment(order_id: int, payment_id: int,
     details = f"Платёж отклонён: {int(float(row['amount'])):,} сум ({mLabel.get(row['method'],'')})"
     await db.add_order_activity(order_id, staff["id"], name, "payment_rejected", details)
     ch = await db.get_cash_tg_channel()
+    driver = row.get("created_by") or ""
     text = (f"❌ <b>Платёж отклонён</b> · Заказ #{order_id}\n"
             f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
-            f"Отклонил: {name}"
+            + (f"💼 Принял: {driver}\n" if driver else "")
+            + f"Отклонил: {name}"
             + (f"\n📝 {note}" if note else ""))
     asyncio.create_task(_send_tg_cash(ch, text))
     return {"ok": True, "payment": row}
@@ -4206,10 +4208,10 @@ async def get_receipt_file(order_id: int, payment_id: int, staff=Depends(get_cur
     if not db.pool:
         raise HTTPException(status_code=503)
     async with db.pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT receipt_url FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
-    if not row or not row["receipt_url"]:
+        row = await conn.fetchrow("SELECT receipt_url, receipt_file_id FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
+    if not row or (not row["receipt_url"] and not row["receipt_file_id"]):
         raise HTTPException(status_code=404, detail="Чек не найден")
-    file_id = row["receipt_url"]
+    file_id = row["receipt_url"] or row["receipt_file_id"]
     if not BOT_TOKEN:
         raise HTTPException(status_code=503, detail="Бот не настроен")
     try:
