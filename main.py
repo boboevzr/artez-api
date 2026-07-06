@@ -5372,12 +5372,11 @@ async def approve_debt_approval_ep(
                                        "text": f"✅ Запрос на закрытие долга по заказу <b>{order_num}</b> одобрён.\nЗаказ закрыт в долг.",
                                        "parse_mode": "HTML"})
                 except Exception: pass
-            # Обновить сообщения менеджеров в TG
+            # Удалить сообщения менеджеров в TG
             for tg_id_str, msg_id in mgr_msgs.items():
                 try:
-                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                                 json={"chat_id": int(tg_id_str), "message_id": int(msg_id),
-                                       "text": result_text})
+                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                                 json={"chat_id": int(tg_id_str), "message_id": int(msg_id)})
                 except Exception: pass
             # Обновить канальное сообщение водителя
             if order_id:
@@ -5425,9 +5424,8 @@ async def reject_debt_approval_ep(
                 except Exception: pass
             for tg_id_str, msg_id in mgr_msgs.items():
                 try:
-                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                                 json={"chat_id": int(tg_id_str), "message_id": int(msg_id),
-                                       "text": result_text})
+                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                                 json={"chat_id": int(tg_id_str), "message_id": int(msg_id)})
                 except Exception: pass
     return {"ok": True}
 
