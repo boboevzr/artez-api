@@ -2883,6 +2883,8 @@ async def get_channel_stop_full(order_id: int) -> dict | None:
     try: msg_ids = _j.loads(raw) if isinstance(raw, str) else (raw or {})
     except: msg_ids = {}
     d["msg_id"] = msg_ids.get(str(order_id))
+    stored_ch = msg_ids.get("__channel__")
+    d["channel_id"] = int(stored_ch) if stored_ch else None
     return d
 
 

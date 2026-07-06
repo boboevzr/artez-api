@@ -1333,6 +1333,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         elif tg_error is None:
             tg_error = "Ошибка отправки остановки"
 
+    new_msg_ids["__channel__"] = str(dest)  # фактический chat_id куда ушли сообщения
     footer_text = f"━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)}\n━━━━━━━━━━"
     ftr_id = await _send_tg_with_kb(dest, footer_text, {"inline_keyboard": []}, silent=True, protect=True)
     if ftr_id:
@@ -4154,15 +4155,10 @@ async def _update_api_channel_stop(order_id: int):
     """Обновляет текст+кнопки сообщения заказа в канале после изменения оплаты."""
     try:
         info = await db.get_channel_stop_full(order_id)
-        if not info or not info.get("msg_id"):
-            logging.warning(f"_update_api_channel_stop order={order_id}: no channel info or msg_id")
+        if not info or not info.get("msg_id") or not info.get("channel_id"):
+            logging.warning(f"_update_api_channel_stop order={order_id}: no channel info (msg_id={info.get('msg_id') if info else None}, ch={info.get('channel_id') if info else None})")
             return
-        branch = info.get("branch", "")
-        ch_key = "delivery_channel_navoi_id" if branch == "navoi" else "delivery_channel_zarafshan_id"
-        ch_id_str = await _get_cfg(ch_key)
-        if not ch_id_str:
-            logging.warning(f"_update_api_channel_stop order={order_id}: no channel id in config ({ch_key})")
-            return
+        ch_id = info["channel_id"]
         num = (info.get("sort_order") or 1)
         new_text = _build_stop_text_short(info, num)
         status = info.get("status", "delivery")
@@ -4170,15 +4166,15 @@ async def _update_api_channel_stop(order_id: int):
         async with aiohttp.ClientSession() as _sess:
             resp = await _sess.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                json={"chat_id": ch_id_str, "message_id": int(info["msg_id"]),
+                json={"chat_id": ch_id, "message_id": int(info["msg_id"]),
                       "text": new_text, "reply_markup": new_kb,
                       "parse_mode": "HTML", "disable_web_page_preview": True},
                 timeout=aiohttp.ClientTimeout(total=5))
             res_json = await resp.json()
             if not res_json.get("ok"):
-                logging.warning(f"_update_api_channel_stop TG error order={order_id} ch={ch_id_str} msg={info['msg_id']}: {res_json}")
+                logging.warning(f"_update_api_channel_stop TG error order={order_id} ch={ch_id} msg={info['msg_id']}: {res_json}")
             else:
-                logging.info(f"_update_api_channel_stop ok order={order_id} ch={ch_id_str} msg={info['msg_id']}")
+                logging.info(f"_update_api_channel_stop ok order={order_id} ch={ch_id} msg={info['msg_id']}")
     except Exception as e:
         logging.warning(f"_update_api_channel_stop order={order_id}: {e}")
 
