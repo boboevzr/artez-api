@@ -1,6 +1,15 @@
 import os
 import asyncpg
 import logging
+from datetime import datetime, timezone, timedelta
+
+_TASHKENT = timezone(timedelta(hours=5))
+
+def _tz_range(date_from: str, date_to: str):
+    """Преобразует строки дат (Ташкент) в UTC границы для TIMESTAMPTZ-сравнения."""
+    df = datetime.fromisoformat(date_from).replace(tzinfo=_TASHKENT)
+    dt = datetime.fromisoformat(date_to).replace(tzinfo=_TASHKENT) + timedelta(days=1)
+    return df, dt
 
 DB_URL = os.getenv("DATABASE_URL", "")
 
@@ -2421,21 +2430,21 @@ async def update_order_payment(order_id: int, payment_method: str, payment_statu
 
 async def get_cash_summary(date_from: str, date_to: str) -> dict:
     if not pool: return {}
-    TZ = "Asia/Tashkent"
+    ts_from, ts_to = _tz_range(date_from, date_to)
     async with pool.acquire() as conn:
         # Суммы по методу оплаты (из order_payments)
-        rows = await conn.fetch(f"""
+        rows = await conn.fetch("""
             SELECT
                 method AS payment_method,
                 COALESCE(SUM(amount), 0) AS amount,
                 COUNT(DISTINCT order_id) AS cnt
             FROM order_payments
-            WHERE (created_at AT TIME ZONE '{TZ}')::date BETWEEN $1::date AND $2::date
+            WHERE created_at >= $1 AND created_at < $2
               AND NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
             GROUP BY method
-        """, date_from, date_to)
+        """, ts_from, ts_to)
         # Заказы с оплатами за период
-        orders = await conn.fetch(f"""
+        orders = await conn.fetch("""
             SELECT
                 o.id, o.order_num, o.created_at, o.total_price, o.discount_sum,
                 o.payment_method, o.payment_status, o.prepaid_amount, o.paid_at,
@@ -2448,12 +2457,12 @@ async def get_cash_summary(date_from: str, date_to: str) -> dict:
                     SUM(amount) AS paid_total,
                     MAX(created_at) AS last_payment_at
                 FROM order_payments
-                WHERE (created_at AT TIME ZONE '{TZ}')::date BETWEEN $1::date AND $2::date
+                WHERE created_at >= $1 AND created_at < $2
                   AND NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
                 GROUP BY order_id
             ) sub ON sub.order_id = o.id
             ORDER BY sub.last_payment_at DESC
-        """, date_from, date_to)
+        """, ts_from, ts_to)
         return {
             "summary": [dict(r) for r in rows],
             "orders": [dict(r) for r in orders],
@@ -2461,9 +2470,9 @@ async def get_cash_summary(date_from: str, date_to: str) -> dict:
 
 async def get_payments_log(date_from: str, date_to: str) -> list:
     if not pool: return []
-    TZ = "Asia/Tashkent"
+    ts_from, ts_to = _tz_range(date_from, date_to)
     async with pool.acquire() as conn:
-        rows = await conn.fetch(f"""
+        rows = await conn.fetch("""
             SELECT
                 op.id,
                 op.order_id,
@@ -2484,9 +2493,9 @@ async def get_payments_log(date_from: str, date_to: str) -> list:
             LEFT JOIN orders o ON o.id = op.order_id
             LEFT JOIN staff cs ON cs.id = op.created_by_staff_id
             LEFT JOIN staff cv ON cv.id = op.confirmed_by
-            WHERE (op.created_at AT TIME ZONE '{TZ}')::date BETWEEN $1::date AND $2::date
+            WHERE op.created_at >= $1 AND op.created_at < $2
             ORDER BY op.created_at DESC
-        """, date_from, date_to)
+        """, ts_from, ts_to)
         return [dict(r) for r in rows]
 
 async def close_cash_shift(shift_date: str, closed_by: str, note: str) -> dict:
