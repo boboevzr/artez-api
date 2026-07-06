@@ -1190,6 +1190,11 @@ def _route_pickup_kb(order_id: int, status: str) -> dict:
             [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
             [h, r],
         ]}
+    elif status == "skipped":
+        return {"inline_keyboard": [
+            [{"text": "↩️ Отменить пропуск", "callback_data": f"rp:{order_id}:unskip"}],
+            [h, r],
+        ]}
     else:
         return {"inline_keyboard": [[h, r]]}
 
@@ -1324,11 +1329,15 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     sent = 0
     for i, s in enumerate(stops, 1):
         text     = _build_stop_text_short(s, i)
-        order_id = s.get("order_id") or s.get("id")
-        status   = s.get("order_status", "confirmed")
-        # delivery статус но водитель ещё не нажал «Везу клиенту» → показывать «Везу клиенту»
-        if route.get("type") == "delivery" and status == "delivery" and not s.get("driver_confirmed"):
-            kb_status = "ready"
+        order_id    = s.get("order_id") or s.get("id")
+        status      = s.get("order_status", "confirmed")
+        stop_status = s.get("stop_status", "pending")
+        if stop_status == "skipped":
+            kb_status = "skipped"
+        elif stop_status == "done":
+            kb_status = status  # delivered/received — показать как есть
+        elif route.get("type") == "delivery" and status == "delivery" and not s.get("driver_confirmed"):
+            kb_status = "ready"  # ещё не подтвердил «Везу клиенту»
         else:
             kb_status = status
         kb       = _route_pickup_kb(order_id, kb_status)
