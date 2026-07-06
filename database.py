@@ -3575,8 +3575,8 @@ async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
         resp_name = await conn.fetchval(
             "SELECT COALESCE(last_name||' '||first_name, login) FROM staff WHERE id=$1", responsible_id)
         await conn.execute(
-            "INSERT INTO order_status_history(order_num, status, changed_by, note) "
-            "SELECT order_num,'delivered',$2,'Закрыт с долгом (ответственный: '||$3||')' FROM orders WHERE id=$1",
+            "INSERT INTO order_status_history(order_num, new_status, note) "
+            "SELECT order_num,'delivered','Закрыт с долгом · '||$2||' (отв: '||$3||')' FROM orders WHERE id=$1",
             order_id, by_name, resp_name or "")
     return True
 
