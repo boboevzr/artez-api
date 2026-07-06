@@ -1326,7 +1326,9 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
         text     = _build_stop_text_short(s, i)
         order_id = s.get("order_id") or s.get("id")
         status   = s.get("order_status", "confirmed")
-        kb       = _route_pickup_kb(order_id, status)
+        # Для маршрутов доставки: показывать «Везу клиенту», даже если заказ уже delivery
+        kb_status = "ready" if route.get("type") == "delivery" and status == "delivery" else status
+        kb       = _route_pickup_kb(order_id, kb_status)
         msg_id   = await _send_tg_with_kb(dest, text, kb, silent=True, protect=True)
         if msg_id:
             sent += 1
