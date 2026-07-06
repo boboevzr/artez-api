@@ -5412,8 +5412,6 @@ async def reject_debt_approval_ep(
         order_num = row.get("order_num", "")
         driver_tg_id = row.get("driver_tg_id")
         mgr_msgs = row.get("mgr_msgs") or {}
-        approver_name = f"{staff.get('first_name', '')} {staff.get('last_name', '')}".strip() or "Менеджер"
-        result_text = f"❌ Отклонено · {order_num}\nОтклонил: {approver_name} (staff.html)"
         async with aiohttp.ClientSession() as s:
             if driver_tg_id:
                 try:
@@ -5426,7 +5424,8 @@ async def reject_debt_approval_ep(
                 try:
                     await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
                                  json={"chat_id": int(tg_id_str), "message_id": int(msg_id)})
-                except Exception: pass
+                except Exception as e:
+                    logging.warning(f"debt reject deleteMessage tg_id={tg_id_str}: {e}")
     return {"ok": True}
 
 
