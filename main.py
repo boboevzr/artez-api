@@ -4192,8 +4192,11 @@ async def reject_payment(order_id: int, payment_id: int,
     details = f"Платёж отклонён: {int(float(row['amount'])):,} сум ({mLabel.get(row['method'],'')})"
     await db.add_order_activity(order_id, staff["id"], name, "payment_rejected", details)
     ch = await db.get_cash_tg_channel()
+    async with db.pool.acquire() as _c:
+        _o = await _c.fetchrow("SELECT order_num FROM orders WHERE id=$1", order_id)
+    order_label = _o["order_num"] if _o and _o["order_num"] else f"#{order_id}"
     driver = row.get("created_by") or ""
-    text = (f"❌ <b>Платёж отклонён</b> · Заказ #{order_id}\n"
+    text = (f"❌ <b>Платёж отклонён</b> · {order_label}\n"
             f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
             + (f"💼 Принял: {driver}\n" if driver else "")
             + f"Отклонил: {name}"
