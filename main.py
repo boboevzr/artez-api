@@ -1181,43 +1181,44 @@ def _route_pickup_kb(order_id: int, status: str) -> dict:
     """Inline-клавиатура для сообщения в канале водителей."""
     h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
     r = {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}
+    p = {"text": "📦 Позиции", "callback_data": f"rp:{order_id}:items"}
     if status == "confirmed":
         return {"inline_keyboard": [
             [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
              {"text": "⏭ Пропустить", "callback_data": f"rp:{order_id}:skip"}],
-            [h, r],
+            [p, h, r],
         ]}
     elif status == "pickup":
         return {"inline_keyboard": [
             [{"text": "🏭 Сдал в мастерскую", "callback_data": f"rp:{order_id}:deliver"}],
             [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo"}],
-            [h, r],
+            [p, h, r],
         ]}
     elif status == "ready":
         return {"inline_keyboard": [
             [{"text": "🚗 Везу клиенту", "callback_data": f"rp:{order_id}:take_delivery"}],
             [{"text": "❌ Не забрал", "callback_data": f"rp:{order_id}:ntaken"}],
-            [h, r],
+            [p, h, r],
         ]}
     elif status == "delivery":
         return {"inline_keyboard": [
             [{"text": "✅ Доставил клиенту", "callback_data": f"rp:{order_id}:mark_delivered"}],
             [{"text": "💳 Оплата", "callback_data": f"rp:{order_id}:pay_init"}],
             [{"text": "🔙 Вернул в мастерскую", "callback_data": f"rp:{order_id}:retback"}],
-            [h, r],
+            [p, h, r],
         ]}
     elif status == "delivered":
         return {"inline_keyboard": [
             [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
-            [h, r],
+            [p, h, r],
         ]}
     elif status == "skipped":
         return {"inline_keyboard": [
             [{"text": "↩️ Отменить пропуск", "callback_data": f"rp:{order_id}:unskip"}],
-            [h, r],
+            [p, h, r],
         ]}
     else:
-        return {"inline_keyboard": [[h, r]]}
+        return {"inline_keyboard": [[p, h, r]]}
 
 def _parse_loc_str(val: str | None):
     if not val: return None
@@ -1261,6 +1262,7 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
     def h(s): return _html.escape(str(s)) if s else ""
 
     order_num = (stop.get("order_num", "") or "").replace("ARTEZ-", "")
+    item_count = stop.get("item_count", 0) or 0
     addr  = stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
     first = (stop.get("client_first_name") or "").strip()
     last  = (stop.get("client_last_name")  or "").strip()
@@ -1286,7 +1288,8 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
     def _fmt(n): return f"{int(n):,}".replace(",", " ") + " с" if n > 0 else "—"
     pay_line = f"💰 {_fmt(net)} · Опл: {_fmt(paid)} · Долг: {_fmt(debt)}"
 
-    return f"📦 #{num}·{h(order_num)} {addr_part}\n{contact}\n{pay_line}"
+    count_str = f" / {item_count}" if item_count else ""
+    return f"📦 #{num}·{h(order_num)}{count_str} {addr_part}\n{contact}\n{pay_line}"
 
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
 async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_staff)):

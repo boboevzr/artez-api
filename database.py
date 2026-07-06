@@ -2834,6 +2834,7 @@ async def get_route(route_id: int) -> dict | None:
                    o.discount_sum, o.delivery_discount, o.manual_discount,
                    COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                               FROM order_items WHERE order_id=o.id), 0) AS items_total,
+                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id=o.id
                                 AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount
