@@ -3753,6 +3753,9 @@ async def add_order_payment(
             if c["id"] != staff.get("id"):
                 asyncio.create_task(send_web_push(c["id"], push_title, push_body,
                                                   order_id=order_id, push_type="payment_review"))
+    # Наличные сразу считаются в paid_amount — обновляем канал
+    if method == "cash":
+        asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True, "payment": row}
 
 
