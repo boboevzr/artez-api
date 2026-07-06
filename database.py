@@ -3732,8 +3732,9 @@ async def get_pending_debt_approvals() -> list:
             SELECT dar.id, dar.order_id, dar.order_num, dar.driver_tg_id,
                    dar.debt_amount, dar.mgr_msgs, dar.created_at,
                    o.client_first_name, o.client_last_name, o.client_phone,
-                   o.address, o.short_address,
-                   COALESCE(o.total_price, 0) AS order_total,
+                   o.address, o.short_address, o.location, o.location_address,
+                   COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
+                            COALESCE(o.total_price,0)) AS order_total,
                    COALESCE(o.discount_sum, 0) + COALESCE(o.delivery_discount, 0)
                        + COALESCE(o.manual_discount, 0) AS total_discount,
                    COALESCE((SELECT SUM(amount) FROM order_payments
@@ -3745,6 +3746,54 @@ async def get_pending_debt_approvals() -> list:
             ORDER BY dar.created_at ASC
         """)
         return [dict(r) for r in rows]
+
+async def get_order_channel_info(order_id: int) -> dict | None:
+    """channel_id + msg_id для обновления канального сообщения из API."""
+    import json as _j
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT r.tg_delivery_msg_ids, r.branch,
+                   o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
+                   o.address, o.short_address,
+                   COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
+                            COALESCE(o.total_price,0)) AS items_total,
+                   COALESCE(o.discount_sum,0) AS discount_sum,
+                   COALESCE(o.delivery_discount,0) AS delivery_discount,
+                   COALESCE(o.manual_discount,0) AS manual_discount,
+                   COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=o.id), 0) AS paid_amount,
+                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
+                   ro.sort_order, r.id AS route_id
+            FROM route_orders ro
+            JOIN routes r ON r.id = ro.route_id
+            JOIN orders o ON o.id = ro.order_id
+            WHERE ro.order_id = $1
+            ORDER BY r.created_at DESC LIMIT 1
+        """, order_id)
+        if not row: return None
+        d = dict(row)
+        raw = d.get("tg_delivery_msg_ids") or "{}"
+        try: msg_ids = _j.loads(raw) if isinstance(raw, str) else (raw or {})
+        except: msg_ids = {}
+        d["msg_id"] = msg_ids.get(str(order_id))
+        stored_ch = msg_ids.get("__channel__")
+        if stored_ch:
+            d["channel_id"] = int(stored_ch)
+        else:
+            branch = d.get("branch", "")
+            key_ch = "delivery_channel_navoi_id" if branch == "navoi" else "delivery_channel_zarafshan_id"
+            for key in (key_ch, "delivery_group_id"):
+                cfg = await conn.fetchrow("SELECT value FROM config WHERE key=$1", key)
+                if cfg and cfg["value"]:
+                    d["channel_id"] = int(cfg["value"])
+                    break
+            else:
+                d["channel_id"] = 0
+        num_row = await conn.fetchrow(
+            "SELECT COUNT(*)+1 AS num FROM route_orders WHERE route_id=$1 AND sort_order < $2",
+            d["route_id"], d["sort_order"])
+        d["stop_num"] = int(num_row["num"]) if num_row else 1
+        return d
 
 async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: int,
                                  responsible_id: int | None = None) -> dict | None:

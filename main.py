@@ -5322,6 +5322,29 @@ async def get_pending_debt_approvals_ep(staff=Depends(get_current_staff)):
     approvers = await db.get_debt_approvers()
     return {"ok": True, "approvals": rows, "approvers": approvers}
 
+def _fmt_stop_text_api(info: dict, num: int) -> str:
+    import html as _h
+    def h(s): return _h.escape(str(s)) if s else ""
+    order_num  = (info.get("order_num") or "").replace("ARTEZ-", "")
+    item_count = info.get("item_count", 0) or 0
+    addr  = info.get("short_address") or info.get("address") or "—"
+    first = (info.get("client_first_name") or "").strip()
+    last  = (info.get("client_last_name")  or "").strip()
+    client = f"{first} {last}".strip() or "—"
+    phone  = info.get("client_phone") or ""
+    total  = float(info.get("items_total") or info.get("total_price") or 0)
+    disc   = (float(info.get("discount_sum") or 0) + float(info.get("delivery_discount") or 0)
+              + float(info.get("manual_discount") or 0))
+    net    = max(0.0, total - disc)
+    paid   = float(info.get("paid_amount") or 0)
+    debt   = max(0.0, net - paid)
+    def _f(n): return f"{int(n):,}".replace(",", " ") + " с" if n > 0 else "—"
+    pay_line = f"💰 {_f(net)} · Опл: {_f(paid)} · Долг: {_f(debt)}"
+    contact = f"👤 {h(client)}"
+    if phone: contact += f" 📞{h(phone)}"
+    count_str = f" / {item_count}" if item_count else ""
+    return f"📦 #{num}·{h(order_num)}{count_str} 📍{h(addr)}\n{contact}\n{pay_line}"
+
 @app.post("/api/debt-approvals/{request_id}/approve")
 async def approve_debt_approval_ep(
     request_id: int,
@@ -5334,12 +5357,14 @@ async def approve_debt_approval_ep(
     if not row:
         raise HTTPException(404, "Запрос не найден или уже обработан")
     if BOT_TOKEN:
+        order_id = row.get("order_id")
         order_num = row.get("order_num", "")
         driver_tg_id = row.get("driver_tg_id")
         mgr_msgs = row.get("mgr_msgs") or {}
         approver_name = f"{staff.get('first_name', '')} {staff.get('last_name', '')}".strip() or "Менеджер"
-        result_text = f"✅ Закрыт в долг · {order_num}\nОдобрил: {approver_name} (staff.html)"
+        result_text = f"✅ Закрыт в долг · {order_num}\nОдобрил: {approver_name}"
         async with aiohttp.ClientSession() as s:
+            # Уведомить водителя
             if driver_tg_id:
                 try:
                     await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
@@ -5347,11 +5372,30 @@ async def approve_debt_approval_ep(
                                        "text": f"✅ Запрос на закрытие долга по заказу <b>{order_num}</b> одобрён.\nЗаказ закрыт в долг.",
                                        "parse_mode": "HTML"})
                 except Exception: pass
+            # Обновить сообщения менеджеров в TG
             for tg_id_str, msg_id in mgr_msgs.items():
                 try:
                     await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
                                  json={"chat_id": int(tg_id_str), "message_id": int(msg_id),
                                        "text": result_text})
+                except Exception: pass
+            # Обновить канальное сообщение водителя
+            if order_id:
+                try:
+                    ch_info = await db.get_order_channel_info(order_id)
+                    if ch_info and ch_info.get("channel_id") and ch_info.get("msg_id"):
+                        new_text = _fmt_stop_text_api(ch_info, ch_info["stop_num"])
+                        kb = {"inline_keyboard": [
+                            [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
+                            [{"text": "📦 Позиции", "callback_data": f"rp:{order_id}:items"},
+                             {"text": "📋 История", "callback_data": f"rp:{order_id}:history"},
+                             {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}],
+                        ]}
+                        await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                                     json={"chat_id": ch_info["channel_id"], "message_id": ch_info["msg_id"],
+                                           "text": new_text, "parse_mode": "HTML",
+                                           "disable_web_page_preview": True,
+                                           "reply_markup": kb})
                 except Exception: pass
     return {"ok": True}
 
