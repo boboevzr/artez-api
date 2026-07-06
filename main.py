@@ -5172,6 +5172,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_accept_payment:   bool = Body(False, embed=True),
     can_manage_cash:      bool = Body(False, embed=True),
     notify_new_users:     bool = Body(False, embed=True),
+    can_approve_debt:     bool = Body(False, embed=True),
     order_stages:         str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -5181,22 +5182,49 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_override_measure=$5,
                    can_create_order=$6, can_confirm_order=$7, order_stages=$8,
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
-                   can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14
+                   can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
+                   can_approve_debt=$15
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
-                         can_accept_payment, can_manage_cash, notify_new_users""",
+                         can_accept_payment, can_manage_cash, notify_new_users,
+                         can_approve_debt""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
-            can_accept_payment, can_manage_cash, notify_new_users)
+            can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
 
+
+@app.post("/api/staff/orders/{order_id}/mark-delivered")
+async def staff_mark_delivered(
+    order_id: int,
+    due_date: str | None = Body(None, embed=True),
+    staff=Depends(get_current_staff),
+):
+    role = staff.get("role")
+    if role not in ("admin", "manager") and not staff.get("can_approve_debt"):
+        raise HTTPException(403, "Нет доступа")
+    debt = await db.get_order_debt_amount(order_id)
+    if debt > 0 and not due_date:
+        from datetime import date, timedelta
+        due_date = (date.today() + timedelta(days=7)).isoformat()
+    by_name = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "")
+    ok = await db.mark_order_delivered_with_debt(order_id, staff["id"], due_date, by_name)
+    if not ok:
+        raise HTTPException(500, "Ошибка обновления")
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True}
+
+@app.get("/api/admin/orders/debts")
+async def get_debt_orders(_=Depends(_get_admin)):
+    rows = await db.get_orders_with_debt()
+    return {"ok": True, "debts": rows}
 
 OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
                   "pct1": 5, "pct2": 10, "pct3": 20}

@@ -781,6 +781,15 @@ async def create_tables():
         ON CONFLICT (key) DO NOTHING;
         """)
 
+    # ── Шаг 16: учёт долгов по заказам ──────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE staff ADD COLUMN IF NOT EXISTS can_approve_debt BOOLEAN DEFAULT FALSE;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS debt_responsible_id INTEGER REFERENCES staff(id) ON DELETE SET NULL;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS debt_due_date DATE;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS debt_approved_at TIMESTAMPTZ;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -3522,3 +3531,73 @@ async def set_chat_warned(code: str):
         await conn.execute(
             "UPDATE chat_sessions SET warned_at=NOW(), updated_at=NOW() WHERE code=$1", code
         )
+
+# ══════════════════════════════════════
+#  ДОЛГИ ПО ЗАКАЗАМ
+# ══════════════════════════════════════
+
+async def get_order_debt_amount(order_id: int) -> float:
+    if not pool: return 0.0
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT GREATEST(0,
+                COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                - COALESCE((SELECT SUM(amount) FROM order_payments
+                             WHERE order_id=o.id AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)),0)
+            ) AS debt FROM orders o WHERE o.id=$1
+        """, order_id)
+        return float(row["debt"]) if row else 0.0
+
+async def get_debt_approvers() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, first_name, last_name, tg_id FROM staff "
+            "WHERE can_approve_debt=TRUE AND active=TRUE AND tg_id IS NOT NULL AND tg_id!=''")
+        return [dict(r) for r in rows]
+
+async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
+                                         due_date_str: str | None, by_name: str) -> bool:
+    if not pool: return False
+    from datetime import date, timedelta
+    due = None
+    if due_date_str:
+        try: due = date.fromisoformat(due_date_str)
+        except Exception: pass
+    if due is None:
+        due = date.today() + timedelta(days=7)
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE orders SET status='delivered', debt_responsible_id=$2,
+                   debt_due_date=$3, debt_approved_at=NOW() WHERE id=$1
+        """, order_id, responsible_id, due)
+        resp_name = await conn.fetchval(
+            "SELECT COALESCE(last_name||' '||first_name, login) FROM staff WHERE id=$1", responsible_id)
+        await conn.execute(
+            "INSERT INTO order_status_history(order_num, status, changed_by, note) "
+            "SELECT order_num,'delivered',$2,'Закрыт с долгом (ответственный: '||$3||')' FROM orders WHERE id=$1",
+            order_id, by_name, resp_name or "")
+    return True
+
+async def get_orders_with_debt() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT o.id, o.order_num, o.status, o.debt_due_date, o.debt_approved_at,
+                   o.client_first_name, o.client_last_name, o.client_phone,
+                   TRIM(COALESCE(sr.last_name,'') || ' ' || COALESCE(sr.first_name,'')) AS responsible_name,
+                   sr.id AS responsible_id,
+                   GREATEST(0,
+                     COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                     - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                     - COALESCE((SELECT SUM(amount) FROM order_payments
+                                  WHERE order_id=o.id
+                                    AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)),0)
+                   ) AS debt_amount
+              FROM orders o
+              LEFT JOIN staff sr ON sr.id = o.debt_responsible_id
+             WHERE o.debt_responsible_id IS NOT NULL
+             ORDER BY o.debt_due_date ASC NULLS LAST, o.id DESC
+        """)
+        return [r for r in [dict(r) for r in rows] if r["debt_amount"] > 0]
