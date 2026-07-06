@@ -2422,28 +2422,31 @@ async def update_order_payment(order_id: int, payment_method: str, payment_statu
 async def get_cash_summary(date_from: str, date_to: str) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
+        # Суммы по методу из order_payments (источник правды)
         rows = await conn.fetch("""
             SELECT
-                payment_method,
-                payment_status,
-                COALESCE(SUM(
-                    CASE WHEN payment_status='paid' THEN COALESCE(total_price,0) - COALESCE(discount_sum,0)
-                         WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
-                         ELSE 0 END
-                ), 0) AS amount,
-                COUNT(*) AS cnt
-            FROM orders
-            WHERE created_at::date BETWEEN $1 AND $2
-              AND payment_status IN ('paid','partial')
-            GROUP BY payment_method, payment_status
+                op.method AS payment_method,
+                COALESCE(SUM(op.amount), 0) AS amount,
+                COUNT(DISTINCT op.order_id) AS cnt
+            FROM order_payments op
+            WHERE op.created_at::date BETWEEN $1 AND $2
+              AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
+            GROUP BY op.method
         """, date_from, date_to)
+        # Список заказов у которых были платежи в этот период
         orders = await conn.fetch("""
-            SELECT id, order_num, created_at, total_price, discount_sum,
-                   payment_method, payment_status, prepaid_amount, paid_at
-            FROM orders
-            WHERE created_at::date BETWEEN $1 AND $2
-              AND payment_status IS DISTINCT FROM 'unpaid'
-            ORDER BY created_at DESC
+            SELECT DISTINCT ON (o.id)
+                o.id, o.order_num, o.created_at, o.total_price, o.discount_sum,
+                o.payment_method, o.payment_status, o.prepaid_amount, o.paid_at,
+                op.created_at AS payment_at,
+                COALESCE(SUM(op.amount) FILTER (
+                    WHERE NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
+                ) OVER (PARTITION BY o.id), 0) AS paid_total
+            FROM orders o
+            JOIN order_payments op ON op.order_id = o.id
+            WHERE op.created_at::date BETWEEN $1 AND $2
+              AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
+            ORDER BY o.id, op.created_at DESC
         """, date_from, date_to)
         return {
             "summary": [dict(r) for r in rows],
