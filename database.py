@@ -809,6 +809,26 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_discount_requests_status ON discount_requests(status);
         """)
 
+    # ── Шаг 18: запросы долгового одобрения ──────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS debt_approval_requests (
+            id              SERIAL PRIMARY KEY,
+            order_id        INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+            order_num       VARCHAR(50),
+            driver_tg_id    BIGINT,
+            debt_amount     NUMERIC(12,2),
+            mgr_msgs        JSONB DEFAULT '{}',
+            status          VARCHAR(20) DEFAULT 'pending',
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            resolved_at     TIMESTAMPTZ,
+            resolved_by     INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            resolution      VARCHAR(20),
+            responsible_id  INTEGER REFERENCES staff(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_debt_approval_status ON debt_approval_requests(status);
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -3588,7 +3608,7 @@ async def get_debt_approvers() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, first_name, last_name, tg_id FROM staff "
-            "WHERE can_approve_debt=TRUE AND active=TRUE AND tg_id IS NOT NULL AND tg_id!=''")
+            "WHERE can_approve_debt=TRUE AND active=TRUE AND tg_id IS NOT NULL")
         return [dict(r) for r in rows]
 
 async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
@@ -3690,3 +3710,62 @@ async def reject_discount_request(request_id: int, resolved_by: int) -> dict | N
             RETURNING *
         """, request_id, resolved_by)
         return dict(row) if row else None
+
+
+# ── Долговые одобрения ────────────────────────────────────────────────────────
+
+async def create_debt_approval_request(order_id: int, order_num: str, driver_tg_id: int,
+                                        debt_amount: float, mgr_msgs_json: str = '{}') -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO debt_approval_requests(order_id, order_num, driver_tg_id, debt_amount, mgr_msgs)
+            VALUES($1,$2,$3,$4,$5::jsonb)
+            RETURNING id, order_id, order_num, debt_amount, status
+        """, order_id, order_num, driver_tg_id, debt_amount, mgr_msgs_json)
+        return dict(row) if row else None
+
+async def get_pending_debt_approvals() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT dar.id, dar.order_id, dar.order_num, dar.driver_tg_id,
+                   dar.debt_amount, dar.mgr_msgs, dar.created_at,
+                   o.client_first_name, o.client_last_name, o.client_phone,
+                   o.address, o.short_address,
+                   COALESCE(o.total_price, 0) AS order_total,
+                   COALESCE(o.discount_sum, 0) + COALESCE(o.delivery_discount, 0)
+                       + COALESCE(o.manual_discount, 0) AS total_discount,
+                   COALESCE((SELECT SUM(amount) FROM order_payments
+                              WHERE order_id = o.id), 0) AS paid_amount,
+                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id = o.id), 0)::int AS item_count
+            FROM debt_approval_requests dar
+            LEFT JOIN orders o ON o.id = dar.order_id
+            WHERE dar.status = 'pending'
+            ORDER BY dar.created_at ASC
+        """)
+        return [dict(r) for r in rows]
+
+async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: int,
+                                 responsible_id: int | None = None) -> dict | None:
+    if not pool: return None
+    from datetime import date, timedelta
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE debt_approval_requests
+            SET status=$2, resolution=$3, resolved_by=$4, responsible_id=$5, resolved_at=NOW()
+            WHERE id=$1 AND status='pending'
+            RETURNING *
+        """, request_id, resolution, resolution, resolved_by, responsible_id)
+        if not row: return None
+        r = dict(row)
+        if resolution == 'approved' and responsible_id:
+            due = date.today() + timedelta(days=7)
+            await conn.execute("""
+                UPDATE orders SET status='delivered', debt_responsible_id=$2,
+                       debt_due_date=$3, debt_approved_at=NOW() WHERE id=$1
+            """, r['order_id'], responsible_id, due)
+            await conn.execute(
+                "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status='pending'",
+                r['order_id'])
+        return r

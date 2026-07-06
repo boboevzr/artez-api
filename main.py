@@ -5312,6 +5312,82 @@ async def reject_discount_request(
         raise HTTPException(404, "Запрос не найден или уже обработан")
     return {"ok": True, "request": row}
 
+# ── debt approval requests ─────────────────────────────────────────────────────
+
+@app.get("/api/debt-approvals/pending")
+async def get_pending_debt_approvals_ep(staff=Depends(get_current_staff)):
+    if not staff.get("can_approve_debt") and staff.get("role") not in ("admin", "manager"):
+        raise HTTPException(403, "Нет доступа")
+    rows = await db.get_pending_debt_approvals()
+    approvers = await db.get_debt_approvers()
+    return {"ok": True, "approvals": rows, "approvers": approvers}
+
+@app.post("/api/debt-approvals/{request_id}/approve")
+async def approve_debt_approval_ep(
+    request_id: int,
+    responsible_id: int = Body(..., embed=True),
+    staff=Depends(get_current_staff)
+):
+    if not staff.get("can_approve_debt") and staff.get("role") not in ("admin", "manager"):
+        raise HTTPException(403, "Нет доступа")
+    row = await db.resolve_debt_approval(request_id, "approved", staff["id"], responsible_id)
+    if not row:
+        raise HTTPException(404, "Запрос не найден или уже обработан")
+    if BOT_TOKEN:
+        order_num = row.get("order_num", "")
+        driver_tg_id = row.get("driver_tg_id")
+        mgr_msgs = row.get("mgr_msgs") or {}
+        approver_name = f"{staff.get('first_name', '')} {staff.get('last_name', '')}".strip() or "Менеджер"
+        result_text = f"✅ Закрыт в долг · {order_num}\nОдобрил: {approver_name} (staff.html)"
+        async with aiohttp.ClientSession() as s:
+            if driver_tg_id:
+                try:
+                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                 json={"chat_id": int(driver_tg_id),
+                                       "text": f"✅ Запрос на закрытие долга по заказу <b>{order_num}</b> одобрён.\nЗаказ закрыт в долг.",
+                                       "parse_mode": "HTML"})
+                except Exception: pass
+            for tg_id_str, msg_id in mgr_msgs.items():
+                try:
+                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                                 json={"chat_id": int(tg_id_str), "message_id": int(msg_id),
+                                       "text": result_text})
+                except Exception: pass
+    return {"ok": True}
+
+@app.post("/api/debt-approvals/{request_id}/reject")
+async def reject_debt_approval_ep(
+    request_id: int,
+    staff=Depends(get_current_staff)
+):
+    if not staff.get("can_approve_debt") and staff.get("role") not in ("admin", "manager"):
+        raise HTTPException(403, "Нет доступа")
+    row = await db.resolve_debt_approval(request_id, "rejected", staff["id"])
+    if not row:
+        raise HTTPException(404, "Запрос не найден или уже обработан")
+    if BOT_TOKEN:
+        order_num = row.get("order_num", "")
+        driver_tg_id = row.get("driver_tg_id")
+        mgr_msgs = row.get("mgr_msgs") or {}
+        approver_name = f"{staff.get('first_name', '')} {staff.get('last_name', '')}".strip() or "Менеджер"
+        result_text = f"❌ Отклонено · {order_num}\nОтклонил: {approver_name} (staff.html)"
+        async with aiohttp.ClientSession() as s:
+            if driver_tg_id:
+                try:
+                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                                 json={"chat_id": int(driver_tg_id),
+                                       "text": f"❌ Запрос на закрытие долга по заказу <b>{order_num}</b> отклонён.\nНеобходимо принять оплату от клиента.",
+                                       "parse_mode": "HTML"})
+                except Exception: pass
+            for tg_id_str, msg_id in mgr_msgs.items():
+                try:
+                    await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                                 json={"chat_id": int(tg_id_str), "message_id": int(msg_id),
+                                       "text": result_text})
+                except Exception: pass
+    return {"ok": True}
+
+
 OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
                   "pct1": 5, "pct2": 10, "pct3": 20}
 
