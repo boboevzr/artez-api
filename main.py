@@ -3822,8 +3822,10 @@ async def edit_order_payment(
         existing = await conn.fetchrow("SELECT * FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Платёж не найден")
-    # Только создатель или admin
-    if staff.get("sub") != "admin" and existing.get("created_by_staff_id") != staff.get("id"):
+    can_edit = (staff.get("sub") == "admin"
+                or staff.get("can_manage_cash")
+                or existing.get("created_by_staff_id") == staff.get("id"))
+    if not can_edit:
         raise HTTPException(status_code=403, detail="Нет доступа")
     row = await db.edit_order_payment(payment_id, amount, method, purpose)
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
