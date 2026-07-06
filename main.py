@@ -888,6 +888,7 @@ def _staff_public(s: dict) -> dict:
         "can_edit_delivery":   s.get("can_edit_delivery", False),
         "can_accept_payment":  s.get("can_accept_payment", False),
         "can_manage_cash":     s.get("can_manage_cash", False),
+        "can_approve_debt":    s.get("can_approve_debt", False),
         "notify_new_users":    s.get("notify_new_users", False),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
