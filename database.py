@@ -2995,8 +2995,8 @@ async def get_cash_balance() -> list:
         result = []
         for s in rows:
             bal = await get_my_cash_balance(s['id'])
-            if bal['collected'] == 0 and bal['received_from_others'] == 0:
-                continue  # пропускаем тех у кого нет движения
+            if not s['can_manage_cash'] and bal['collected'] == 0 and bal['received_from_others'] == 0:
+                continue  # пропускаем исполнителей без движения; ответственных за кассу — всегда показываем
             result.append({
                 "id": s['id'],
                 "first_name": s['first_name'],
