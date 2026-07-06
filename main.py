@@ -4686,6 +4686,17 @@ async def cash_summary(
     data = await db.get_cash_summary(date_from or today, date_to or today)
     return {"ok": True, **data}
 
+@app.get("/api/admin/cash/payments-log")
+async def payments_log(
+    date_from: str = None,
+    date_to:   str = None,
+    _=Depends(get_current_staff),
+):
+    from datetime import date
+    today = date.today().isoformat()
+    rows = await db.get_payments_log(date_from or today, date_to or today)
+    return {"ok": True, "payments": rows}
+
 @app.post("/api/admin/cash/close-shift")
 async def close_shift(
     shift_date: str  = Body(None, embed=False),
