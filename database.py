@@ -747,6 +747,12 @@ async def create_tables():
         ALTER TABLE leads ADD COLUMN IF NOT EXISTS pickup_time VARCHAR(100) DEFAULT '';
         """)
 
+    # ── Шаг 15b: tg_id водителя в платежах ──────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS driver_tg_id BIGINT;
+        """)
+
     # ── Шаг 15: таблица услуг с именами RU/UZ ────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""

@@ -4147,6 +4147,37 @@ async def get_pending_handovers(staff=Depends(get_current_staff)):
     return {"ok": True, "handovers": rows}
 
 
+async def _get_order_channel_url(order_id: int) -> str | None:
+    """Строит ссылку на сообщение заказа в канале водителей."""
+    branch, msg_id = await db.get_channel_msg_for_order(order_id)
+    ch_key = "delivery_channel_navoi_id" if branch == "navoi" else "delivery_channel_zarafshan_id"
+    lnk_key = "delivery_channel_navoi_link" if branch == "navoi" else "delivery_channel_zarafshan_link"
+    ch_id_str = await _get_cfg(ch_key)
+    if ch_id_str and msg_id:
+        try:
+            ch_abs = str(abs(int(ch_id_str)))
+            if ch_abs.startswith("100"): ch_abs = ch_abs[3:]
+            return f"https://t.me/c/{ch_abs}/{msg_id}"
+        except Exception:
+            pass
+    return await _get_cfg(lnk_key)
+
+
+async def _notify_driver_payment(row: dict, order_id: int, text: str):
+    """Отправляет уведомление водителю в личку с кнопкой перехода в канал."""
+    driver_tg_id = row.get("driver_tg_id")
+    if not driver_tg_id or not BOT_TOKEN:
+        return
+    try:
+        ch_url = await _get_order_channel_url(order_id)
+        kb = {"inline_keyboard": []}
+        if ch_url:
+            kb = {"inline_keyboard": [[{"text": "↩️ Перейти к заказу в канале", "url": ch_url}]]}
+        await _send_tg_with_kb(driver_tg_id, text, kb)
+    except Exception as e:
+        logging.warning(f"_notify_driver_payment error: {e}")
+
+
 # ── Подтверждение оплат картой/переводом ──────────────────────────────────────
 
 @app.get("/api/admin/cash/unconfirmed-payments")
@@ -4166,11 +4197,20 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
     details = f"Подтверждён платёж: {int(float(row['amount'])):,} сум ({mLabel.get(row['method'],'')})"
     await db.add_order_activity(order_id, staff["id"], name, "payment_confirmed", details)
+    async with db.pool.acquire() as _c:
+        _o2 = await _c.fetchrow("SELECT order_num FROM orders WHERE id=$1", order_id)
+    order_label2 = _o2["order_num"] if _o2 and _o2["order_num"] else f"#{order_id}"
+    driver2 = row.get("created_by") or ""
     ch = await db.get_cash_tg_channel()
-    text = (f"✅ <b>Платёж подтверждён</b> #{order_id}\n"
-            f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
-            f"Подтвердил: {name}")
-    asyncio.create_task(_send_tg_cash(ch, text))
+    cash_text = (f"✅ <b>Платёж подтверждён</b> · {order_label2}\n"
+                 f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
+                 + (f"💼 Принял: {driver2}\n" if driver2 else "")
+                 + f"Подтвердил: {name}")
+    asyncio.create_task(_send_tg_cash(ch, cash_text))
+    asyncio.create_task(_notify_driver_payment(dict(row), order_id,
+        f"✅ <b>Платёж подтверждён</b> · {order_label2}\n"
+        f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
+        f"Подтвердил: {name}"))
     return {"ok": True, "payment": row}
 
 
@@ -4198,6 +4238,7 @@ async def reject_payment(order_id: int, payment_id: int,
             + f"Отклонил: {name}"
             + (f"\n📝 {note}" if note else ""))
     asyncio.create_task(_send_tg_cash(ch, text))
+    asyncio.create_task(_notify_driver_payment(dict(row), order_id, text))
     return {"ok": True, "payment": row}
 
 
