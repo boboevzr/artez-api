@@ -802,10 +802,13 @@ async def get_current_staff(authorization: str = Header(None)):
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError:
         raise HTTPException(status_code=401, detail="Недействительный токен")
-    # Admin panel token — treat as super-admin staff
+    # Admin panel token — resolve to real admin staff record
     if payload.get("sub") == "admin":
-        return {"id": 0, "login": "admin", "role": "admin", "sub": "admin", "active": True,
-                "first_name": "Admin", "last_name": None, "phone": None,
+        admin_staff = await db.get_first_admin_staff()
+        if admin_staff:
+            return dict(admin_staff)
+        return {"id": None, "login": "admin", "role": "admin", "sub": "admin", "active": True,
+                "first_name": "Администратор", "last_name": None, "phone": None,
                 "branch": None, "tg_username": None, "position": None}
     if payload.get("type") != "staff":
         raise HTTPException(status_code=401, detail="Требуется токен сотрудника")

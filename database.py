@@ -1344,6 +1344,11 @@ async def get_staff_by_id(staff_id: int):
     async with pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM staff WHERE id=$1", staff_id)
 
+async def get_first_admin_staff():
+    if not pool: return None
+    async with pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM staff WHERE role='admin' AND active=TRUE ORDER BY id LIMIT 1")
+
 async def get_all_staff():
     if not pool: return []
     async with pool.acquire() as conn:
