@@ -1159,38 +1159,39 @@ _ORDER_STATUS_RU = {
 def _route_pickup_kb(order_id: int, status: str) -> dict:
     """Inline-клавиатура для сообщения в канале водителей."""
     h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
+    r = {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}
     if status == "confirmed":
         return {"inline_keyboard": [
             [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
              {"text": "⏭ Пропустить", "callback_data": f"rp:{order_id}:skip"}],
-            [h],
+            [h, r],
         ]}
     elif status == "pickup":
         return {"inline_keyboard": [
             [{"text": "🏭 Сдал в мастерскую", "callback_data": f"rp:{order_id}:deliver"}],
             [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo"}],
-            [h],
+            [h, r],
         ]}
     elif status == "ready":
         return {"inline_keyboard": [
             [{"text": "🚗 Везу клиенту", "callback_data": f"rp:{order_id}:take_delivery"},
              {"text": "⏭ Пропустить", "callback_data": f"rp:{order_id}:skip"}],
-            [h],
+            [h, r],
         ]}
     elif status == "delivery":
         return {"inline_keyboard": [
             [{"text": "✅ Доставил клиенту", "callback_data": f"rp:{order_id}:mark_delivered"}],
             [{"text": "💳 Оплата", "callback_data": f"rp:{order_id}:pay_init"}],
             [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo_delivery"}],
-            [h],
+            [h, r],
         ]}
     elif status == "delivered":
         return {"inline_keyboard": [
             [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
-            [h],
+            [h, r],
         ]}
     else:
-        return {"inline_keyboard": [[h]]}
+        return {"inline_keyboard": [[h, r]]}
 
 def _parse_loc_str(val: str | None):
     if not val: return None
