@@ -5275,6 +5275,43 @@ async def get_debt_orders(_=Depends(_get_admin)):
     rows = await db.get_orders_with_debt()
     return {"ok": True, "debts": rows}
 
+# ── discount requests ──────────────────────────────────────────────────────────
+
+@app.get("/api/discount-requests/pending")
+async def get_pending_discount_requests(staff=Depends(_get_staff_user)):
+    role = staff.get("role")
+    if role not in ("admin", "manager"):
+        raise HTTPException(403, "Нет доступа")
+    rows = await db.get_pending_discount_requests()
+    return {"ok": True, "requests": rows}
+
+@app.post("/api/discount-requests/{request_id}/approve")
+async def approve_discount_request(
+    request_id: int,
+    approved_amount: float = Body(..., embed=True),
+    staff=Depends(_get_staff_user)
+):
+    role = staff.get("role")
+    if role not in ("admin", "manager"):
+        raise HTTPException(403, "Нет доступа")
+    row = await db.resolve_discount_request(request_id, approved_amount, staff["id"])
+    if not row:
+        raise HTTPException(404, "Запрос не найден или уже обработан")
+    return {"ok": True, "request": row}
+
+@app.post("/api/discount-requests/{request_id}/reject")
+async def reject_discount_request(
+    request_id: int,
+    staff=Depends(_get_staff_user)
+):
+    role = staff.get("role")
+    if role not in ("admin", "manager"):
+        raise HTTPException(403, "Нет доступа")
+    row = await db.reject_discount_request(request_id, staff["id"])
+    if not row:
+        raise HTTPException(404, "Запрос не найден или уже обработан")
+    return {"ok": True, "request": row}
+
 OSAGO_DEFAULT = {"tier1": 200000, "tier2": 400000, "tier3": 700000,
                   "pct1": 5, "pct2": 10, "pct3": 20}
 

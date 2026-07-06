@@ -791,6 +791,24 @@ async def create_tables():
         ALTER TABLE route_orders ADD COLUMN IF NOT EXISTS driver_confirmed BOOLEAN DEFAULT FALSE;
         """)
 
+    # ── Шаг 17: запросы скидок от водителей ──────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS discount_requests (
+            id              SERIAL PRIMARY KEY,
+            order_id        INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+            order_num       VARCHAR(50),
+            driver_tg_id    BIGINT,
+            requested_amount NUMERIC(12,2) NOT NULL,
+            status          VARCHAR(20) DEFAULT 'pending',
+            approved_amount NUMERIC(12,2),
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            resolved_at     TIMESTAMPTZ,
+            resolved_by     INTEGER REFERENCES staff(id) ON DELETE SET NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_discount_requests_status ON discount_requests(status);
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -3620,3 +3638,55 @@ async def get_orders_with_debt() -> list:
              ORDER BY o.debt_due_date ASC NULLS LAST, o.id DESC
         """)
         return [r for r in [dict(r) for r in rows] if r["debt_amount"] > 0]
+
+# ── discount_requests ─────────────────────────────────────────────────────────
+
+async def create_discount_request(order_id: int, order_num: str, driver_tg_id: int, requested_amount: float) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO discount_requests(order_id, order_num, driver_tg_id, requested_amount)
+            VALUES($1,$2,$3,$4) RETURNING *
+        """, order_id, order_num, driver_tg_id, requested_amount)
+        return dict(row) if row else None
+
+async def get_pending_discount_requests() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT dr.*, o.client_first_name, o.client_last_name,
+                   COALESCE(o.total_price,0) AS order_total
+            FROM discount_requests dr
+            LEFT JOIN orders o ON o.id = dr.order_id
+            WHERE dr.status='pending'
+            ORDER BY dr.created_at ASC
+        """)
+        return [dict(r) for r in rows]
+
+async def resolve_discount_request(request_id: int, approved_amount: float, resolved_by: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE discount_requests
+               SET status='approved', approved_amount=$2, resolved_by=$3, resolved_at=NOW()
+             WHERE id=$1 AND status='pending'
+            RETURNING *
+        """, request_id, approved_amount, resolved_by)
+        if not row:
+            return None
+        r = dict(row)
+        await conn.execute("""
+            UPDATE orders SET manual_discount = COALESCE(manual_discount,0) + $2 WHERE id=$1
+        """, r["order_id"], approved_amount)
+        return r
+
+async def reject_discount_request(request_id: int, resolved_by: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE discount_requests
+               SET status='rejected', resolved_by=$2, resolved_at=NOW()
+             WHERE id=$1 AND status='pending'
+            RETURNING *
+        """, request_id, resolved_by)
+        return dict(row) if row else None
