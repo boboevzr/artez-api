@@ -2534,7 +2534,7 @@ async def add_order_activity(order_id: int, staff_id: int, staff_name: str, acti
     async with pool.acquire() as conn:
         await conn.execute(
             "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
-            order_id, staff_id, staff_name, action, details)
+            order_id, staff_id or None, staff_name, action, details)
 
 async def get_order_activity(order_id: int) -> list:
     if not pool: return []
