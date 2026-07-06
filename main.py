@@ -5278,7 +5278,7 @@ async def get_debt_orders(_=Depends(_get_admin)):
 # ── discount requests ──────────────────────────────────────────────────────────
 
 @app.get("/api/discount-requests/pending")
-async def get_pending_discount_requests(staff=Depends(_get_staff_user)):
+async def get_pending_discount_requests(staff=Depends(get_current_staff)):
     role = staff.get("role")
     if role not in ("admin", "manager"):
         raise HTTPException(403, "Нет доступа")
@@ -5289,7 +5289,7 @@ async def get_pending_discount_requests(staff=Depends(_get_staff_user)):
 async def approve_discount_request(
     request_id: int,
     approved_amount: float = Body(..., embed=True),
-    staff=Depends(_get_staff_user)
+    staff=Depends(get_current_staff)
 ):
     role = staff.get("role")
     if role not in ("admin", "manager"):
@@ -5302,7 +5302,7 @@ async def approve_discount_request(
 @app.post("/api/discount-requests/{request_id}/reject")
 async def reject_discount_request(
     request_id: int,
-    staff=Depends(_get_staff_user)
+    staff=Depends(get_current_staff)
 ):
     role = staff.get("role")
     if role not in ("admin", "manager"):
