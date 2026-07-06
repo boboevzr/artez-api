@@ -3572,6 +3572,9 @@ async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
             UPDATE orders SET status='delivered', debt_responsible_id=$2,
                    debt_due_date=$3, debt_approved_at=NOW() WHERE id=$1
         """, order_id, responsible_id, due)
+        await conn.execute(
+            "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status='pending'",
+            order_id)
         resp_name = await conn.fetchval(
             "SELECT COALESCE(last_name||' '||first_name, login) FROM staff WHERE id=$1", responsible_id)
         await conn.execute(
