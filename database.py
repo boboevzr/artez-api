@@ -788,6 +788,7 @@ async def create_tables():
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS debt_responsible_id INTEGER REFERENCES staff(id) ON DELETE SET NULL;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS debt_due_date DATE;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS debt_approved_at TIMESTAMPTZ;
+        ALTER TABLE route_orders ADD COLUMN IF NOT EXISTS driver_confirmed BOOLEAN DEFAULT FALSE;
         """)
 
     logging.info("✅ API: Tables created/verified")
@@ -2813,6 +2814,7 @@ async def get_route(route_id: int) -> dict | None:
             SELECT ro.*, o.order_num, o.client_first_name, o.client_last_name,
                    o.client_phone, o.address, o.short_address,
                    o.location, o.location_address, o.status AS order_status,
+                   ro.driver_confirmed,
                    o.service, o.branch,
                    o.pickup_date, o.deadline,
                    o.total_price, o.prepaid_amount, o.payment_status,
