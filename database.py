@@ -2643,7 +2643,7 @@ async def reject_payment(payment_id: int, rejected_by: int, note: str = "") -> d
                SET confirmed=FALSE, confirmed_by=$2, confirmed_at=NOW(), reject_note=$3
              WHERE id=$1
              RETURNING *
-        """, payment_id, rejected_by, note or None)
+        """, payment_id, rejected_by or None, note or None)
         if row:
             await _recalc_payment_status(conn, row["order_id"])
         return dict(row) if row else {}
@@ -2963,7 +2963,7 @@ async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
         row = await conn.fetchrow("""
             UPDATE order_payments SET confirmed=TRUE, confirmed_by=$2, confirmed_at=NOW()
             WHERE id=$1 RETURNING *
-        """, payment_id, confirmed_by)
+        """, payment_id, confirmed_by or None)
         return dict(row) if row else {}
 
 async def save_payment_receipt(payment_id: int, receipt_url: str) -> dict:

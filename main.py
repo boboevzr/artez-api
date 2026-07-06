@@ -1312,18 +1312,6 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
     new_msg_ids: dict = {}
     tg_error = None
 
-    header_text = (
-        f"━━━━━━━━━━\n"
-        f"🚗 {route_name}-{len(stops)} — {type_emoji} {type_label}\n"
-        f"📅 {route_date}   {time_str}\n"
-        f"━━━━━━━━━━"
-    )
-    hdr_id = await _send_tg_with_kb(dest, header_text, {"inline_keyboard": []}, silent=True, protect=True)
-    if hdr_id:
-        new_msg_ids["__header__"] = hdr_id
-    elif tg_error is None:
-        tg_error = "Не удалось отправить в канал"
-
     sent = 0
     for i, s in enumerate(stops, 1):
         text     = _build_stop_text_short(s, i)
