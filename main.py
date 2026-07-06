@@ -4178,7 +4178,7 @@ async def _update_api_channel_stop(order_id: int):
             if not res_json.get("ok"):
                 logging.warning(f"_update_api_channel_stop TG error order={order_id} ch={ch_id_str} msg={info['msg_id']}: {res_json}")
             else:
-                logging.info(f"_update_api_channel_stop ok order={order_id}")
+                logging.info(f"_update_api_channel_stop ok order={order_id} ch={ch_id_str} msg={info['msg_id']}")
     except Exception as e:
         logging.warning(f"_update_api_channel_stop order={order_id}: {e}")
 
