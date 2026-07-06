@@ -2801,6 +2801,19 @@ async def create_route(data: dict) -> dict:
              data.get("status","planned"), data.get("note"))
         return dict(row) if row else {}
 
+async def get_active_route_orders() -> list:
+    """Все заказы в активных маршрутах (не done/cancelled) → [{order_id, route_id, route_name, route_date, route_type}]"""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ro.order_id, r.id AS route_id, r.name AS route_name,
+                   r.date AS route_date, r.type AS route_type
+            FROM route_orders ro
+            JOIN routes r ON r.id = ro.route_id
+            WHERE r.status NOT IN ('done','cancelled')
+        """)
+        return [dict(r) for r in rows]
+
 async def get_route(route_id: int) -> dict | None:
     if not pool: return None
     async with pool.acquire() as conn:

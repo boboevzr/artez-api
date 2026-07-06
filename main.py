@@ -1023,6 +1023,19 @@ async def save_staff_personal_ep(staff_id: int, body: dict, me=Depends(get_curre
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
 
+@app.get("/api/admin/routes/active-order-ids")
+async def active_route_order_ids(me=Depends(get_current_staff)):
+    rows = await db.get_active_route_orders()
+    result = {}
+    for r in rows:
+        result[r["order_id"]] = {
+            "route_id":   r["route_id"],
+            "route_name": r["route_name"] or f"Маршрут #{r['route_id']}",
+            "route_date": str(r["route_date"]) if r["route_date"] else "",
+            "route_type": r["route_type"] or "",
+        }
+    return result
+
 @app.get("/api/admin/routes")
 async def list_routes(date: str | None = None, driver_id: int | None = None,
                       branch: str | None = None, status: str | None = None,
@@ -1075,6 +1088,13 @@ async def add_route_orders(route_id: int, body: dict, me=Depends(get_current_sta
     if me.get("role") not in ("admin","logistics","manager"):
         raise HTTPException(status_code=403)
     order_ids = body.get("order_ids", [])
+    # Проверка: заказ уже в другом активном маршруте
+    active = await db.get_active_route_orders()
+    blocked = {r["order_id"]: r for r in active if r["route_id"] != route_id}
+    conflicts = [oid for oid in order_ids if oid in blocked]
+    if conflicts:
+        names = ", ".join(str(c) for c in conflicts[:5])
+        raise HTTPException(400, f"Заказы уже в активном маршруте: {names}")
     count = await db.add_orders_to_route(route_id, order_ids)
     return {"ok": True, "added": count}
 
