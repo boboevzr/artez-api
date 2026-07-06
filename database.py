@@ -2461,9 +2461,8 @@ async def get_cash_summary(date_from: str, date_to: str) -> dict:
 
 async def get_payments_log(date_from: str, date_to: str) -> list:
     if not pool: return []
-    TZ = "Asia/Tashkent"
     async with pool.acquire() as conn:
-        rows = await conn.fetch(f"""
+        rows = await conn.fetch("""
             SELECT
                 op.id,
                 op.order_id,
@@ -2484,9 +2483,9 @@ async def get_payments_log(date_from: str, date_to: str) -> list:
             LEFT JOIN orders o ON o.id = op.order_id
             LEFT JOIN staff cs ON cs.id = op.created_by_staff_id
             LEFT JOIN staff cv ON cv.id = op.confirmed_by
-            WHERE date_trunc('day', op.created_at AT TIME ZONE '{TZ}') BETWEEN $1::date AND $2::date
             ORDER BY op.created_at DESC
-        """, date_from, date_to)
+            LIMIT 100
+        """)
         return [dict(r) for r in rows]
 
 async def close_cash_shift(shift_date: str, closed_by: str, note: str) -> dict:
