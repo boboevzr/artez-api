@@ -1335,7 +1335,7 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
             tg_error = "Ошибка отправки остановки"
 
     new_msg_ids["__channel__"] = str(dest)  # фактический chat_id куда ушли сообщения
-    footer_text = f"━━━━━━━━━━\n✅ Конец списка · {sent} из {len(stops)}\n━━━━━━━━━━"
+    footer_text = f"━━━━━━━━━━\nКонец списка · {sent} из {len(stops)}\n━━━━━━━━━━"
     ftr_id = await _send_tg_with_kb(dest, footer_text, {"inline_keyboard": []}, silent=True, protect=True)
     if ftr_id:
         new_msg_ids["__footer__"] = ftr_id
