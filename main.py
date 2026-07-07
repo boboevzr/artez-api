@@ -4244,6 +4244,67 @@ async def expense_categories_list(staff=Depends(get_current_staff)):
     cats = await db.get_expense_categories()
     return {"ok": True, "categories": cats}
 
+@app.get("/api/admin/expenses/categories/tree")
+async def expense_categories_tree(staff=Depends(get_current_staff)):
+    tree = await db.get_expense_categories_tree()
+    return {"ok": True, "categories": tree}
+
+@app.post("/api/admin/expenses/categories")
+async def create_expense_category(
+    name_ru:          str   = Body(..., embed=True),
+    name_uz:          str   = Body(..., embed=True),
+    icon:             str   = Body("",      embed=True),
+    parent_id:        int   = Body(None,    embed=True),
+    approve_level:    str   = Body("manager", embed=True),
+    receipt_required: bool  = Body(False,   embed=True),
+    amount_threshold: float = Body(None,    embed=True),
+    sort_order:       int   = Body(0,       embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    cat = await db.create_expense_category(
+        name_ru, name_uz, icon, parent_id, approve_level,
+        receipt_required, amount_threshold, sort_order)
+    return {"ok": True, "category": cat}
+
+@app.put("/api/admin/expenses/categories/{cat_id}")
+async def update_expense_category(
+    cat_id:           int,
+    name_ru:          str   = Body(..., embed=True),
+    name_uz:          str   = Body(..., embed=True),
+    icon:             str   = Body("",      embed=True),
+    parent_id:        int   = Body(None,    embed=True),
+    approve_level:    str   = Body("manager", embed=True),
+    receipt_required: bool  = Body(False,   embed=True),
+    amount_threshold: float = Body(None,    embed=True),
+    sort_order:       int   = Body(0,       embed=True),
+    active:           bool  = Body(True,    embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    cat = await db.update_expense_category(
+        cat_id, name_ru, name_uz, icon, parent_id, approve_level,
+        receipt_required, amount_threshold, sort_order, active)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    return {"ok": True, "category": cat}
+
+@app.delete("/api/admin/expenses/categories/{cat_id}")
+async def delete_expense_category(cat_id: int, staff=Depends(get_current_staff)):
+    if staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    result = await db.delete_expense_category(cat_id)
+    if not result.get("ok"):
+        err = result.get("error", "unknown")
+        if err == "has_expenses":
+            raise HTTPException(status_code=400, detail="Есть расходы по этой категории")
+        if err == "has_children":
+            raise HTTPException(status_code=400, detail="Сначала удалите подкатегории")
+        raise HTTPException(status_code=400, detail=err)
+    return {"ok": True}
+
 @app.post("/api/admin/expenses")
 async def create_expense(
     category_id: int   = Body(..., embed=True),

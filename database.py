@@ -3918,24 +3918,68 @@ async def driver_update_order_status(order_id: int, new_status: str, staff_id: i
 
 # ── Расходы ───────────────────────────────────────────────────────────────────
 
-_EXPENSE_CATEGORIES_SEED = [
-    ("⛽ Топливо",              "⛽ Yoqilg'i",               "⛽", "manager", True,  None,    1),
-    ("🔧 Техобслуживание",      "🔧 Texnik xizmat",          "🔧", "both",    True,  None,    2),
-    ("🧴 Химия и материалы",    "🧴 Kimyo va materiallar",   "🧴", "manager", True,  None,    3),
-    ("📦 Упаковка",             "📦 Qadoqlash",              "📦", "manager", False, None,    4),
-    ("⚡ Коммунальные",         "⚡ Kommunal",               "⚡", "admin",   True,  None,    5),
-    ("🏢 Аренда",               "🏢 Ijara",                  "🏢", "admin",   True,  None,    6),
-    ("👷 Зарплата",             "👷 Maosh",                  "👷", "admin",   False, None,    7),
-    ("💰 Аванс",                "💰 Avans",                  "💰", "both",    False, None,    8),
-    ("🍽 Питание сотрудников",  "🍽 Xodimlar ovqati",        "🍽", "manager", False, None,    9),
-    ("📱 Связь",                "📱 Aloqa",                  "📱", "manager", True,  None,   10),
-    ("🏥 Медицина",             "🏥 Tibbiyot",               "🏥", "both",    True,  None,   11),
-    ("🛒 Хозяйственные",        "🛒 Xo'jalik",               "🛒", "manager", False, None,   12),
-    ("🔩 Ремонт оборудования",  "🔩 Jihozlarni ta'mirlash",  "🔩", "both",    True,  None,   13),
-    ("📣 Реклама",              "📣 Reklama",                "📣", "both",    True,  None,   14),
-    ("🏦 Инкассация",           "🏦 Inkassatsiya",           "🏦", "admin",   True,  None,   15),
-    ("🎁 Представительские",    "🎁 Vakillik xarajatlari",   "🎁", "admin",   True,  None,   16),
-    ("❓ Прочее",               "❓ Boshqalar",              "❓", "admin",   True,  None,   17),
+# ── Seed данные: 2-уровневая структура ───────────────────────────────────────
+_EXPENSE_CAT_PARENTS = [
+    # (name_ru, name_uz, icon, sort_order)
+    ("🚗 Транспорт",        "🚗 Transport",          "🚗", 10),
+    ("💡 Коммунальные",     "💡 Kommunal",           "💡", 20),
+    ("👷 Персонал",         "👷 Xodimlar",           "👷", 30),
+    ("🧴 Химия/Материалы",  "🧴 Kimyo/Materiallar",  "🧴", 40),
+    ("📦 Закупки/Склад",    "📦 Xarid/Ombor",        "📦", 50),
+    ("🏢 Офис",             "🏢 Ofis",               "🏢", 60),
+    ("🔧 Обслуживание",     "🔧 Texnik xizmat",      "🔧", 70),
+    ("📣 Маркетинг",        "📣 Marketing",          "📣", 80),
+    ("🏦 Финансы",          "🏦 Moliya",             "🏦", 90),
+    ("❓ Прочее",            "❓ Boshqalar",          "❓", 100),
+]
+
+# (parent_name_ru, [(name_ru, name_uz, icon, approve_level, receipt_required, amount_threshold, sort_order)])
+_EXPENSE_CAT_CHILDREN = [
+    ("🚗 Транспорт", [
+        ("⛽ Топливо",         "⛽ Yoqilg'i",          "⛽", "manager", True,  None, 1),
+        ("🔧 Ремонт авто",     "🔧 Avto ta'miri",      "🔧", "both",    True,  None, 2),
+        ("🅿️ Парковка",       "🅿️ Parkovka",          "🅿️","manager", False, None, 3),
+    ]),
+    ("💡 Коммунальные", [
+        ("💡 Электричество",   "💡 Elektr",            "💡", "admin",   True,  None, 1),
+        ("💧 Вода",            "💧 Suv",               "💧", "admin",   True,  None, 2),
+        ("🌐 Интернет",        "🌐 Internet",           "🌐", "admin",   True,  None, 3),
+        ("🔥 Газ",             "🔥 Gaz",               "🔥", "admin",   True,  None, 4),
+    ]),
+    ("👷 Персонал", [
+        ("💰 Зарплата",        "💰 Maosh",             "💰", "admin",   False, None, 1),
+        ("💸 Аванс",           "💸 Avans",             "💸", "both",    False, None, 2),
+        ("🍽 Питание",         "🍽 Ovqat",             "🍽", "manager", False, None, 3),
+        ("🏥 Медицина",        "🏥 Tibbiyot",          "🏥", "both",    True,  None, 4),
+    ]),
+    ("🧴 Химия/Материалы", [
+        ("🧴 Бытовая химия",   "🧴 Kimyo",             "🧴", "manager", True,  None, 1),
+        ("🪣 Инвентарь",       "🪣 Inventar",          "🪣", "manager", False, None, 2),
+    ]),
+    ("📦 Закупки/Склад", [
+        ("📦 Упаковка",        "📦 Qadoqlash",         "📦", "manager", False, None, 1),
+        ("🛒 Прочие закупки",  "🛒 Boshqa xaridlar",  "🛒", "both",    True,  None, 2),
+    ]),
+    ("🏢 Офис", [
+        ("📎 Канцтовары",      "📎 Kantselyariya",     "📎", "manager", False, None, 1),
+        ("☕ Продукты",         "☕ Oziq-ovqat",         "☕", "manager", False, None, 2),
+        ("📱 Связь/SIM",       "📱 Aloqa/SIM",         "📱", "manager", True,  None, 3),
+        ("🏢 Аренда",          "🏢 Ijara",             "🏢", "admin",   True,  None, 4),
+    ]),
+    ("🔧 Обслуживание", [
+        ("🔩 Ремонт обор-я",   "🔩 Jihoz ta'miri",    "🔩", "both",    True,  None, 1),
+        ("🧹 Уборка помещ.",   "🧹 Xona tozalash",    "🧹", "manager", False, None, 2),
+    ]),
+    ("📣 Маркетинг", [
+        ("📣 Реклама",         "📣 Reklama",           "📣", "both",    True,  None, 1),
+        ("🎁 Представит.",     "🎁 Vakillik",          "🎁", "admin",   True,  None, 2),
+    ]),
+    ("🏦 Финансы", [
+        ("🏦 Инкассация",      "🏦 Inkassatsiya",      "🏦", "admin",   True,  None, 1),
+    ]),
+    ("❓ Прочее", [
+        ("❓ Прочее",          "❓ Boshqalar",          "❓", "admin",   True,  None, 1),
+    ]),
 ]
 
 async def ensure_expense_tables():
@@ -3947,6 +3991,7 @@ async def ensure_expense_tables():
                 name_ru          TEXT NOT NULL,
                 name_uz          TEXT NOT NULL,
                 icon             TEXT DEFAULT '',
+                parent_id        INT,
                 approve_level    TEXT NOT NULL DEFAULT 'manager',
                 receipt_required BOOLEAN NOT NULL DEFAULT FALSE,
                 amount_threshold NUMERIC,
@@ -3954,6 +3999,18 @@ async def ensure_expense_tables():
                 active           BOOLEAN NOT NULL DEFAULT TRUE
             )
         """)
+        # Миграция: добавить parent_id если таблица уже существует без него
+        await conn.execute("""
+            ALTER TABLE expense_categories ADD COLUMN IF NOT EXISTS parent_id INT
+        """)
+        try:
+            await conn.execute("""
+                ALTER TABLE expense_categories ADD CONSTRAINT fk_exp_cat_parent
+                FOREIGN KEY (parent_id) REFERENCES expense_categories(id) ON DELETE SET NULL
+            """)
+        except Exception:
+            pass  # constraint уже есть
+
         await conn.execute("""
             CREATE TABLE IF NOT EXISTS expenses (
                 id                   SERIAL PRIMARY KEY,
@@ -3973,19 +4030,98 @@ async def ensure_expense_tables():
                 created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
         """)
-        existing = await conn.fetchval("SELECT COUNT(*) FROM expense_categories")
-        if existing == 0:
-            await conn.executemany("""
-                INSERT INTO expense_categories (name_ru, name_uz, icon, approve_level, receipt_required, amount_threshold, sort_order)
-                VALUES ($1,$2,$3,$4,$5,$6,$7)
-            """, _EXPENSE_CATEGORIES_SEED)
+        # Сеем 2-уровневую структуру если подкатегорий ещё нет
+        has_children = await conn.fetchval(
+            "SELECT COUNT(*) FROM expense_categories WHERE parent_id IS NOT NULL")
+        if has_children == 0:
+            # Очищаем старые плоские категории (расходов в production пока нет)
+            await conn.execute("TRUNCATE expenses RESTART IDENTITY")
+            await conn.execute("TRUNCATE expense_categories RESTART IDENTITY CASCADE")
+            # Сеем родителей
+            for (name_ru, name_uz, icon, sort_order) in _EXPENSE_CAT_PARENTS:
+                await conn.execute(
+                    "INSERT INTO expense_categories (name_ru, name_uz, icon, sort_order) VALUES ($1,$2,$3,$4)",
+                    name_ru, name_uz, icon, sort_order)
+            # Сеем детей
+            for (parent_name, children) in _EXPENSE_CAT_CHILDREN:
+                pid = await conn.fetchval(
+                    "SELECT id FROM expense_categories WHERE name_ru=$1", parent_name)
+                if not pid:
+                    continue
+                for (nm_ru, nm_uz, icon, approve_level, receipt_req, threshold, sord) in children:
+                    await conn.execute("""
+                        INSERT INTO expense_categories
+                            (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+                    """, nm_ru, nm_uz, icon, pid, approve_level, receipt_req, threshold, sord)
+
+async def get_expense_categories_tree() -> list:
+    """Возвращает дерево: родители со списком children."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM expense_categories WHERE active=TRUE ORDER BY sort_order, id")
+        cats = [dict(r) for r in rows]
+    parents = [c for c in cats if not c['parent_id']]
+    ch_map: dict = {}
+    for c in cats:
+        if c['parent_id']:
+            ch_map.setdefault(c['parent_id'], []).append(c)
+    for p in parents:
+        p['children'] = ch_map.get(p['id'], [])
+    return parents
 
 async def get_expense_categories() -> list:
+    """Плоский список всех активных категорий (для обратной совместимости)."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT * FROM expense_categories WHERE active=TRUE ORDER BY sort_order, id")
         return [dict(r) for r in rows]
+
+async def create_expense_category(name_ru: str, name_uz: str, icon: str,
+                                   parent_id, approve_level: str,
+                                   receipt_required: bool, amount_threshold,
+                                   sort_order: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO expense_categories
+                (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        """, name_ru, name_uz, icon, parent_id, approve_level,
+             receipt_required, amount_threshold, sort_order)
+        return dict(row) if row else {}
+
+async def update_expense_category(cat_id: int, name_ru: str, name_uz: str, icon: str,
+                                   parent_id, approve_level: str,
+                                   receipt_required: bool, amount_threshold,
+                                   sort_order: int, active: bool) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE expense_categories
+            SET name_ru=$2, name_uz=$3, icon=$4, parent_id=$5,
+                approve_level=$6, receipt_required=$7, amount_threshold=$8,
+                sort_order=$9, active=$10
+            WHERE id=$1 RETURNING *
+        """, cat_id, name_ru, name_uz, icon, parent_id, approve_level,
+             receipt_required, amount_threshold, sort_order, active)
+        return dict(row) if row else {}
+
+async def delete_expense_category(cat_id: int) -> dict:
+    if not pool: return {"ok": False, "error": "no pool"}
+    async with pool.acquire() as conn:
+        has_expenses = await conn.fetchval(
+            "SELECT COUNT(*) FROM expenses WHERE category_id=$1", cat_id)
+        if has_expenses:
+            return {"ok": False, "error": "has_expenses"}
+        has_children = await conn.fetchval(
+            "SELECT COUNT(*) FROM expense_categories WHERE parent_id=$1", cat_id)
+        if has_children:
+            return {"ok": False, "error": "has_children"}
+        await conn.execute("DELETE FROM expense_categories WHERE id=$1", cat_id)
+        return {"ok": True}
 
 async def create_expense(category_id: int, amount: float, description: str,
                          staff_id: int, branch: str) -> dict:
@@ -4010,11 +4146,13 @@ async def get_expenses(branch: str = None, status: str = None,
             SELECT e.*,
                    ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
                    ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz, ep.icon AS parent_icon,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
                    TRIM(COALESCE(sm.last_name,'') || ' ' || COALESCE(sm.first_name,'')) AS manager_name,
                    TRIM(COALESCE(sa.last_name,'') || ' ' || COALESCE(sa.first_name,'')) AS admin_name
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
             LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
             LEFT JOIN staff sm ON sm.id = e.manager_id
             LEFT JOIN staff sa ON sa.id = e.admin_id
@@ -4029,16 +4167,17 @@ async def get_my_expenses(staff_id: int) -> list:
         rows = await conn.fetch("""
             SELECT e.*,
                    ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
-                   ec.icon AS category_icon, ec.approve_level, ec.receipt_required
+                   ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
             WHERE e.created_by_staff_id = $1
             ORDER BY e.created_at DESC LIMIT 50
         """, staff_id)
         return [dict(r) for r in rows]
 
 async def get_pending_expenses_for_manager(branch: str = None) -> list:
-    """Расходы, ожидающие подтверждения менеджером (status=pending, approve_level IN manager/both)."""
     if not pool: return []
     async with pool.acquire() as conn:
         cond = "AND e.branch=$1" if branch else ""
@@ -4047,9 +4186,11 @@ async def get_pending_expenses_for_manager(branch: str = None) -> list:
             SELECT e.*,
                    ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
                    ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
             LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
             WHERE e.status='pending' AND ec.approve_level IN ('manager','both')
             {cond}
@@ -4058,17 +4199,18 @@ async def get_pending_expenses_for_manager(branch: str = None) -> list:
         return [dict(r) for r in rows]
 
 async def get_pending_expenses_for_admin() -> list:
-    """Расходы, ожидающие admin: status=pending (approve_level=admin) или status=mgr_approved."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT e.*,
                    ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
                    ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
                    TRIM(COALESCE(sm.last_name,'') || ' ' || COALESCE(sm.first_name,'')) AS manager_name
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
             LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
             LEFT JOIN staff sm ON sm.id = e.manager_id
             WHERE (e.status='pending' AND ec.approve_level='admin')
