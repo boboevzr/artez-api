@@ -110,7 +110,8 @@ async def startup():
     #     asyncio.create_task(_set_tg_webhook())
 
 async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None,
-                        order_id: int = None, item_id: int = None, push_type: str = None):
+                        order_id: int = None, item_id: int = None, push_type: str = None,
+                        driver_staff_id: int = None):
     if not VAPID_PRIVATE or not VAPID_PUBLIC:
         return
     try:
@@ -119,7 +120,8 @@ async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = Non
         for sub in subs:
             try:
                 payload = _json.dumps({"title": title, "body": body, "lead_id": lead_id, "phone": phone,
-                                       "order_id": order_id, "item_id": item_id, "type": push_type})
+                                       "order_id": order_id, "item_id": item_id, "type": push_type,
+                                       "driver_staff_id": driver_staff_id})
                 webpush(
                     subscription_info={"endpoint": sub["endpoint"],
                                        "keys": {"p256dh": sub["p256dh"], "auth": sub["auth"]}},
@@ -5562,19 +5564,23 @@ async def _notify_debt_result(order_id: int, order_num: str, driver_tg_id, resul
                 else f"Заказ {order_num} — долг отклонён. Необходимо принять оплату.")
     body_mgr = (f"Заказ {order_num} — долг одобрен" if is_approved
                 else f"Заказ {order_num} — запрос на долг отклонён")
+    drv_staff_id = None
     if driver_tg_id:
         try:
             async with db.pool.acquire() as _c:
                 drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
             if drv:
-                await send_web_push(drv["id"], title_drv, body_drv, push_type=push_type, order_id=order_id)
+                drv_staff_id = drv["id"]
+                await send_web_push(drv["id"], title_drv, body_drv, push_type=push_type, order_id=order_id,
+                                    driver_staff_id=drv["id"])
         except Exception as _e:
             logging.warning(f"_notify_debt_result driver push: {_e}")
     try:
         async with db.pool.acquire() as _c:
             approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
         for mgr in approvers:
-            await send_web_push(mgr["id"], title_mgr, body_mgr, push_type=push_type, order_id=order_id)
+            await send_web_push(mgr["id"], title_mgr, body_mgr, push_type=push_type, order_id=order_id,
+                                driver_staff_id=drv_staff_id)
     except Exception as _e:
         logging.warning(f"_notify_debt_result approvers push: {_e}")
 
