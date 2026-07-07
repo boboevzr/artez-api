@@ -3583,6 +3583,25 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
         except Exception as e:
             logging.warning(f"TG notify failed for order {order_id}: {e}")
 
+    # ── Синхронизировать stop_status в маршруте ──────────────────────────────
+    try:
+        async with db.pool.acquire() as _c:
+            if status == "delivered":
+                await _c.execute(
+                    "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status!='done'",
+                    order_id)
+            elif status == "cancelled":
+                await _c.execute(
+                    "UPDATE route_orders SET stop_status='skipped' WHERE order_id=$1 AND stop_status='pending'",
+                    order_id)
+            else:
+                # Любой активный статус (delivery, ready, washing и т.д.) — сбросить 'done' на 'pending'
+                await _c.execute(
+                    "UPDATE route_orders SET stop_status='pending' WHERE order_id=$1 AND stop_status='done'",
+                    order_id)
+    except Exception as _e:
+        logging.warning(f"route_orders sync failed order={order_id}: {_e}")
+
     # ── Обновить кнопки в канале водителей ───────────────────────────────────
     try:
         branch, ch_msg_id = await db.get_channel_msg_for_order(order_id)
