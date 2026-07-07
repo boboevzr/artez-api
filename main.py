@@ -4316,6 +4316,25 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
         f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
         f"Подтвердил: {name}"))
     asyncio.create_task(_update_api_channel_stop(order_id))
+    # Auto-deliver: если заказ в статусе "delivery" и долг погашен после подтверждения
+    try:
+        async with db.pool.acquire() as _c:
+            o = await _c.fetchrow("""
+                SELECT o.status,
+                       COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),0) AS items_total,
+                       COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS disc,
+                       COALESCE((SELECT SUM(amount) FROM order_payments
+                                 WHERE order_id=o.id AND confirmed=TRUE),0) AS paid_conf
+                FROM orders o WHERE o.id=$1
+            """, order_id)
+        if o and o["status"] == "delivery":
+            debt_left = float(o["items_total"]) - float(o["disc"]) - float(o["paid_conf"])
+            if debt_left <= 0:
+                async with db.pool.acquire() as _c:
+                    await _c.execute("UPDATE orders SET status='delivered',delivered_at=NOW() WHERE id=$1", order_id)
+                    await _c.execute("UPDATE route_orders SET stop_status='done' WHERE order_id=$1", order_id)
+    except Exception as _ae:
+        logging.warning(f"confirm_payment auto-deliver: {_ae}")
     return {"ok": True, "payment": row}
 
 
@@ -5529,10 +5548,17 @@ async def driver_pay(
     if method not in ("cash","card","transfer"): raise HTTPException(400, "Неверный метод")
     name = _driver_name(staff)
     row = await db.add_order_payment(order_id, amount, method, "delivery",
-                                     "Частичная оплата при доставке (web)", name,
+                                     "Оплата при доставке (web)", name,
                                      created_by_staff_id=staff["id"])
     if method == "cash":
         asyncio.create_task(_update_api_channel_stop(order_id))
+    else:
+        cashiers = await db.get_all_cashiers_for_push()
+        push_body = f"Заказ #{order_id} · {int(amount):,} сум · {name}"
+        for c in cashiers:
+            if c["id"] != staff.get("id"):
+                asyncio.create_task(send_web_push(c["id"], "💳 Оплата на проверку (Доставка)",
+                                                  push_body, order_id=order_id, push_type="payment_review"))
     return {"ok": True, "payment": row}
 
 # ── debt approval requests ─────────────────────────────────────────────────────
