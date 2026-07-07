@@ -3914,3 +3914,208 @@ async def driver_update_order_status(order_id: int, new_status: str, staff_id: i
         await conn.execute(
             "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
             order_id, staff_id, staff_name, f"status_{new_status}", note or f"Статус → {new_status}")
+
+
+# ── Расходы ───────────────────────────────────────────────────────────────────
+
+_EXPENSE_CATEGORIES_SEED = [
+    ("⛽ Топливо",              "⛽ Yoqilg'i",               "⛽", "manager", True,  None,    1),
+    ("🔧 Техобслуживание",      "🔧 Texnik xizmat",          "🔧", "both",    True,  None,    2),
+    ("🧴 Химия и материалы",    "🧴 Kimyo va materiallar",   "🧴", "manager", True,  None,    3),
+    ("📦 Упаковка",             "📦 Qadoqlash",              "📦", "manager", False, None,    4),
+    ("⚡ Коммунальные",         "⚡ Kommunal",               "⚡", "admin",   True,  None,    5),
+    ("🏢 Аренда",               "🏢 Ijara",                  "🏢", "admin",   True,  None,    6),
+    ("👷 Зарплата",             "👷 Maosh",                  "👷", "admin",   False, None,    7),
+    ("💰 Аванс",                "💰 Avans",                  "💰", "both",    False, None,    8),
+    ("🍽 Питание сотрудников",  "🍽 Xodimlar ovqati",        "🍽", "manager", False, None,    9),
+    ("📱 Связь",                "📱 Aloqa",                  "📱", "manager", True,  None,   10),
+    ("🏥 Медицина",             "🏥 Tibbiyot",               "🏥", "both",    True,  None,   11),
+    ("🛒 Хозяйственные",        "🛒 Xo'jalik",               "🛒", "manager", False, None,   12),
+    ("🔩 Ремонт оборудования",  "🔩 Jihozlarni ta'mirlash",  "🔩", "both",    True,  None,   13),
+    ("📣 Реклама",              "📣 Reklama",                "📣", "both",    True,  None,   14),
+    ("🏦 Инкассация",           "🏦 Inkassatsiya",           "🏦", "admin",   True,  None,   15),
+    ("🎁 Представительские",    "🎁 Vakillik xarajatlari",   "🎁", "admin",   True,  None,   16),
+    ("❓ Прочее",               "❓ Boshqalar",              "❓", "admin",   True,  None,   17),
+]
+
+async def ensure_expense_tables():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS expense_categories (
+                id               SERIAL PRIMARY KEY,
+                name_ru          TEXT NOT NULL,
+                name_uz          TEXT NOT NULL,
+                icon             TEXT DEFAULT '',
+                approve_level    TEXT NOT NULL DEFAULT 'manager',
+                receipt_required BOOLEAN NOT NULL DEFAULT FALSE,
+                amount_threshold NUMERIC,
+                sort_order       INT DEFAULT 0,
+                active           BOOLEAN NOT NULL DEFAULT TRUE
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
+                id                   SERIAL PRIMARY KEY,
+                category_id          INT REFERENCES expense_categories(id),
+                amount               NUMERIC NOT NULL,
+                description          TEXT DEFAULT '',
+                created_by_staff_id  INT REFERENCES staff(id),
+                branch               TEXT DEFAULT '',
+                status               TEXT NOT NULL DEFAULT 'pending',
+                manager_id           INT REFERENCES staff(id),
+                manager_at           TIMESTAMPTZ,
+                admin_id             INT REFERENCES staff(id),
+                admin_at             TIMESTAMPTZ,
+                reject_reason        TEXT DEFAULT '',
+                receipt_url          TEXT DEFAULT '',
+                paid_from            TEXT DEFAULT 'cash',
+                created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        existing = await conn.fetchval("SELECT COUNT(*) FROM expense_categories")
+        if existing == 0:
+            await conn.executemany("""
+                INSERT INTO expense_categories (name_ru, name_uz, icon, approve_level, receipt_required, amount_threshold, sort_order)
+                VALUES ($1,$2,$3,$4,$5,$6,$7)
+            """, _EXPENSE_CATEGORIES_SEED)
+
+async def get_expense_categories() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM expense_categories WHERE active=TRUE ORDER BY sort_order, id")
+        return [dict(r) for r in rows]
+
+async def create_expense(category_id: int, amount: float, description: str,
+                         staff_id: int, branch: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO expenses (category_id, amount, description, created_by_staff_id, branch)
+            VALUES ($1,$2,$3,$4,$5) RETURNING *
+        """, category_id, amount, description, staff_id, branch)
+        return dict(row) if row else {}
+
+async def get_expenses(branch: str = None, status: str = None,
+                       category_id: int = None, limit: int = 100) -> list:
+    if not pool: return []
+    filters, params = [], []
+    if branch:      filters.append(f"e.branch=${len(params)+1}");      params.append(branch)
+    if status:      filters.append(f"e.status=${len(params)+1}");      params.append(status)
+    if category_id: filters.append(f"e.category_id=${len(params)+1}"); params.append(category_id)
+    where = ("WHERE " + " AND ".join(filters)) if filters else ""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"""
+            SELECT e.*,
+                   ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
+                   ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
+                   TRIM(COALESCE(sm.last_name,'') || ' ' || COALESCE(sm.first_name,'')) AS manager_name,
+                   TRIM(COALESCE(sa.last_name,'') || ' ' || COALESCE(sa.first_name,'')) AS admin_name
+            FROM expenses e
+            LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
+            LEFT JOIN staff sm ON sm.id = e.manager_id
+            LEFT JOIN staff sa ON sa.id = e.admin_id
+            {where}
+            ORDER BY e.created_at DESC LIMIT {limit}
+        """, *params)
+        return [dict(r) for r in rows]
+
+async def get_my_expenses(staff_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT e.*,
+                   ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
+                   ec.icon AS category_icon, ec.approve_level, ec.receipt_required
+            FROM expenses e
+            LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            WHERE e.created_by_staff_id = $1
+            ORDER BY e.created_at DESC LIMIT 50
+        """, staff_id)
+        return [dict(r) for r in rows]
+
+async def get_pending_expenses_for_manager(branch: str = None) -> list:
+    """Расходы, ожидающие подтверждения менеджером (status=pending, approve_level IN manager/both)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        cond = "AND e.branch=$1" if branch else ""
+        params = [branch] if branch else []
+        rows = await conn.fetch(f"""
+            SELECT e.*,
+                   ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
+                   ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
+            FROM expenses e
+            LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
+            WHERE e.status='pending' AND ec.approve_level IN ('manager','both')
+            {cond}
+            ORDER BY e.created_at DESC
+        """, *params)
+        return [dict(r) for r in rows]
+
+async def get_pending_expenses_for_admin() -> list:
+    """Расходы, ожидающие admin: status=pending (approve_level=admin) или status=mgr_approved."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT e.*,
+                   ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
+                   ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
+                   TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
+                   TRIM(COALESCE(sm.last_name,'') || ' ' || COALESCE(sm.first_name,'')) AS manager_name
+            FROM expenses e
+            LEFT JOIN expense_categories ec ON ec.id = e.category_id
+            LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
+            LEFT JOIN staff sm ON sm.id = e.manager_id
+            WHERE (e.status='pending' AND ec.approve_level='admin')
+               OR e.status='mgr_approved'
+            ORDER BY e.created_at DESC
+        """)
+        return [dict(r) for r in rows]
+
+async def approve_expense_manager(expense_id: int, manager_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        cat = await conn.fetchrow("""
+            SELECT ec.approve_level FROM expenses e
+            JOIN expense_categories ec ON ec.id=e.category_id
+            WHERE e.id=$1
+        """, expense_id)
+        new_status = 'approved' if cat and cat['approve_level'] == 'manager' else 'mgr_approved'
+        row = await conn.fetchrow("""
+            UPDATE expenses SET status=$2, manager_id=$3, manager_at=NOW()
+            WHERE id=$1 AND status='pending' RETURNING *
+        """, expense_id, new_status, manager_id)
+        return dict(row) if row else {}
+
+async def approve_expense_admin(expense_id: int, admin_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE expenses SET status='approved', admin_id=$2, admin_at=NOW()
+            WHERE id=$1 AND status IN ('pending','mgr_approved') RETURNING *
+        """, expense_id, admin_id)
+        return dict(row) if row else {}
+
+async def reject_expense(expense_id: int, staff_id: int, reason: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE expenses SET status='rejected', reject_reason=$2,
+                manager_id=CASE WHEN manager_id IS NULL THEN $3 ELSE manager_id END,
+                admin_id=CASE WHEN status IN ('pending','mgr_approved') THEN $3 ELSE admin_id END
+            WHERE id=$1 AND status NOT IN ('rejected','paid') RETURNING *
+        """, expense_id, reason, staff_id)
+        return dict(row) if row else {}
+
+async def save_expense_receipt(expense_id: int, receipt_url: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE expenses SET receipt_url=$2 WHERE id=$1 RETURNING *",
+            expense_id, receipt_url)
+        return dict(row) if row else {}

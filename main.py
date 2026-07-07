@@ -102,6 +102,7 @@ async def startup():
     await db.ensure_plans_table()
     await db.ensure_chat_tables()
     await db.ensure_chat_templates()
+    await db.ensure_expense_tables()
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
@@ -4234,6 +4235,157 @@ async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_sta
 async def get_pending_handovers(staff=Depends(get_current_staff)):
     rows = await db.get_pending_handovers_for(staff["id"])
     return {"ok": True, "handovers": rows}
+
+
+# ── Расходы ───────────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/expenses/categories")
+async def expense_categories_list(staff=Depends(get_current_staff)):
+    cats = await db.get_expense_categories()
+    return {"ok": True, "categories": cats}
+
+@app.post("/api/admin/expenses")
+async def create_expense(
+    category_id: int   = Body(..., embed=True),
+    amount:      float = Body(..., embed=True),
+    description: str   = Body("",  embed=True),
+    staff=Depends(get_current_staff),
+):
+    branch = staff.get("branch") or ""
+    row = await db.create_expense(category_id, amount, description, staff["id"], branch)
+    if not row:
+        raise HTTPException(status_code=500, detail="Ошибка создания расхода")
+    # Пуш менеджерам/admin о новом расходе
+    cat_rows = await db.get_expense_categories()
+    cat = next((c for c in cat_rows if c["id"] == category_id), {})
+    creator = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login","")
+    title = f"{cat.get('icon','🧾')} Новый расход: {int(amount):,} сум"
+    body  = f"{creator} · {cat.get('name_ru','')}"
+    # Уведомить всех менеджеров кассы и admin у которых этот branch
+    managers = await db.get_cashiers()
+    for m in managers:
+        asyncio.create_task(send_web_push(m["id"], title=title, body=body, push_type="new_expense"))
+    return {"ok": True, "expense": row}
+
+@app.get("/api/admin/expenses/my")
+async def my_expenses(staff=Depends(get_current_staff)):
+    rows = await db.get_my_expenses(staff["id"])
+    return {"ok": True, "expenses": rows}
+
+@app.get("/api/admin/expenses")
+async def list_expenses(
+    branch:      str = None,
+    status:      str = None,
+    category_id: int = None,
+    staff=Depends(get_current_staff),
+):
+    role = staff.get("sub") or staff.get("role","")
+    can_manage = staff.get("can_manage_cash") or role == "admin"
+    if not can_manage:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    rows = await db.get_expenses(branch=branch, status=status, category_id=category_id)
+    return {"ok": True, "expenses": rows}
+
+@app.get("/api/admin/expenses/pending-manager")
+async def pending_for_manager(staff=Depends(get_current_staff)):
+    can_manage = staff.get("can_manage_cash") or staff.get("sub") == "admin"
+    if not can_manage:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    branch = staff.get("branch") if staff.get("sub") != "admin" else None
+    rows = await db.get_pending_expenses_for_manager(branch)
+    return {"ok": True, "expenses": rows}
+
+@app.get("/api/admin/expenses/pending-admin")
+async def pending_for_admin(staff=Depends(get_current_staff)):
+    if staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    rows = await db.get_pending_expenses_for_admin()
+    return {"ok": True, "expenses": rows}
+
+@app.patch("/api/admin/expenses/{expense_id}/approve")
+async def approve_expense(expense_id: int, staff=Depends(get_current_staff)):
+    role = staff.get("sub") or ""
+    can_manage = staff.get("can_manage_cash") or role == "admin"
+    if not can_manage:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    if role == "admin":
+        row = await db.approve_expense_admin(expense_id, staff["id"])
+    else:
+        row = await db.approve_expense_manager(expense_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Расход не найден или уже обработан")
+    approver = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    new_status = row.get("status","")
+    # Пуш создателю расхода
+    if row.get("created_by_staff_id"):
+        title = "✅ Расход утверждён" if new_status == "approved" else "📋 Расход ждёт Admin"
+        body  = f"{approver} · {int(float(row.get('amount',0))):,} сум"
+        asyncio.create_task(send_web_push(row["created_by_staff_id"], title=title, body=body, push_type="expense_approved"))
+    # Если mgr_approved — пуш admin
+    if new_status == "mgr_approved":
+        admin_rows = await db.get_expenses(status=None)  # получим admin staff через другой путь
+        async with db.pool.acquire() as conn:
+            admins = await conn.fetch("SELECT id FROM staff WHERE role='admin' AND active=TRUE")
+        for a in admins:
+            asyncio.create_task(send_web_push(a["id"], title="📋 Расход ждёт подтверждения", body=body, push_type="expense_mgr_approved"))
+    return {"ok": True, "expense": row}
+
+@app.patch("/api/admin/expenses/{expense_id}/reject")
+async def reject_expense(
+    expense_id: int,
+    reason: str = Body("", embed=True),
+    staff=Depends(get_current_staff),
+):
+    can_manage = staff.get("can_manage_cash") or staff.get("sub") == "admin"
+    if not can_manage:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    row = await db.reject_expense(expense_id, staff["id"], reason)
+    if not row:
+        raise HTTPException(status_code=404, detail="Расход не найден или уже обработан")
+    if row.get("created_by_staff_id"):
+        rejecter = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+        asyncio.create_task(send_web_push(
+            row["created_by_staff_id"],
+            title="❌ Расход отклонён",
+            body=f"{rejecter}" + (f": {reason}" if reason else ""),
+            push_type="expense_rejected",
+        ))
+    return {"ok": True, "expense": row}
+
+@app.post("/api/admin/expenses/{expense_id}/receipt")
+async def upload_expense_receipt(
+    expense_id: int,
+    file: UploadFile = File(...),
+    staff=Depends(get_current_staff),
+):
+    async with db.pool.acquire() as conn:
+        exp = await conn.fetchrow("SELECT * FROM expenses WHERE id=$1", expense_id)
+    if not exp:
+        raise HTTPException(status_code=404, detail="Расход не найден")
+    if exp["created_by_staff_id"] != staff["id"] and staff.get("sub") != "admin" and not staff.get("can_manage_cash"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    content_type = file.content_type or "image/jpeg"
+    tg_method = "sendVideo" if content_type.startswith("video/") else "sendPhoto" if content_type.startswith("image/") else "sendDocument"
+    tg_field  = "video"    if content_type.startswith("video/") else "photo"    if content_type.startswith("image/") else "document"
+    tg_type   = "video"    if content_type.startswith("video/") else "photo"    if content_type.startswith("image/") else "document"
+    staff_name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    file_bytes = await file.read()
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field(tg_field, file_bytes, filename=file.filename or "receipt.jpg", content_type=content_type)
+    form.add_field("caption", f"🧾 Чек расхода #{expense_id}\n👤 {staff_name}")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    msg = result["result"]
+    file_id = msg["photo"][-1]["file_id"] if tg_type == "photo" else msg[tg_type]["file_id"]
+    row = await db.save_expense_receipt(expense_id, file_id)
+    return {"ok": True, "receipt_url": file_id, "expense": row}
 
 
 async def _update_api_channel_stop(order_id: int):
