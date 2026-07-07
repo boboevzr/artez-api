@@ -4773,6 +4773,13 @@ async def get_my_cash_payments(staff=Depends(get_current_staff)):
         return {"ok": True, "payments": [dict(r) for r in rows]}
 
 
+@app.get("/api/admin/cash/my-handovers")
+async def get_my_sent_handovers_ep(staff=Depends(get_current_staff)):
+    """Исходящие передачи наличных текущего сотрудника."""
+    handovers = await db.get_my_sent_handovers(staff["id"])
+    return {"ok": True, "handovers": handovers}
+
+
 @app.delete("/api/admin/orders/{order_id}/payments/{payment_id}")
 async def delete_order_payment(
     order_id:   int,

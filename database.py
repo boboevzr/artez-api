@@ -3117,6 +3117,20 @@ async def get_pending_handovers_for(staff_id: int) -> list:
         """, staff_id)
         return [dict(r) for r in rows]
 
+async def get_my_sent_handovers(staff_id: int) -> list:
+    """Исходящие передачи наличных от данного сотрудника."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ch.*,
+                   TRIM(COALESCE(st.last_name,'') || ' ' || COALESCE(st.first_name,'')) AS to_name
+            FROM cash_handovers ch
+            LEFT JOIN staff st ON st.id = ch.to_staff_id
+            WHERE ch.from_staff_id = $1
+            ORDER BY ch.created_at DESC LIMIT 50
+        """, staff_id)
+        return [dict(r) for r in rows]
+
 async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
