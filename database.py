@@ -3829,11 +3829,17 @@ async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: i
                 r['order_id'])
         return r
 
-async def get_driver_routes_today(driver_id: int) -> list:
+async def get_routes_today(branch: str | None = None) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
+        where_clause = "WHERE r.date = CURRENT_DATE AND r.status != 'cancelled'"
+        vals = []
+        if branch:
+            where_clause += " AND r.branch = $1"
+            vals = [branch]
+        rows = await conn.fetch(f"""
             SELECT r.id AS route_id, r.name, r.date::text, r.type, r.status AS route_status, r.branch,
+                   TRIM(COALESCE(s.first_name,'') || ' ' || COALESCE(s.last_name,'')) AS driver_name,
                    ro.sort_order, ro.stop_status, ro.driver_confirmed,
                    o.id AS order_id, o.order_num, o.status AS order_status,
                    o.client_first_name, o.client_last_name, o.client_phone,
@@ -3846,20 +3852,21 @@ async def get_driver_routes_today(driver_id: int) -> list:
                                    OR (method<>'cash' AND confirmed=TRUE))), 0) AS paid_amount,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id),0)::int AS item_count
             FROM routes r
+            LEFT JOIN staff s ON s.id = r.driver_id
             JOIN route_orders ro ON ro.route_id = r.id
             JOIN orders o ON o.id = ro.order_id
-            WHERE r.driver_id = $1
-              AND r.date = CURRENT_DATE
-              AND r.status != 'cancelled'
+            {where_clause}
             ORDER BY r.id, ro.sort_order
-        """, driver_id)
+        """, *vals)
         routes: dict = {}
         for row in rows:
             rid = row["route_id"]
             if rid not in routes:
                 routes[rid] = {"id": rid, "name": row["name"], "date": row["date"],
                                "type": row["type"], "status": row["route_status"],
-                               "branch": row["branch"], "stops": []}
+                               "branch": row["branch"],
+                               "driver_name": row["driver_name"] or None,
+                               "stops": []}
             routes[rid]["stops"].append({
                 "order_id":       row["order_id"],
                 "order_num":      row["order_num"],

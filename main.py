@@ -5329,7 +5329,7 @@ def _can_drive(staff: dict) -> bool:
 async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
         raise HTTPException(403, "Нет доступа")
-    routes = await db.get_driver_routes_today(staff["id"])
+    routes = await db.get_routes_today(staff.get("branch"))
     return {"ok": True, "routes": routes}
 
 @app.post("/api/staff/my-route/stops/{order_id}/take-delivery")
