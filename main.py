@@ -5439,9 +5439,7 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
             "SELECT id FROM debt_approval_requests WHERE order_id=$1 AND status='pending'", order_id)
         if existing:
             return {"ok": True, "already_pending": True, "debt": 0}
-    debt = await db.get_order_debt_amount(order_id)
-    if debt <= 0: raise HTTPException(400, "Нет долга")
-    # Данные заказа
+    # Данные заказа + вычисляем долг так же как фронт (items_total - discount - paid)
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("""
             SELECT o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
@@ -5455,6 +5453,8 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
             FROM orders o WHERE o.id=$1
         """, order_id)
     if not row: raise HTTPException(404)
+    debt = max(0.0, float(row["items_total"]) - float(row["disc"]) - float(row["paid"]))
+    if debt <= 0: raise HTTPException(400, "Нет долга")
     order_num = row["order_num"] or str(order_id)
     client = " ".join(filter(None,[row["client_first_name"], row["client_last_name"]])) or "—"
     phone = row["client_phone"] or ""
