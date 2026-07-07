@@ -3017,30 +3017,17 @@ async def get_my_cash_balance(staff_id: int) -> dict:
     """Баланс конкретного сотрудника: принял / сдал / на руках."""
     if not pool: return {}
     async with pool.acquire() as conn:
-        # Имя сотрудника для совпадения со старыми записями (до created_by_staff_id)
-        staff_row = await conn.fetchrow("SELECT first_name, last_name, login FROM staff WHERE id=$1", staff_id)
-        staff_name = ""
-        if staff_row:
-            staff_name = " ".join(filter(None, [staff_row['last_name'], staff_row['first_name']])) or staff_row['login'] or ""
-        # tg_id сотрудника для матча платежей водителя
-        staff_tg_id = await conn.fetchval("SELECT tg_id FROM staff WHERE id=$1", staff_id)
-        tg_cond = f"OR (driver_tg_id IS NOT NULL AND driver_tg_id::text = '{staff_tg_id}')" if staff_tg_id and str(staff_tg_id).strip().lstrip('-').isdigit() else ""
-        # Принял от клиентов (по staff_id, по имени для старых, или по tg_id водителя)
+        # Принял от клиентов (только по staff_id)
         r1 = await conn.fetchval(
-            f"""SELECT COALESCE(SUM(amount),0) FROM order_payments
-               WHERE method='cash'
-               AND (created_by_staff_id=$1
-                    OR (created_by_staff_id IS NULL AND created_by=$2)
-                    {tg_cond})""",
-            staff_id, staff_name)
+            """SELECT COALESCE(SUM(amount),0) FROM order_payments
+               WHERE method='cash' AND created_by_staff_id=$1""",
+            staff_id)
         # Сдал сразу при записи (handed_to != me)
         r2 = await conn.fetchval(
-            f"""SELECT COALESCE(SUM(amount),0) FROM order_payments
+            """SELECT COALESCE(SUM(amount),0) FROM order_payments
                WHERE method='cash' AND handed_to_staff_id IS NOT NULL AND handed_to_staff_id!=$1
-               AND (created_by_staff_id=$1
-                    OR (created_by_staff_id IS NULL AND created_by=$2)
-                    {tg_cond})""",
-            staff_id, staff_name)
+               AND created_by_staff_id=$1""",
+            staff_id)
         # Получил от других сотрудников через платёж (они сдали мне)
         r3 = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id<>$1)",
