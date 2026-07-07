@@ -4174,21 +4174,31 @@ async def staff_cash_handover(
     # Пуш получателю
     asyncio.create_task(send_web_push(
         to_staff_id,
-        title="💵 Сдача наличных",
-        body=f"{from_name} сдаёт {int(amount):,} сум",
-        extra={"type": "cash_handover", "handover_id": handover_id},
+        title="💵 Вам сдают наличные",
+        body=f"{from_name} · {int(amount):,} сум",
+        push_type="cash_handover",
     ))
 
-    # ТГ канал кассы
-    ch = await db.get_cash_tg_channel()
+    # ТГ личка + канал кассы
     to_staff = await db.get_staff_by_id(to_staff_id)
     to_name = " ".join(filter(None,[to_staff.get("last_name",""),to_staff.get("first_name","")])).strip() if to_staff else f"#{to_staff_id}"
-    text = (f"💵 <b>Передача наличных</b>\n"
-            f"От: {from_name}\n"
-            f"Кому: {to_name}\n"
-            f"Сумма: <b>{int(amount):,} сум</b>"
-            + (f"\nПримечание: {note}" if note else ""))
-    asyncio.create_task(_send_tg_cash(ch, text))
+    dm_text = (f"💵 <b>Вам сдают наличные</b>\n"
+               f"От: {from_name}\n"
+               f"Сумма: <b>{int(amount):,} сум</b>"
+               + (f"\nПримечание: {note}" if note else ""))
+    if to_staff and to_staff.get("tg_id"):
+        asyncio.create_task(_send_tg_cash(
+            int(to_staff["tg_id"]), dm_text,
+            btn_label="✅ Подтвердить получение",
+            btn_cb=f"cash_confirm:{handover_id}",
+        ))
+    ch = await db.get_cash_tg_channel()
+    ch_text = (f"💵 <b>Передача наличных</b>\n"
+               f"От: {from_name}\n"
+               f"Кому: {to_name}\n"
+               f"Сумма: <b>{int(amount):,} сум</b>"
+               + (f"\nПримечание: {note}" if note else ""))
+    asyncio.create_task(_send_tg_cash(ch, ch_text))
 
     return {"ok": True, "handover": row}
 
@@ -4206,13 +4216,16 @@ async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_sta
         row["from_staff_id"],
         title="✅ Наличные получены",
         body=f"{confirmer_name} подтвердил получение {amount:,} сум",
-        extra={"type": "cash_confirmed", "handover_id": handover_id},
+        push_type="cash_confirmed",
     ))
 
-    # ТГ канал кассы
+    # ТГ личка отправителю + канал кассы
+    confirmed_text = f"✅ <b>Наличные получены</b>\nПолучил: {confirmer_name}\nСумма: <b>{amount:,} сум</b>"
+    from_staff = await db.get_staff_by_id(row["from_staff_id"])
+    if from_staff and from_staff.get("tg_id"):
+        asyncio.create_task(_send_tg_cash(int(from_staff["tg_id"]), confirmed_text))
     ch = await db.get_cash_tg_channel()
-    text = f"✅ <b>Наличные получены</b>\nПолучил: {confirmer_name}\nСумма: <b>{amount:,} сум</b>"
-    asyncio.create_task(_send_tg_cash(ch, text))
+    asyncio.create_task(_send_tg_cash(ch, confirmed_text))
 
     return {"ok": True, "handover": row}
 

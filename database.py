@@ -3045,12 +3045,12 @@ async def get_my_cash_balance(staff_id: int) -> dict:
         r3 = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id<>$1)",
             staff_id)
-        # Получил через ручную передачу (cash_handovers to me)
+        # Получил через ручную передачу (cash_handovers to me, только подтверждённые)
         r4 = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE to_staff_id=$1", staff_id)
-        # Сдал через ручную передачу (cash_handovers from me)
+            "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE to_staff_id=$1 AND status='confirmed'", staff_id)
+        # Сдал через ручную передачу (cash_handovers from me, только подтверждённые)
         r5 = await conn.fetchval(
-            "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1", staff_id)
+            "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1 AND status='confirmed'", staff_id)
         collected   = float(r1)
         given_imm   = float(r2)
         recv_others = float(r3)
