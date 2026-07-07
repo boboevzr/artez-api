@@ -5430,6 +5430,92 @@ async def driver_deliver(
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True, "debt": float(debt)}
 
+@app.post("/api/staff/my-route/stops/{order_id}/close-with-debt")
+async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    # Проверить нет ли уже pending-запроса
+    async with db.pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id FROM debt_approval_requests WHERE order_id=$1 AND status='pending'", order_id)
+        if existing:
+            return {"ok": True, "already_pending": True, "debt": 0}
+    debt = await db.get_order_debt_amount(order_id)
+    if debt <= 0: raise HTTPException(400, "Нет долга")
+    # Данные заказа
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
+                   o.short_address, o.address,
+                   COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
+                            COALESCE(o.total_price,0)) AS items_total,
+                   COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS disc,
+                   COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=$1
+                              AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
+                                   OR (method<>'cash' AND confirmed=TRUE))),0) AS paid
+            FROM orders o WHERE o.id=$1
+        """, order_id)
+    if not row: raise HTTPException(404)
+    order_num = row["order_num"] or str(order_id)
+    client = " ".join(filter(None,[row["client_first_name"], row["client_last_name"]])) or "—"
+    phone = row["client_phone"] or ""
+    addr = row["short_address"] or row["address"] or "—"
+    total = max(0, float(row["items_total"]) - float(row["disc"]))
+    paid = float(row["paid"])
+    driver_name = _driver_name(staff)
+
+    def _fmtd(v): return f"{int(v):,}".replace(",", " ")
+    lines = ["⚠️ <b>Запрос: закрыть заказ в долг</b>",
+             f"📋 Заказ: <b>{order_num}</b>",
+             f"👤 Клиент: <b>{client}</b>"]
+    if phone: lines.append(f"📞 {phone}")
+    lines.append(f"📍 {addr}")
+    lines.append("")
+    if total > 0: lines.append(f"💰 Сумма: <b>{_fmtd(total)} с</b>")
+    if paid > 0:  lines.append(f"✅ Оплачено: <b>{_fmtd(paid)} с</b>")
+    lines.append(f"❗ <b>Долг: {_fmtd(debt)} сум</b>")
+    lines.append(f"\n🚚 Водитель: {driver_name} (web)")
+    text = "\n".join(lines)
+
+    approve_kb = {"inline_keyboard": [
+        [{"text": "✅ Разрешить закрыть в долг", "callback_data": f"debt_approve:{order_id}"}],
+        [{"text": "❌ Отказать",                 "callback_data": f"debt_reject:{order_id}"}],
+    ]}
+    # Все approvers (с или без tg_id)
+    async with db.pool.acquire() as conn:
+        all_approvers = await conn.fetch(
+            "SELECT id, first_name, last_name, tg_id FROM staff "
+            "WHERE can_approve_debt=TRUE AND active=TRUE")
+    mgr_msgs = {}
+    if BOT_TOKEN:
+        async with aiohttp.ClientSession() as _s:
+            for mgr in all_approvers:
+                tg_id = mgr["tg_id"]
+                if not tg_id: continue
+                try:
+                    resp = await _s.post(
+                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                        json={"chat_id": tg_id, "text": text, "parse_mode": "HTML",
+                              "reply_markup": approve_kb, "disable_web_page_preview": True},
+                        timeout=aiohttp.ClientTimeout(total=5))
+                    d = await resp.json()
+                    if d.get("ok"):
+                        mgr_msgs[str(tg_id)] = d["result"]["message_id"]
+                except Exception as _e:
+                    logging.warning(f"debt DM to {tg_id} failed: {_e}")
+    driver_tg_id = staff.get("tg_id")
+    await db.create_debt_approval_request(order_id, order_num, driver_tg_id, debt,
+                                          _json.dumps(mgr_msgs))
+    # Web push
+    for mgr in all_approvers:
+        sid = mgr["id"]
+        if sid:
+            asyncio.create_task(send_web_push(sid,
+                title="❗ Закрытие в долг",
+                body=f"Заказ {order_num} · долг {_fmtd(debt)} сум · {driver_name}",
+                push_type="debt_approval",
+                order_id=order_id))
+    return {"ok": True, "debt": float(debt), "notified": len(mgr_msgs)}
+
 @app.post("/api/staff/my-route/stops/{order_id}/pay")
 async def driver_pay(
     order_id: int,
