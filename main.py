@@ -5381,7 +5381,23 @@ async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
         raise HTTPException(403, "Нет доступа")
     routes = await db.get_routes_today(staff.get("branch"))
-    return {"ok": True, "routes": routes}
+    payment_events = []
+    try:
+        async with db.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT op.id, op.order_id, op.amount, op.method,
+                       op.confirmed, op.reject_note,
+                       CASE WHEN op.confirmed=TRUE THEN 'confirmed' ELSE 'rejected' END AS action
+                FROM order_payments op
+                WHERE op.created_by_staff_id = $1
+                  AND op.confirmed_at IS NOT NULL
+                  AND op.confirmed_at > NOW() - INTERVAL '3 minutes'
+                ORDER BY op.confirmed_at DESC
+            """, staff["id"])
+        payment_events = [dict(r) for r in rows]
+    except Exception as _pe:
+        logging.warning(f"payment_events: {_pe}")
+    return {"ok": True, "routes": routes, "payment_events": payment_events}
 
 @app.post("/api/staff/my-route/stops/{order_id}/take-delivery")
 async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
