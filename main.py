@@ -4529,7 +4529,20 @@ async def upload_payment_receipt(
             logging.warning(f"receipt upload error: {e}")
 
     row = await db.save_payment_receipt(payment_id, receipt_url or file.filename)
-    return {"ok": True, "receipt_url": receipt_url}
+    # Push к менеджерам только после того как чек сохранён (избегаем race condition)
+    if pay_row and pay_row.get("purpose") == "delivery":
+        try:
+            cashiers = await db.get_all_cashiers_for_push()
+            drv_id = staff.get("id")
+            push_body = f"Заказ {order_num_str} · {amount_str}"
+            for c in cashiers:
+                if c["id"] != drv_id:
+                    asyncio.create_task(send_web_push(
+                        c["id"], "💳 Оплата на проверку (Доставка)", push_body,
+                        order_id=order_id, push_type="payment_review"))
+        except Exception as _pe:
+            logging.warning(f"receipt push error: {_pe}")
+    return {"ok": True, "receipt_url": receipt_url, "uploaded": receipt_url is not None}
 
 
 # ── Plans (roadmap) ─────────────────────────────────────────────────────────
@@ -5587,13 +5600,7 @@ async def driver_pay(
                                      created_by_staff_id=staff["id"])
     if method == "cash":
         asyncio.create_task(_update_api_channel_stop(order_id))
-    else:
-        cashiers = await db.get_all_cashiers_for_push()
-        push_body = f"Заказ #{order_id} · {int(amount):,} сум · {name}"
-        for c in cashiers:
-            if c["id"] != staff.get("id"):
-                asyncio.create_task(send_web_push(c["id"], "💳 Оплата на проверку (Доставка)",
-                                                  push_body, order_id=order_id, push_type="payment_review"))
+    # card/transfer: push к менеджерам отправляется из upload_payment_receipt — после сохранения чека
     return {"ok": True, "payment": row}
 
 # ── debt approval requests ─────────────────────────────────────────────────────
