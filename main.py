@@ -5552,6 +5552,80 @@ async def push_debt_approval_managers_ep(
             asyncio.create_task(send_web_push(sid, title, body_txt, push_type="debt_approval"))
     return {"ok": True, "notified": len(approvers)}
 
+async def _notify_debt_result(order_id: int, order_num: str, driver_tg_id, result: str):
+    """Send web push to driver + all approvers when debt request approved/rejected."""
+    is_approved = result == "approved"
+    push_type = "debt_approved" if is_approved else "debt_rejected"
+    title_drv = "✅ Долг одобрен" if is_approved else "❌ Запрос отклонён"
+    title_mgr = title_drv
+    body_drv = (f"Заказ {order_num} — долг одобрен." if is_approved
+                else f"Заказ {order_num} — долг отклонён. Необходимо принять оплату.")
+    body_mgr = (f"Заказ {order_num} — долг одобрен" if is_approved
+                else f"Заказ {order_num} — запрос на долг отклонён")
+    if driver_tg_id:
+        try:
+            async with db.pool.acquire() as _c:
+                drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
+            if drv:
+                await send_web_push(drv["id"], title_drv, body_drv, push_type=push_type, order_id=order_id)
+        except Exception as _e:
+            logging.warning(f"_notify_debt_result driver push: {_e}")
+    try:
+        async with db.pool.acquire() as _c:
+            approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
+        for mgr in approvers:
+            await send_web_push(mgr["id"], title_mgr, body_mgr, push_type=push_type, order_id=order_id)
+    except Exception as _e:
+        logging.warning(f"_notify_debt_result approvers push: {_e}")
+
+@app.post("/api/debt-approvals/notify-rejected")
+async def notify_debt_rejected_ep(
+    order_id:        int        = Body(..., embed=True),
+    order_num:       str        = Body("",  embed=True),
+    driver_tg_id:    int | None = Body(None, embed=True),
+    bot_token_check: str        = Body(..., embed=True)
+):
+    if not BOT_TOKEN or bot_token_check != BOT_TOKEN:
+        raise HTTPException(403, "Forbidden")
+    body_drv = f"Закрытие в долг по заказу {order_num} отклонено. Необходимо принять оплату."
+    body_mgr = f"Заказ {order_num} — запрос на долг отклонён"
+    if driver_tg_id:
+        async with db.pool.acquire() as _c:
+            drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
+        if drv:
+            asyncio.create_task(send_web_push(drv["id"], "❌ Запрос отклонён", body_drv,
+                                              push_type="debt_rejected", order_id=order_id))
+    async with db.pool.acquire() as _c:
+        approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
+    for mgr in approvers:
+        asyncio.create_task(send_web_push(mgr["id"], "❌ Запрос отклонён", body_mgr,
+                                          push_type="debt_rejected", order_id=order_id))
+    return {"ok": True}
+
+@app.post("/api/debt-approvals/notify-approved")
+async def notify_debt_approved_ep(
+    order_id:        int        = Body(..., embed=True),
+    order_num:       str        = Body("",  embed=True),
+    driver_tg_id:    int | None = Body(None, embed=True),
+    bot_token_check: str        = Body(..., embed=True)
+):
+    if not BOT_TOKEN or bot_token_check != BOT_TOKEN:
+        raise HTTPException(403, "Forbidden")
+    body_drv = f"Закрытие в долг по заказу {order_num} одобрено."
+    body_mgr = f"Заказ {order_num} — долг одобрен"
+    if driver_tg_id:
+        async with db.pool.acquire() as _c:
+            drv = await _c.fetchrow("SELECT id FROM staff WHERE tg_id=$1 LIMIT 1", int(driver_tg_id))
+        if drv:
+            asyncio.create_task(send_web_push(drv["id"], "✅ Долг одобрен", body_drv,
+                                              push_type="debt_approved", order_id=order_id))
+    async with db.pool.acquire() as _c:
+        approvers = await _c.fetch("SELECT id FROM staff WHERE can_approve_debt=TRUE AND active=TRUE")
+    for mgr in approvers:
+        asyncio.create_task(send_web_push(mgr["id"], "✅ Долг одобрен", body_mgr,
+                                          push_type="debt_approved", order_id=order_id))
+    return {"ok": True}
+
 @app.get("/api/debt-approvals/pending")
 async def get_pending_debt_approvals_ep(staff=Depends(get_current_staff)):
     if not staff.get("can_approve_debt") and staff.get("role") not in ("admin", "manager"):
@@ -5649,6 +5723,8 @@ async def approve_debt_approval_ep(
                             logging.warning(f"debt approve: editMessageText {resp.status} order_id={order_id}: {body}")
                 except Exception as e:
                     logging.warning(f"debt approve: channel update failed order_id={order_id}: {e}")
+        # Web push водителю + approvers
+        asyncio.create_task(_notify_debt_result(order_id, order_num, driver_tg_id, "approved"))
     return {"ok": True}
 
 @app.post("/api/debt-approvals/{request_id}/reject")
@@ -5699,6 +5775,9 @@ async def reject_debt_approval_ep(
                                            "reply_markup": kb})
                 except Exception as e:
                     logging.warning(f"debt reject: channel update failed order_id={order_id}: {e}")
+    # Web push водителю + approvers
+    if BOT_TOKEN:
+        asyncio.create_task(_notify_debt_result(order_id, order_num, driver_tg_id, "rejected"))
     return {"ok": True}
 
 
