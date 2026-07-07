@@ -4316,6 +4316,12 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
         f"{mLabel.get(row['method'],'')} · <b>{int(float(row['amount'])):,} сум</b>\n"
         f"Подтвердил: {name}"))
     asyncio.create_task(_update_api_channel_stop(order_id))
+    # Push водителю чтобы staff.html обновил вкладку доставки
+    drv_staff_id = row.get("created_by_staff_id")
+    if drv_staff_id:
+        asyncio.create_task(send_web_push(drv_staff_id, "✅ Оплата подтверждена",
+                                          f"Заказ #{order_id} · {int(float(row['amount'])):,} сум",
+                                          order_id=order_id, push_type="delivery_reload"))
     # Auto-deliver: если заказ в статусе "delivery" и долг погашен после подтверждения
     try:
         async with db.pool.acquire() as _c:
