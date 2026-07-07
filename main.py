@@ -4317,7 +4317,7 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
         f"Подтвердил: {name}"))
     asyncio.create_task(_update_api_channel_stop(order_id))
     # Push водителю чтобы staff.html обновил вкладку доставки
-    drv_staff_id = row.get("created_by_staff_id")
+    drv_staff_id = await _get_driver_staff_id(order_id, dict(row))
     if drv_staff_id:
         asyncio.create_task(send_web_push(drv_staff_id, "✅ Оплата подтверждена",
                                           f"Заказ #{order_id} · {int(float(row['amount'])):,} сум",
@@ -4370,7 +4370,7 @@ async def reject_payment(order_id: int, payment_id: int,
     asyncio.create_task(_send_tg_cash(ch, text))
     asyncio.create_task(_notify_driver_payment(dict(row), order_id, text))
     asyncio.create_task(_update_api_channel_stop(order_id))
-    drv_staff_id = row.get("created_by_staff_id")
+    drv_staff_id = await _get_driver_staff_id(order_id, dict(row))
     if drv_staff_id:
         push_body = f"Заказ #{order_id} · {int(float(row['amount'])):,} сум" + (f" · {note}" if note else "")
         asyncio.create_task(send_web_push(drv_staff_id, "❌ Оплата отклонена", push_body,
@@ -5590,6 +5590,24 @@ async def push_debt_approval_managers_ep(
         if sid:
             asyncio.create_task(send_web_push(sid, title, body_txt, push_type="debt_approval"))
     return {"ok": True, "notified": len(approvers)}
+
+async def _get_driver_staff_id(order_id: int, payment_row: dict) -> int | None:
+    """Возвращает staff.id водителя: сначала из платежа, потом из route_orders."""
+    sid = payment_row.get("created_by_staff_id")
+    if sid:
+        return int(sid)
+    try:
+        async with db.pool.acquire() as _c:
+            r = await _c.fetchrow("""
+                SELECT s.id FROM route_orders ro
+                JOIN routes rt ON rt.id = ro.route_id
+                JOIN staff s  ON s.id  = rt.driver_id
+                WHERE ro.order_id = $1 AND s.can_drive = TRUE
+                LIMIT 1
+            """, order_id)
+        return r["id"] if r else None
+    except Exception:
+        return None
 
 async def _notify_debt_result(order_id: int, order_num: str, driver_tg_id, result: str):
     """Send web push to driver + all approvers when debt request approved/rejected."""
