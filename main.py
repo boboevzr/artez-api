@@ -5314,6 +5314,23 @@ async def reject_discount_request(
 
 # ── debt approval requests ─────────────────────────────────────────────────────
 
+@app.post("/api/debt-approvals/push-managers")
+async def push_debt_approval_managers_ep(
+    order_num: str = Body(..., embed=True),
+    debt_amount: float = Body(..., embed=True),
+    bot_token_check: str = Body(..., embed=True)
+):
+    if not BOT_TOKEN or bot_token_check != BOT_TOKEN:
+        raise HTTPException(403, "Forbidden")
+    approvers = await db.get_debt_approvers()
+    title = "❗ Закрытие в долг"
+    body_txt = f"Заказ {order_num} · долг {int(debt_amount):,} с"
+    for appr in approvers:
+        sid = appr.get("id")
+        if sid:
+            asyncio.create_task(send_web_push(sid, title, body_txt, push_type="debt_approval"))
+    return {"ok": True, "notified": len(approvers)}
+
 @app.get("/api/debt-approvals/pending")
 async def get_pending_debt_approvals_ep(staff=Depends(get_current_staff)):
     if not staff.get("can_approve_debt") and staff.get("role") not in ("admin", "manager"):
