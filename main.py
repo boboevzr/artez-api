@@ -4268,16 +4268,25 @@ async def _get_order_channel_url(order_id: int) -> str | None:
 
 
 async def _notify_driver_payment(row: dict, order_id: int, text: str):
-    """Отправляет уведомление водителю в личку с кнопкой перехода в канал."""
+    """Отправляет уведомление водителю в личку."""
+    if not BOT_TOKEN:
+        return
     driver_tg_id = row.get("driver_tg_id")
-    if not driver_tg_id or not BOT_TOKEN:
+    # Fallback: берём tg_id из staff по created_by_staff_id
+    if not driver_tg_id:
+        staff_id = row.get("created_by_staff_id")
+        if staff_id and db.pool:
+            try:
+                async with db.pool.acquire() as _c:
+                    r = await _c.fetchrow("SELECT tg_id FROM staff WHERE id=$1", int(staff_id))
+                    if r and r["tg_id"]:
+                        driver_tg_id = r["tg_id"]
+            except Exception:
+                pass
+    if not driver_tg_id:
         return
     try:
-        ch_url = await _get_order_channel_url(order_id)
-        kb = {"inline_keyboard": []}
-        if ch_url:
-            kb = {"inline_keyboard": [[{"text": "↩️ Перейти к заказу в канале", "url": ch_url}]]}
-        await _send_tg_with_kb(driver_tg_id, text, kb)
+        await _send_tg_with_kb(driver_tg_id, text, {"inline_keyboard": []})
     except Exception as e:
         logging.warning(f"_notify_driver_payment error: {e}")
 
