@@ -5424,6 +5424,7 @@ async def reject_debt_approval_ep(
     if not row:
         raise HTTPException(404, "Запрос не найден или уже обработан")
     if BOT_TOKEN:
+        order_id = row.get("order_id")
         order_num = row.get("order_num", "")
         driver_tg_id = row.get("driver_tg_id")
         _mgr_raw = row.get("mgr_msgs") or {}
@@ -5446,6 +5447,20 @@ async def reject_debt_approval_ep(
                                  json={"chat_id": int(tg_id_str), "message_id": int(msg_id)})
                 except Exception as e:
                     logging.warning(f"debt reject deleteMessage tg_id={tg_id_str}: {e}")
+            # Обновить канальное сообщение — вернуть кнопки доставки
+            if order_id:
+                try:
+                    ch_info = await db.get_order_channel_info(order_id)
+                    if ch_info and ch_info.get("channel_id") and ch_info.get("msg_id"):
+                        new_text = _fmt_stop_text_api(ch_info, ch_info["stop_num"])
+                        kb = _route_pickup_kb(order_id, "delivery")
+                        await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                                     json={"chat_id": ch_info["channel_id"], "message_id": ch_info["msg_id"],
+                                           "text": new_text, "parse_mode": "HTML",
+                                           "disable_web_page_preview": True,
+                                           "reply_markup": kb})
+                except Exception as e:
+                    logging.warning(f"debt reject: channel update failed order_id={order_id}: {e}")
     return {"ok": True}
 
 
