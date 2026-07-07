@@ -4763,7 +4763,11 @@ async def get_my_cash_payments(staff=Depends(get_current_staff)):
     my_id = staff["id"]
     async with db.pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT p.*, o.client_first_name AS client_name
+            SELECT p.*,
+                   o.order_num,
+                   TRIM(COALESCE(o.client_first_name,'') || ' ' || COALESCE(o.client_last_name,'')) AS client_name,
+                   o.client_phone,
+                   COALESCE(o.short_address, o.address) AS client_address
             FROM order_payments p
             LEFT JOIN orders o ON o.id = p.order_id
             WHERE p.method='cash'
