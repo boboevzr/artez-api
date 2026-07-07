@@ -5360,7 +5360,12 @@ async def approve_debt_approval_ep(
         order_id = row.get("order_id")
         order_num = row.get("order_num", "")
         driver_tg_id = row.get("driver_tg_id")
-        mgr_msgs = row.get("mgr_msgs") or {}
+        _mgr_raw = row.get("mgr_msgs") or {}
+        if isinstance(_mgr_raw, str):
+            try: mgr_msgs = _json.loads(_mgr_raw)
+            except: mgr_msgs = {}
+        else:
+            mgr_msgs = _mgr_raw
         approver_name = f"{staff.get('first_name', '')} {staff.get('last_name', '')}".strip() or "Менеджер"
         result_text = f"✅ Закрыт в долг · {order_num}\nОдобрил: {approver_name}"
         async with aiohttp.ClientSession() as s:
@@ -5411,7 +5416,12 @@ async def reject_debt_approval_ep(
     if BOT_TOKEN:
         order_num = row.get("order_num", "")
         driver_tg_id = row.get("driver_tg_id")
-        mgr_msgs = row.get("mgr_msgs") or {}
+        _mgr_raw = row.get("mgr_msgs") or {}
+        if isinstance(_mgr_raw, str):
+            try: mgr_msgs = _json.loads(_mgr_raw)
+            except: mgr_msgs = {}
+        else:
+            mgr_msgs = _mgr_raw
         async with aiohttp.ClientSession() as s:
             if driver_tg_id:
                 try:
