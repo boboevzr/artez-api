@@ -5387,7 +5387,13 @@ async def approve_debt_approval_ep(
             if order_id:
                 try:
                     ch_info = await db.get_order_channel_info(order_id)
-                    if ch_info and ch_info.get("channel_id") and ch_info.get("msg_id"):
+                    if not ch_info:
+                        logging.warning(f"debt approve: get_order_channel_info returned None for order_id={order_id}")
+                    elif not ch_info.get("channel_id"):
+                        logging.warning(f"debt approve: no channel_id in ch_info order_id={order_id} ch_info={ch_info}")
+                    elif not ch_info.get("msg_id"):
+                        logging.warning(f"debt approve: no msg_id in ch_info order_id={order_id} ch_info={ch_info}")
+                    else:
                         new_text = _fmt_stop_text_api(ch_info, ch_info["stop_num"])
                         kb = {"inline_keyboard": [
                             [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
@@ -5395,12 +5401,16 @@ async def approve_debt_approval_ep(
                              {"text": "📋 История", "callback_data": f"rp:{order_id}:history"},
                              {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}],
                         ]}
-                        await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                        resp = await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
                                      json={"chat_id": ch_info["channel_id"], "message_id": ch_info["msg_id"],
                                            "text": new_text, "parse_mode": "HTML",
                                            "disable_web_page_preview": True,
                                            "reply_markup": kb})
-                except Exception: pass
+                        if resp.status != 200:
+                            body = await resp.text()
+                            logging.warning(f"debt approve: editMessageText {resp.status} order_id={order_id}: {body}")
+                except Exception as e:
+                    logging.warning(f"debt approve: channel update failed order_id={order_id}: {e}")
     return {"ok": True}
 
 @app.post("/api/debt-approvals/{request_id}/reject")
