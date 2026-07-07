@@ -4370,6 +4370,11 @@ async def reject_payment(order_id: int, payment_id: int,
     asyncio.create_task(_send_tg_cash(ch, text))
     asyncio.create_task(_notify_driver_payment(dict(row), order_id, text))
     asyncio.create_task(_update_api_channel_stop(order_id))
+    drv_staff_id = row.get("created_by_staff_id")
+    if drv_staff_id:
+        push_body = f"Заказ #{order_id} · {int(float(row['amount'])):,} сум" + (f" · {note}" if note else "")
+        asyncio.create_task(send_web_push(drv_staff_id, "❌ Оплата отклонена", push_body,
+                                          order_id=order_id, push_type="payment_rejected"))
     return {"ok": True, "payment": row}
 
 
