@@ -3920,65 +3920,65 @@ async def driver_update_order_status(order_id: int, new_status: str, staff_id: i
 
 # ── Seed данные: 2-уровневая структура ───────────────────────────────────────
 _EXPENSE_CAT_PARENTS = [
-    # (name_ru, name_uz, icon, sort_order)
-    ("🚗 Транспорт",        "🚗 Transport",          "🚗", 10),
-    ("💡 Коммунальные",     "💡 Kommunal",           "💡", 20),
-    ("👷 Персонал",         "👷 Xodimlar",           "👷", 30),
-    ("🧴 Химия/Материалы",  "🧴 Kimyo/Materiallar",  "🧴", 40),
-    ("📦 Закупки/Склад",    "📦 Xarid/Ombor",        "📦", 50),
-    ("🏢 Офис",             "🏢 Ofis",               "🏢", 60),
-    ("🔧 Обслуживание",     "🔧 Texnik xizmat",      "🔧", 70),
-    ("📣 Маркетинг",        "📣 Marketing",          "📣", 80),
-    ("🏦 Финансы",          "🏦 Moliya",             "🏦", 90),
-    ("❓ Прочее",            "❓ Boshqalar",          "❓", 100),
+    # (name_ru, name_uz, icon, sort_order)  — имя БЕЗ эмодзи, эмодзи только в icon
+    ("Транспорт",        "Transport",          "🚗", 10),
+    ("Коммунальные",     "Kommunal",           "💡", 20),
+    ("Персонал",         "Xodimlar",           "👷", 30),
+    ("Химия/Материалы",  "Kimyo/Materiallar",  "🧴", 40),
+    ("Закупки/Склад",    "Xarid/Ombor",        "📦", 50),
+    ("Офис",             "Ofis",               "🏢", 60),
+    ("Обслуживание",     "Texnik xizmat",      "🔧", 70),
+    ("Маркетинг",        "Marketing",          "📣", 80),
+    ("Финансы",          "Moliya",             "🏦", 90),
+    ("Прочее",           "Boshqalar",          "❓", 100),
 ]
 
 # (parent_name_ru, [(name_ru, name_uz, icon, approve_level, receipt_required, amount_threshold, sort_order)])
 _EXPENSE_CAT_CHILDREN = [
-    ("🚗 Транспорт", [
-        ("⛽ Топливо",         "⛽ Yoqilg'i",          "⛽", "manager", True,  None, 1),
-        ("🔧 Ремонт авто",     "🔧 Avto ta'miri",      "🔧", "both",    True,  None, 2),
-        ("🅿️ Парковка",       "🅿️ Parkovka",          "🅿️","manager", False, None, 3),
+    ("Транспорт", [
+        ("Топливо",         "Yoqilg'i",       "⛽", "manager", True,  None, 1),
+        ("Ремонт авто",     "Avto ta'miri",   "🔧", "both",    True,  None, 2),
+        ("Парковка",        "Parkovka",       "🅿️","manager", False, None, 3),
     ]),
-    ("💡 Коммунальные", [
-        ("💡 Электричество",   "💡 Elektr",            "💡", "admin",   True,  None, 1),
-        ("💧 Вода",            "💧 Suv",               "💧", "admin",   True,  None, 2),
-        ("🌐 Интернет",        "🌐 Internet",           "🌐", "admin",   True,  None, 3),
-        ("🔥 Газ",             "🔥 Gaz",               "🔥", "admin",   True,  None, 4),
+    ("Коммунальные", [
+        ("Электричество",   "Elektr",         "💡", "admin",   True,  None, 1),
+        ("Вода",            "Suv",            "💧", "admin",   True,  None, 2),
+        ("Интернет",        "Internet",       "🌐", "admin",   True,  None, 3),
+        ("Газ",             "Gaz",            "🔥", "admin",   True,  None, 4),
     ]),
-    ("👷 Персонал", [
-        ("💰 Зарплата",        "💰 Maosh",             "💰", "admin",   False, None, 1),
-        ("💸 Аванс",           "💸 Avans",             "💸", "both",    False, None, 2),
-        ("🍽 Питание",         "🍽 Ovqat",             "🍽", "manager", False, None, 3),
-        ("🏥 Медицина",        "🏥 Tibbiyot",          "🏥", "both",    True,  None, 4),
+    ("Персонал", [
+        ("Зарплата",        "Maosh",          "💰", "admin",   False, None, 1),
+        ("Аванс",           "Avans",          "💸", "both",    False, None, 2),
+        ("Питание",         "Ovqat",          "🍽", "manager", False, None, 3),
+        ("Медицина",        "Tibbiyot",       "🏥", "both",    True,  None, 4),
     ]),
-    ("🧴 Химия/Материалы", [
-        ("🧴 Бытовая химия",   "🧴 Kimyo",             "🧴", "manager", True,  None, 1),
-        ("🪣 Инвентарь",       "🪣 Inventar",          "🪣", "manager", False, None, 2),
+    ("Химия/Материалы", [
+        ("Бытовая химия",   "Kimyo",          "🧴", "manager", True,  None, 1),
+        ("Инвентарь",       "Inventar",       "🪣", "manager", False, None, 2),
     ]),
-    ("📦 Закупки/Склад", [
-        ("📦 Упаковка",        "📦 Qadoqlash",         "📦", "manager", False, None, 1),
-        ("🛒 Прочие закупки",  "🛒 Boshqa xaridlar",  "🛒", "both",    True,  None, 2),
+    ("Закупки/Склад", [
+        ("Упаковка",        "Qadoqlash",      "📦", "manager", False, None, 1),
+        ("Прочие закупки",  "Boshqa xaridlar","🛒", "both",    True,  None, 2),
     ]),
-    ("🏢 Офис", [
-        ("📎 Канцтовары",      "📎 Kantselyariya",     "📎", "manager", False, None, 1),
-        ("☕ Продукты",         "☕ Oziq-ovqat",         "☕", "manager", False, None, 2),
-        ("📱 Связь/SIM",       "📱 Aloqa/SIM",         "📱", "manager", True,  None, 3),
-        ("🏢 Аренда",          "🏢 Ijara",             "🏢", "admin",   True,  None, 4),
+    ("Офис", [
+        ("Канцтовары",      "Kantselyariya",  "📎", "manager", False, None, 1),
+        ("Продукты",        "Oziq-ovqat",     "☕", "manager", False, None, 2),
+        ("Связь/SIM",       "Aloqa/SIM",      "📱", "manager", True,  None, 3),
+        ("Аренда",          "Ijara",          "🏢", "admin",   True,  None, 4),
     ]),
-    ("🔧 Обслуживание", [
-        ("🔩 Ремонт обор-я",   "🔩 Jihoz ta'miri",    "🔩", "both",    True,  None, 1),
-        ("🧹 Уборка помещ.",   "🧹 Xona tozalash",    "🧹", "manager", False, None, 2),
+    ("Обслуживание", [
+        ("Ремонт обор-я",   "Jihoz ta'miri",  "🔩", "both",    True,  None, 1),
+        ("Уборка помещ.",   "Xona tozalash",  "🧹", "manager", False, None, 2),
     ]),
-    ("📣 Маркетинг", [
-        ("📣 Реклама",         "📣 Reklama",           "📣", "both",    True,  None, 1),
-        ("🎁 Представит.",     "🎁 Vakillik",          "🎁", "admin",   True,  None, 2),
+    ("Маркетинг", [
+        ("Реклама",         "Reklama",        "📣", "both",    True,  None, 1),
+        ("Представит.",     "Vakillik",       "🎁", "admin",   True,  None, 2),
     ]),
-    ("🏦 Финансы", [
-        ("🏦 Инкассация",      "🏦 Inkassatsiya",      "🏦", "admin",   True,  None, 1),
+    ("Финансы", [
+        ("Инкассация",      "Inkassatsiya",   "🏦", "admin",   True,  None, 1),
     ]),
-    ("❓ Прочее", [
-        ("❓ Прочее",          "❓ Boshqalar",          "❓", "admin",   True,  None, 1),
+    ("Прочее", [
+        ("Прочее",             "Boshqalar",             "❓", "admin",   True,  None, 1),
     ]),
 ]
 
@@ -4054,6 +4054,18 @@ async def ensure_expense_tables():
                             (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order)
                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
                     """, nm_ru, nm_uz, icon, pid, approve_level, receipt_req, threshold, sord)
+        else:
+            # Миграция: убираем дублирующий эмодзи из начала name_ru/name_uz
+            # если name_ru начинается с icon + пробел (например "⛽ Топливо" → "Топливо")
+            await conn.execute("""
+                UPDATE expense_categories
+                SET name_ru = TRIM(SUBSTRING(name_ru FROM LENGTH(icon) + 2)),
+                    name_uz = TRIM(SUBSTRING(name_uz FROM LENGTH(icon) + 2))
+                WHERE icon != ''
+                  AND LENGTH(name_ru) > LENGTH(icon) + 1
+                  AND SUBSTRING(name_ru FROM 1 FOR LENGTH(icon)) = icon
+                  AND SUBSTRING(name_ru FROM LENGTH(icon) + 1 FOR 1) = ' '
+            """)
 
 async def get_expense_categories_tree() -> list:
     """Возвращает дерево: родители со списком children."""
