@@ -889,6 +889,7 @@ def _staff_public(s: dict) -> dict:
         "can_accept_payment":  s.get("can_accept_payment", False),
         "can_manage_cash":     s.get("can_manage_cash", False),
         "can_approve_debt":    s.get("can_approve_debt", False),
+        "can_drive":           s.get("can_drive", False),
         "notify_new_users":    s.get("notify_new_users", False),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
@@ -5222,6 +5223,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_manage_cash:      bool = Body(False, embed=True),
     notify_new_users:     bool = Body(False, embed=True),
     can_approve_debt:     bool = Body(False, embed=True),
+    can_drive:            bool = Body(False, embed=True),
     order_stages:         str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -5232,19 +5234,19 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_create_order=$6, can_confirm_order=$7, order_stages=$8,
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
-                   can_approve_debt=$15
+                   can_approve_debt=$15, can_drive=$16
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users,
-                         can_approve_debt""",
+                         can_approve_debt, can_drive""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
-            can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt)
+            can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt, can_drive)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
@@ -5311,6 +5313,120 @@ async def reject_discount_request(
     if not row:
         raise HTTPException(404, "Запрос не найден или уже обработан")
     return {"ok": True, "request": row}
+
+# ── driver delivery (web) ──────────────────────────────────────────────────────
+
+_NOT_TAKEN_REASONS = ["🚗 Нет места в машине","⏳ Заказ ещё не готов","📅 Клиент перенёс","📦 Хрупкий/негабаритный","✏️ Другое"]
+_RETURNED_REASONS  = ["🚪 Клиента нет дома","📍 Не нашёл адрес","📵 Не дозвонился","🚫 Клиент отказался","📅 Клиент перенёс","✏️ Другое"]
+
+def _driver_name(staff: dict) -> str:
+    return " ".join(filter(None,[staff.get("last_name"), staff.get("first_name")])) or staff.get("login","Водитель")
+
+def _can_drive(staff: dict) -> bool:
+    return bool(staff.get("can_drive")) or staff.get("role") == "driver"
+
+@app.get("/api/staff/my-route")
+async def get_my_route(staff=Depends(get_current_staff)):
+    if not _can_drive(staff):
+        raise HTTPException(403, "Нет доступа")
+    routes = await db.get_driver_routes_today(staff["id"])
+    return {"ok": True, "routes": routes}
+
+@app.post("/api/staff/my-route/stops/{order_id}/take-delivery")
+async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    name = _driver_name(staff)
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status FROM orders WHERE id=$1", order_id)
+        if not row: raise HTTPException(404)
+        cur = row["status"]
+        if cur not in ("ready", "delivery"):
+            raise HTTPException(400, f"Статус заказа: {cur}")
+        if cur == "ready":
+            await conn.execute("UPDATE orders SET status='delivery', updated_at=NOW() WHERE id=$1", order_id)
+            await conn.execute(
+                "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+                order_id, staff["id"], name, "status_delivery", "Маршрут (web): забрал для доставки клиенту")
+        await conn.execute("UPDATE route_orders SET driver_confirmed=TRUE WHERE order_id=$1", order_id)
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True}
+
+@app.post("/api/staff/my-route/stops/{order_id}/not-taken")
+async def driver_not_taken(order_id: int, reason_index: int = Body(..., embed=True), staff=Depends(get_current_staff)):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    name = _driver_name(staff)
+    idx = reason_index if 0 <= reason_index < len(_NOT_TAKEN_REASONS) else len(_NOT_TAKEN_REASONS)-1
+    reason = _NOT_TAKEN_REASONS[idx]
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE route_orders SET stop_status='skipped', driver_confirmed=FALSE WHERE order_id=$1", order_id)
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff["id"], name, "not_taken", f"❌ Не забрал: {reason}")
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True}
+
+@app.post("/api/staff/my-route/stops/{order_id}/returned")
+async def driver_returned(order_id: int, reason_index: int = Body(..., embed=True), staff=Depends(get_current_staff)):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    name = _driver_name(staff)
+    idx = reason_index if 0 <= reason_index < len(_RETURNED_REASONS) else len(_RETURNED_REASONS)-1
+    reason = _RETURNED_REASONS[idx]
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE orders SET status='ready', updated_at=NOW() WHERE id=$1", order_id)
+        await conn.execute("UPDATE route_orders SET stop_status='skipped', driver_confirmed=FALSE WHERE order_id=$1", order_id)
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff["id"], name, "returned", f"🔙 Вернул в мастерскую: {reason}")
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True}
+
+@app.post("/api/staff/my-route/stops/{order_id}/deliver")
+async def driver_deliver(
+    order_id: int,
+    method: str = Body(..., embed=True),
+    amount: float = Body(0, embed=True),
+    staff=Depends(get_current_staff)
+):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    name = _driver_name(staff)
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status FROM orders WHERE id=$1", order_id)
+        if not row: raise HTTPException(404)
+        if row["status"] not in ("ready", "delivery"):
+            raise HTTPException(400, f"Статус: {row['status']}")
+    if amount > 0 and method in ("cash","card","transfer"):
+        await db.add_order_payment(order_id, amount, method, "delivery",
+                                   "Оплата при доставке (web)", name,
+                                   created_by_staff_id=staff["id"])
+    debt = await db.get_order_debt_amount(order_id)
+    note = f"Маршрут (web): доставлен клиенту{f', долг {debt:.0f} сум' if debt > 0 else ''}"
+    async with db.pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE orders SET status='delivered', updated_at=NOW() WHERE id=$1", order_id)
+        await conn.execute(
+            "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status!='done'", order_id)
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff["id"], name, "status_delivered", note)
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True, "debt": float(debt)}
+
+@app.post("/api/staff/my-route/stops/{order_id}/pay")
+async def driver_pay(
+    order_id: int,
+    method: str = Body(..., embed=True),
+    amount: float = Body(..., embed=True),
+    staff=Depends(get_current_staff)
+):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    if method not in ("cash","card","transfer"): raise HTTPException(400, "Неверный метод")
+    name = _driver_name(staff)
+    row = await db.add_order_payment(order_id, amount, method, "delivery",
+                                     "Частичная оплата при доставке (web)", name,
+                                     created_by_staff_id=staff["id"])
+    if method == "cash":
+        asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True, "payment": row}
 
 # ── debt approval requests ─────────────────────────────────────────────────────
 

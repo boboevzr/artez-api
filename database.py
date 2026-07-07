@@ -829,6 +829,10 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_debt_approval_status ON debt_approval_requests(status);
         """)
 
+    # ── Шаг 19: флаг водителя ────────────────────────────────────────────
+    async with pool.acquire() as c:
+        await c.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS can_drive BOOLEAN DEFAULT FALSE;")
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -3824,3 +3828,76 @@ async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: i
                 "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status='pending'",
                 r['order_id'])
         return r
+
+async def get_driver_routes_today(driver_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT r.id AS route_id, r.name, r.date::text, r.type, r.status AS route_status, r.branch,
+                   ro.sort_order, ro.stop_status, ro.driver_confirmed,
+                   o.id AS order_id, o.order_num, o.status AS order_status,
+                   o.client_first_name, o.client_last_name, o.client_phone,
+                   o.address, o.short_address, o.location, o.location_address,
+                   COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
+                            COALESCE(o.total_price,0)) AS items_total,
+                   COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS total_discount,
+                   COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=o.id
+                              AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
+                                   OR (method<>'cash' AND confirmed=TRUE))), 0) AS paid_amount,
+                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id),0)::int AS item_count
+            FROM routes r
+            JOIN route_orders ro ON ro.route_id = r.id
+            JOIN orders o ON o.id = ro.order_id
+            WHERE r.driver_id = $1
+              AND r.date = CURRENT_DATE
+              AND r.status != 'cancelled'
+            ORDER BY r.id, ro.sort_order
+        """, driver_id)
+        routes: dict = {}
+        for row in rows:
+            rid = row["route_id"]
+            if rid not in routes:
+                routes[rid] = {"id": rid, "name": row["name"], "date": row["date"],
+                               "type": row["type"], "status": row["route_status"],
+                               "branch": row["branch"], "stops": []}
+            routes[rid]["stops"].append({
+                "order_id":       row["order_id"],
+                "order_num":      row["order_num"],
+                "sort_order":     row["sort_order"],
+                "stop_status":    row["stop_status"],
+                "driver_confirmed": bool(row["driver_confirmed"]),
+                "order_status":   row["order_status"],
+                "client_first_name": row["client_first_name"],
+                "client_last_name":  row.get("client_last_name"),
+                "client_phone":   row.get("client_phone"),
+                "address":        row.get("address"),
+                "short_address":  row.get("short_address"),
+                "location":       row.get("location"),
+                "location_address": row.get("location_address"),
+                "items_total":    float(row["items_total"]),
+                "total_discount": float(row["total_discount"]),
+                "paid_amount":    float(row["paid_amount"]),
+                "item_count":     row["item_count"],
+            })
+        return list(routes.values())
+
+async def driver_set_stop_status(order_id: int, status: str):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE route_orders SET stop_status=$2 WHERE order_id=$1 AND stop_status!='done'",
+            order_id, status)
+
+async def driver_set_confirmed(order_id: int, confirmed: bool = True):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE route_orders SET driver_confirmed=$2 WHERE order_id=$1", order_id, confirmed)
+
+async def driver_update_order_status(order_id: int, new_status: str, staff_id: int, staff_name: str, note: str = ""):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE orders SET status=$2, updated_at=NOW() WHERE id=$1", order_id, new_status)
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff_id, staff_name, f"status_{new_status}", note or f"Статус → {new_status}")
