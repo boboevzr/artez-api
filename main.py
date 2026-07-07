@@ -5448,6 +5448,23 @@ async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
 
+@app.post("/api/staff/my-route/stops/{order_id}/undo-delivered")
+async def driver_undo_delivered(order_id: int, staff=Depends(get_current_staff)):
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    name = _driver_name(staff)
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT status FROM orders WHERE id=$1", order_id)
+        if not row: raise HTTPException(404)
+        if row["status"] != "delivered":
+            raise HTTPException(400, f"Статус заказа: {row['status']}")
+        await conn.execute("UPDATE orders SET status='delivery', updated_at=NOW() WHERE id=$1", order_id)
+        await conn.execute("UPDATE route_orders SET stop_status='pending', driver_confirmed=TRUE WHERE order_id=$1", order_id)
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff["id"], name, "undo_delivered", "↩️ Отменён статус «Доставлен» (web)")
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True}
+
 @app.post("/api/staff/my-route/stops/{order_id}/undo-delivery")
 async def driver_undo_delivery(order_id: int, staff=Depends(get_current_staff)):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
