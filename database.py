@@ -3738,7 +3738,8 @@ async def get_pending_debt_approvals() -> list:
                    COALESCE(o.discount_sum, 0) + COALESCE(o.delivery_discount, 0)
                        + COALESCE(o.manual_discount, 0) AS total_discount,
                    COALESCE((SELECT SUM(amount) FROM order_payments
-                              WHERE order_id = o.id), 0) AS paid_amount,
+                              WHERE order_id = o.id
+                                AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id = o.id), 0)::int AS item_count
             FROM debt_approval_requests dar
             LEFT JOIN orders o ON o.id = dar.order_id
@@ -3761,7 +3762,9 @@ async def get_order_channel_info(order_id: int) -> dict | None:
                    COALESCE(o.discount_sum,0) AS discount_sum,
                    COALESCE(o.delivery_discount,0) AS delivery_discount,
                    COALESCE(o.manual_discount,0) AS manual_discount,
-                   COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=o.id), 0) AS paid_amount,
+                   COALESCE((SELECT SUM(amount) FROM order_payments
+                              WHERE order_id=o.id
+                                AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
                    ro.sort_order, r.id AS route_id
             FROM route_orders ro
