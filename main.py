@@ -4478,21 +4478,29 @@ async def upload_payment_receipt(
             pass
 
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
-    pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
-    # Получаем данные платежа для caption
+    pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт",
+              "delivery":"Оплата при доставке"}
+    # Получаем данные платежа + order_num для caption
     pay_row = None
+    order_num_str = f"#{order_id}"
     if db.pool:
         try:
             async with db.pool.acquire() as conn:
-                pay_row = await conn.fetchrow("SELECT amount, method, purpose FROM order_payments WHERE id=$1", payment_id)
+                pay_row = await conn.fetchrow(
+                    "SELECT op.amount, op.method, op.purpose, o.order_num "
+                    "FROM order_payments op JOIN orders o ON o.id=op.order_id "
+                    "WHERE op.id=$1", payment_id)
+                if pay_row and pay_row["order_num"]:
+                    order_num_str = f"#{order_id} · {pay_row['order_num']}"
         except Exception:
             pass
 
-    amount_str = f"{int(float(pay_row['amount'])):,} сум" if pay_row else ""
-    method_str = mLabel.get(pay_row['method'], '') if pay_row else ""
+    amount_str  = f"{int(float(pay_row['amount'])):,} сум" if pay_row else ""
+    method_str  = mLabel.get(pay_row['method'], pay_row['method'] if pay_row else '') if pay_row else ""
     purpose_str = pLabel.get(pay_row['purpose'], '') if pay_row else ""
-    caption = (f"🧾 Чек · Заказ #{order_id} · Платёж №{pay_num}\n"
-               f"{purpose_str} · {method_str}\n"
+    info_line   = " · ".join(filter(None, [purpose_str, method_str]))
+    caption = (f"🧾 Чек · Заказ {order_num_str} · Платёж №{pay_num}\n"
+               f"{info_line}\n"
                f"💰 {amount_str}\n"
                f"👤 {name}")
 
