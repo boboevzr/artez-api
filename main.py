@@ -8286,11 +8286,12 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
 
     if schedule_time:
         # Сохраняем в нашу БД, worker отправит в нужное время
-        from datetime import datetime
-        st = schedule_time.strip()
+        from datetime import datetime, timedelta
+        st = schedule_time.strip().replace("T", " ")
         if len(st) == 16:
             st += ":00"
-        scheduled_at = datetime.fromisoformat(st).astimezone(timezone.utc)
+        tz5 = timezone(timedelta(hours=5))
+        scheduled_at = datetime.fromisoformat(st).replace(tzinfo=tz5).astimezone(timezone.utc)
         dispatch_id = await db.create_sms_dispatch(name, message, frm, phones, scheduled_at)
         logging.info(f"SMS dispatch scheduled: id={dispatch_id}, time={st}, phones={len(phones)}")
         return {"ok": True, "total": len(phones), "scheduled": True, "dispatch_id": dispatch_id}
