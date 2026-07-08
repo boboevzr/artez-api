@@ -4199,7 +4199,8 @@ async def get_pending_expenses_for_manager(branch: str = None) -> list:
                    ec.name_ru AS category_name_ru, ec.name_uz AS category_name_uz,
                    ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
                    ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz,
-                   TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
+                   TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
+                   sc.phone AS creator_phone
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id
             LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
@@ -4219,6 +4220,7 @@ async def get_pending_expenses_for_admin() -> list:
                    ec.icon AS category_icon, ec.approve_level, ec.receipt_required,
                    ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
+                   sc.phone AS creator_phone,
                    TRIM(COALESCE(sm.last_name,'') || ' ' || COALESCE(sm.first_name,'')) AS manager_name
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id

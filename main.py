@@ -4349,27 +4349,27 @@ async def list_expenses(
 
 @app.get("/api/admin/expenses/pending-manager")
 async def pending_for_manager(staff=Depends(get_current_staff)):
-    can_manage = staff.get("can_manage_cash") or staff.get("sub") == "admin"
+    can_manage = staff.get("can_manage_cash") or staff.get("role") == "admin"
     if not can_manage:
         raise HTTPException(status_code=403, detail="Нет доступа")
-    branch = staff.get("branch") if staff.get("sub") != "admin" else None
+    branch = staff.get("branch") if staff.get("role") != "admin" else None
     rows = await db.get_pending_expenses_for_manager(branch)
     return {"ok": True, "expenses": rows}
 
 @app.get("/api/admin/expenses/pending-admin")
 async def pending_for_admin(staff=Depends(get_current_staff)):
-    if staff.get("sub") != "admin":
+    if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Нет доступа")
     rows = await db.get_pending_expenses_for_admin()
     return {"ok": True, "expenses": rows}
 
 @app.patch("/api/admin/expenses/{expense_id}/approve")
 async def approve_expense(expense_id: int, staff=Depends(get_current_staff)):
-    role = staff.get("sub") or ""
-    can_manage = staff.get("can_manage_cash") or role == "admin"
+    is_admin = staff.get("role") == "admin"
+    can_manage = staff.get("can_manage_cash") or is_admin
     if not can_manage:
         raise HTTPException(status_code=403, detail="Нет доступа")
-    if role == "admin":
+    if is_admin:
         row = await db.approve_expense_admin(expense_id, staff["id"])
     else:
         row = await db.approve_expense_manager(expense_id, staff["id"])
@@ -4397,7 +4397,7 @@ async def reject_expense(
     reason: str = Body("", embed=True),
     staff=Depends(get_current_staff),
 ):
-    can_manage = staff.get("can_manage_cash") or staff.get("sub") == "admin"
+    can_manage = staff.get("can_manage_cash") or staff.get("role") == "admin"
     if not can_manage:
         raise HTTPException(status_code=403, detail="Нет доступа")
     row = await db.reject_expense(expense_id, staff["id"], reason)
