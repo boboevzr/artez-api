@@ -261,6 +261,23 @@ async def send_tg(chat_id, text: str):
         logging.warning(f"send_tg error: {e}")
 
 
+async def _edit_tg_handover_msg(chat_id: int, msg_id: int, text: str):
+    """Редактировать TG-сообщение передачи наличных: обновить текст, убрать кнопки."""
+    if not BOT_TOKEN or not chat_id or not msg_id:
+        return
+    try:
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                json={"chat_id": str(chat_id), "message_id": msg_id,
+                      "text": text, "parse_mode": "HTML",
+                      "reply_markup": {"inline_keyboard": []}},
+                timeout=aiohttp.ClientTimeout(total=6),
+            )
+    except Exception as e:
+        logging.warning(f"_edit_tg_handover_msg error: {e}")
+
+
 async def _send_tg_with_kb(chat_id, text: str, keyboard: dict,
                            parse_mode: str | None = "HTML",
                            silent: bool = False, protect: bool = False) -> int | None:
@@ -3916,13 +3933,16 @@ async def create_cash_handover(
                f"Сумма: <b>{int(amount):,} сум</b>"
                + (f"\nПримечание: {note}" if note else ""))
     if to_staff and to_staff.get("tg_id") and handover_id:
-        asyncio.create_task(_send_tg_with_kb(
-            int(to_staff["tg_id"]), dm_text,
+        tg_chat = int(to_staff["tg_id"])
+        msg_id = await _send_tg_with_kb(
+            tg_chat, dm_text,
             keyboard={"inline_keyboard": [[
                 {"text": "✅ Подтвердить", "callback_data": f"cash_confirm:{handover_id}"},
                 {"text": "❌ Отклонить",   "callback_data": f"cash_reject:{handover_id}"},
             ]]},
-        ))
+        )
+        if msg_id:
+            asyncio.create_task(db.update_handover_tg_msg(handover_id, tg_chat, msg_id))
 
     return {"ok": True, "handover": row}
 
@@ -4207,13 +4227,16 @@ async def staff_cash_handover(
                f"Сумма: <b>{int(amount):,} сум</b>"
                + (f"\nПримечание: {note}" if note else ""))
     if to_staff and to_staff.get("tg_id"):
-        asyncio.create_task(_send_tg_with_kb(
-            int(to_staff["tg_id"]), dm_text,
+        tg_chat = int(to_staff["tg_id"])
+        msg_id = await _send_tg_with_kb(
+            tg_chat, dm_text,
             keyboard={"inline_keyboard": [[
                 {"text": "✅ Подтвердить", "callback_data": f"cash_confirm:{handover_id}"},
                 {"text": "❌ Отклонить",   "callback_data": f"cash_reject:{handover_id}"},
             ]]},
-        ))
+        )
+        if msg_id:
+            asyncio.create_task(db.update_handover_tg_msg(handover_id, tg_chat, msg_id))
     ch = await db.get_cash_tg_channel()
     ch_text = (f"💵 <b>Передача наличных</b>\n"
                f"От: {from_name}\n"
@@ -4249,6 +4272,15 @@ async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_sta
     ch = await db.get_cash_tg_channel()
     asyncio.create_task(_send_tg_cash(ch, confirmed_text))
 
+    # Обновить TG-сообщение у получателя (убрать кнопки)
+    if row.get("tg_chat_id") and row.get("tg_msg_id"):
+        from_name_for_tg = " ".join(filter(None,[from_staff.get("last_name",""),from_staff.get("first_name","")])).strip() if from_staff else "—"
+        edited_text = (f"💵 <b>Вам сдали наличные</b>\n"
+                       f"От: {from_name_for_tg}\n"
+                       f"Сумма: <b>{amount:,} сум</b>\n\n"
+                       f"✅ Подтверждено: <b>{confirmer_name}</b>")
+        asyncio.create_task(_edit_tg_handover_msg(row["tg_chat_id"], row["tg_msg_id"], edited_text))
+
     return {"ok": True, "handover": row}
 
 
@@ -4271,6 +4303,16 @@ async def reject_staff_handover(handover_id: int, staff=Depends(get_current_staf
             int(from_staff["tg_id"]),
             f"❌ <b>Передача наличных отклонена</b>\n{rejector_name} отклонил получение <b>{amount:,} сум</b>",
         ))
+
+    # Обновить TG-сообщение у получателя (убрать кнопки)
+    if row.get("tg_chat_id") and row.get("tg_msg_id"):
+        from_name_for_tg = " ".join(filter(None,[from_staff.get("last_name",""),from_staff.get("first_name","")])).strip() if from_staff else "—"
+        edited_text = (f"💵 <b>Вам сдали наличные</b>\n"
+                       f"От: {from_name_for_tg}\n"
+                       f"Сумма: <b>{amount:,} сум</b>\n\n"
+                       f"❌ Отклонено: <b>{rejector_name}</b>")
+        asyncio.create_task(_edit_tg_handover_msg(row["tg_chat_id"], row["tg_msg_id"], edited_text))
+
     return {"ok": True}
 
 
@@ -4480,6 +4522,30 @@ async def reject_expense(
             push_type="expense_rejected",
         ))
     return {"ok": True, "expense": row}
+
+@app.patch("/api/admin/expenses/{expense_id}/pay")
+async def pay_expense(
+    expense_id: int,
+    paid_from: str = Body("cash", embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("role") != "admin" and not staff.get("can_manage_cash"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    if paid_from not in ("cash", "safe", "bank"):
+        raise HTTPException(status_code=400, detail="Некорректный источник выплаты")
+    row = await db.mark_expense_paid(expense_id, staff["id"], paid_from)
+    if not row:
+        raise HTTPException(status_code=404, detail="Расход не найден или не в статусе 'утверждён'")
+    if row.get("created_by_staff_id"):
+        payer = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+        asyncio.create_task(send_web_push(
+            row["created_by_staff_id"],
+            title="💸 Расход выплачен",
+            body=f"{payer} · {int(float(row.get('amount',0))):,} сум",
+            push_type="expense_paid",
+        ))
+    return {"ok": True, "expense": row}
+
 
 @app.post("/api/admin/expenses/{expense_id}/receipt")
 async def upload_expense_receipt(

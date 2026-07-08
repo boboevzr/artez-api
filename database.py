@@ -369,6 +369,13 @@ async def create_tables():
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
+        # Расходы: источник выплаты (сейф / банк / наличные)
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS paid_from VARCHAR(20) DEFAULT NULL",
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS paid_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS paid_at TIMESTAMPTZ DEFAULT NULL",
+        # Передачи наличных: TG-сообщение для редактирования после confirm/reject
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS tg_chat_id BIGINT DEFAULT NULL",
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS tg_msg_id BIGINT DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -3177,6 +3184,22 @@ async def reject_cash_handover(handover_id: int, rejected_by: int) -> dict:
             UPDATE cash_handovers SET status='rejected', confirmed_at=NOW(), confirmed_by=$2
             WHERE id=$1 AND status='pending' RETURNING *
         """, handover_id, rejected_by)
+        return dict(row) if row else {}
+
+async def update_handover_tg_msg(handover_id: int, tg_chat_id: int, tg_msg_id: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE cash_handovers SET tg_chat_id=$2, tg_msg_id=$3 WHERE id=$1",
+            handover_id, tg_chat_id, tg_msg_id)
+
+async def mark_expense_paid(expense_id: int, paid_by: int, paid_from: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE expenses SET status='paid', paid_by=$2, paid_from=$3, paid_at=NOW()
+            WHERE id=$1 AND status='approved' RETURNING *
+        """, expense_id, paid_by, paid_from)
         return dict(row) if row else {}
 
 async def get_pending_handovers_for(staff_id: int) -> list:
