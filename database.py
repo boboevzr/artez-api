@@ -3041,19 +3041,25 @@ async def get_my_cash_balance(staff_id: int) -> dict:
         # Ожидают подтверждения (cash_handovers from me, status='pending')
         r6 = await conn.fetchval(
             "SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1 AND status='pending'", staff_id)
-        collected   = float(r1)
-        given_imm   = float(r2)
-        recv_others = float(r3)
-        recv_hand   = float(r4)
-        given_hand  = float(r5)
-        pending_sent = float(r6)
-        on_hand = collected - given_imm + recv_others + recv_hand - given_hand
+        # Расходы утверждённые — вычитаются из наличных на руках
+        r7 = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM expenses WHERE created_by_staff_id=$1 AND status IN ('approved','paid')",
+            staff_id)
+        collected         = float(r1)
+        given_imm         = float(r2)
+        recv_others       = float(r3)
+        recv_hand         = float(r4)
+        given_hand        = float(r5)
+        pending_sent      = float(r6)
+        expenses_approved = float(r7)
+        on_hand = collected - given_imm + recv_others + recv_hand - given_hand - expenses_approved
         return {
             "collected":            collected,
             "given_immediately":    given_imm,
             "received_from_others": recv_others + recv_hand,
             "handed_over":          given_imm + given_hand,
             "pending_sent":         pending_sent,
+            "expenses_approved":    expenses_approved,
             "on_hand":              on_hand,
         }
 
