@@ -4238,16 +4238,18 @@ async def get_pending_handovers(staff=Depends(get_current_staff)):
 
 @app.post("/api/admin/cash/bank-deposit")
 async def bank_deposit(
-    to_type: str   = Body("bank", embed=True),
-    amount:  float = Body(...,    embed=True),
-    note:    str   = Body("",    embed=True),
+    from_staff_id: int   = Body(None,   embed=True),
+    to_type:       str   = Body("bank", embed=True),
+    amount:        float = Body(...,    embed=True),
+    note:          str   = Body("",    embed=True),
     staff=Depends(get_current_staff),
 ):
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только для admin")
     if to_type not in ("bank", "safe"):
         raise HTTPException(status_code=400, detail="to_type must be bank or safe")
-    row = await db.create_bank_deposit(staff["id"], amount, to_type, note)
+    depositor_id = from_staff_id or staff.get("id")
+    row = await db.create_bank_deposit(depositor_id, amount, to_type, note)
     if not row:
         raise HTTPException(status_code=500, detail="Ошибка создания")
     return {"ok": True, "deposit": row}
