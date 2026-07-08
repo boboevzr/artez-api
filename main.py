@@ -107,6 +107,7 @@ async def startup():
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
     await db.ensure_sms_dispatch_table()
+    await db.ensure_sms_operator_prices()
     asyncio.create_task(_sms_dispatch_worker())
     # Webhook не нужен — бот работает в режиме polling (ARTEZ-BOT сервис на Railway)
     # if BOT_TOKEN and APP_URL:
@@ -8265,6 +8266,65 @@ async def sms_all_contacts_export(group_id: int = None, _=Depends(_get_admin)):
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": "attachment; filename=sms_contacts.csv"},
     )
+
+@app.get("/api/admin/sms/operator-prices")
+async def sms_operator_prices_list(_=Depends(_get_admin)):
+    return await db.get_sms_operator_prices()
+
+@app.put("/api/admin/sms/operator-prices/{op_id}")
+async def sms_operator_prices_update(op_id: int, body: dict = Body(...), _=Depends(_get_admin)):
+    import json as _j
+    pfx = body.get("prefixes", [])
+    if isinstance(pfx, str):
+        pfx = [int(x.strip()) for x in pfx.split(",") if x.strip().isdigit()]
+    return await db.update_sms_operator_price(
+        op_id,
+        (body.get("display_name") or "").strip(),
+        pfx,
+        int(body.get("price_service") or 0),
+        int(body.get("price_ad") or 0),
+    )
+
+@app.post("/api/admin/sms/groups/{gid}/cost-estimate")
+async def sms_cost_estimate(gid: int, body: dict = Body({}), _=Depends(_get_admin)):
+    """Расчёт стоимости рассылки по группе с разбивкой по операторам."""
+    import json as _j
+    sms_type = body.get("type", "service")  # service | ad
+    price_field = "price_service" if sms_type == "service" else "price_ad"
+    async with db.pool.acquire() as conn:
+        contacts = await conn.fetch(
+            "SELECT phone FROM sms_contacts WHERE group_id=$1 AND status='active'", gid
+        )
+        ops = await conn.fetch("SELECT * FROM sms_operator_prices")
+    # Построить карту prefix → оператор
+    prefix_map = {}
+    for op in ops:
+        pfx_list = _j.loads(op["prefixes"]) if isinstance(op["prefixes"], str) else op["prefixes"]
+        for pfx in pfx_list:
+            prefix_map[str(pfx)] = op
+    breakdown = {}  # operator → {display_name, count, price, total}
+    unknown = 0
+    for c in contacts:
+        phone = c["phone"]
+        # phone = 998XXXXXXXXX
+        pfx = phone[3:5] if len(phone) >= 5 else ""
+        op = prefix_map.get(pfx)
+        if not op:
+            unknown += 1
+            continue
+        key = op["operator"]
+        if key not in breakdown:
+            breakdown[key] = {"operator": key, "display_name": op["display_name"],
+                               "count": 0, "price": op[price_field], "total": 0}
+        breakdown[key]["count"] += 1
+        breakdown[key]["total"] += op[price_field]
+    total = sum(v["total"] for v in breakdown.values())
+    return {
+        "total": total,
+        "unknown": unknown,
+        "type": sms_type,
+        "breakdown": list(breakdown.values()),
+    }
 
 @app.get("/api/admin/sms/nicks")
 async def sms_nicks(_=Depends(_get_admin)):

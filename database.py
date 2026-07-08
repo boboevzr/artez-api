@@ -4512,6 +4512,59 @@ async def mark_sms_dispatch_sent(dispatch_id: int, sent_count: int):
             WHERE id=$1
         """, dispatch_id, sent_count)
 
+_SMS_OPERATOR_DEFAULTS = [
+    {"operator": "beeline",   "display_name": "Beeline",   "prefixes": [90, 91, 92],     "price_service": 115, "price_ad": 300},
+    {"operator": "uzmobile",  "display_name": "Uzmobile",  "prefixes": [99, 77, 70, 95], "price_service": 145, "price_ad": 350},
+    {"operator": "mobiuz",    "display_name": "MobiUz",    "prefixes": [97, 88, 87],     "price_service": 110, "price_ad": 290},
+    {"operator": "ucell",     "display_name": "Ucell",     "prefixes": [93, 94, 50],     "price_service": 160, "price_ad": 340},
+    {"operator": "humans",    "display_name": "Humans",    "prefixes": [33],              "price_service": 95,  "price_ad": 95},
+    {"operator": "oq",        "display_name": "OQ",        "prefixes": [20],              "price_service": 0,   "price_ad": 0},
+    {"operator": "perfectum", "display_name": "Perfectum", "prefixes": [98, 80],         "price_service": 95,  "price_ad": 95},
+]
+
+async def ensure_sms_operator_prices():
+    if not pool: return
+    import json as _j
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sms_operator_prices (
+                id           SERIAL PRIMARY KEY,
+                operator     TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                prefixes     JSONB NOT NULL DEFAULT '[]',
+                price_service INT NOT NULL DEFAULT 0,
+                price_ad      INT NOT NULL DEFAULT 0,
+                updated_at   TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        # Вставить дефолты если таблица пуста
+        count = await conn.fetchval("SELECT COUNT(*) FROM sms_operator_prices")
+        if count == 0:
+            for op in _SMS_OPERATOR_DEFAULTS:
+                await conn.execute("""
+                    INSERT INTO sms_operator_prices (operator, display_name, prefixes, price_service, price_ad)
+                    VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING
+                """, op["operator"], op["display_name"], _j.dumps(op["prefixes"]),
+                    op["price_service"], op["price_ad"])
+
+async def get_sms_operator_prices() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM sms_operator_prices ORDER BY id")
+        return [dict(r) for r in rows]
+
+async def update_sms_operator_price(op_id: int, display_name: str, prefixes: list,
+                                     price_service: int, price_ad: int) -> dict:
+    if not pool: return {}
+    import json as _j
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE sms_operator_prices
+            SET display_name=$2, prefixes=$3, price_service=$4, price_ad=$5, updated_at=NOW()
+            WHERE id=$1 RETURNING *
+        """, op_id, display_name, _j.dumps(prefixes), price_service, price_ad)
+        return dict(row) if row else {}
+
 def _sms_date_range(start_date: str, end_date: str):
     from datetime import datetime, timezone, timedelta
     tz5 = timezone(timedelta(hours=5))
