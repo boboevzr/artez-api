@@ -3186,6 +3186,20 @@ async def reject_cash_handover(handover_id: int, rejected_by: int) -> dict:
         """, handover_id, rejected_by)
         return dict(row) if row else {}
 
+async def cancel_cash_handover(handover_id: int, cancelled_by: int, is_admin: bool = False) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        # Admin can cancel any, staff only pending own
+        if is_admin:
+            row = await conn.fetchrow(
+                "UPDATE cash_handovers SET status='cancelled', confirmed_at=NOW(), confirmed_by=$2 WHERE id=$1 RETURNING *",
+                handover_id, cancelled_by)
+        else:
+            row = await conn.fetchrow(
+                "UPDATE cash_handovers SET status='cancelled', confirmed_at=NOW(), confirmed_by=$2 WHERE id=$1 AND from_staff_id=$2 AND status='pending' RETURNING *",
+                handover_id, cancelled_by)
+        return dict(row) if row else {}
+
 async def update_handover_tg_msg(handover_id: int, tg_chat_id: int, tg_msg_id: int):
     if not pool: return
     async with pool.acquire() as conn:

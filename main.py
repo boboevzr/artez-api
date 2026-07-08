@@ -4451,6 +4451,23 @@ async def reject_safe_deposit(deposit_id: int, staff=Depends(get_current_staff))
     return {"ok": True}
 
 
+@app.delete("/api/admin/cash/handovers/{handover_id}")
+async def admin_cancel_handover(handover_id: int, staff=Depends(_get_admin)):
+    row = await db.cancel_cash_handover(handover_id, staff["id"], is_admin=True)
+    if not row:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    return {"ok": True}
+
+
+@app.delete("/api/admin/cash/my-handovers/{handover_id}")
+async def staff_cancel_own_handover(handover_id: int, staff=Depends(get_current_staff)):
+    is_admin = staff.get("role") == "admin"
+    row = await db.cancel_cash_handover(handover_id, staff["id"], is_admin=is_admin)
+    if not row:
+        raise HTTPException(status_code=404, detail="Не найдено или нет прав")
+    return {"ok": True}
+
+
 # ── Расходы ───────────────────────────────────────────────────────────────────
 
 @app.get("/api/admin/expenses/categories")
