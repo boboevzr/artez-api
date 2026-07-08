@@ -4512,67 +4512,75 @@ async def mark_sms_dispatch_sent(dispatch_id: int, sent_count: int):
             WHERE id=$1
         """, dispatch_id, sent_count)
 
+def _sms_date_range(start_date: str, end_date: str):
+    from datetime import datetime, timezone, timedelta
+    tz5 = timezone(timedelta(hours=5))
+    s = datetime.fromisoformat(start_date).replace(hour=0,  minute=0,  second=0,  tzinfo=tz5)
+    e = datetime.fromisoformat(end_date).replace(  hour=23, minute=59, second=59, tzinfo=tz5)
+    return s, e
+
 async def get_sms_stats_by_month(start_date: str, end_date: str) -> list:
     if not pool: return []
+    s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
                 TO_CHAR(COALESCE(sent_at, scheduled_at) AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM') AS month,
-                COUNT(*) AS dispatches,
-                SUM(sent_count) AS sent_sms,
-                SUM(jsonb_array_length(phones)) AS total_phones
+                COUNT(*)::int AS dispatches,
+                COALESCE(SUM(sent_count),0)::int AS sent_sms,
+                COALESCE(SUM(jsonb_array_length(phones)),0)::int AS total_phones
             FROM sms_dispatches
-            WHERE status IN ('sent','pending')
-              AND COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
             GROUP BY 1 ORDER BY 1 DESC
-        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        """, s, e)
         return [dict(r) for r in rows]
 
 async def get_sms_stats_by_date(start_date: str, end_date: str) -> list:
     if not pool: return []
+    s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
                 TO_CHAR(COALESCE(sent_at, scheduled_at) AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM-DD') AS date,
-                COUNT(*) AS dispatches,
-                SUM(sent_count) AS sent_sms,
-                SUM(jsonb_array_length(phones)) AS total_phones
+                COUNT(*)::int AS dispatches,
+                COALESCE(SUM(sent_count),0)::int AS sent_sms,
+                COALESCE(SUM(jsonb_array_length(phones)),0)::int AS total_phones
             FROM sms_dispatches
-            WHERE status IN ('sent','pending')
-              AND COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
             GROUP BY 1 ORDER BY 1 DESC
-        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        """, s, e)
         return [dict(r) for r in rows]
 
 async def get_sms_dispatches_report(start_date: str, end_date: str) -> list:
     if not pool: return []
+    s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, name, from_nick,
                    LEFT(message, 60) AS message_preview,
-                   jsonb_array_length(phones) AS total_phones,
-                   sent_count, status,
+                   jsonb_array_length(phones)::int AS total_phones,
+                   COALESCE(sent_count,0)::int AS sent_count, status,
                    TO_CHAR(scheduled_at AT TIME ZONE 'Asia/Tashkent', 'DD.MM.YYYY HH24:MI') AS scheduled,
                    TO_CHAR(sent_at     AT TIME ZONE 'Asia/Tashkent', 'DD.MM.YYYY HH24:MI') AS sent_at
             FROM sms_dispatches
-            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
             ORDER BY id DESC LIMIT 200
-        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        """, s, e)
         return [dict(r) for r in rows]
 
 async def get_sms_dispatches_for_export(start_date: str, end_date: str) -> list:
     if not pool: return []
+    s, e = _sms_date_range(start_date, end_date)
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, name, from_nick, message,
-                   phones::text AS phones_json,
-                   jsonb_array_length(phones) AS total_phones,
-                   sent_count, status,
+                   jsonb_array_length(phones)::int AS total_phones,
+                   COALESCE(sent_count,0)::int AS sent_count, status,
                    scheduled_at AT TIME ZONE 'Asia/Tashkent' AS scheduled_at,
-                   sent_at AT TIME ZONE 'Asia/Tashkent' AS sent_at,
-                   created_at AT TIME ZONE 'Asia/Tashkent' AS created_at
+                   sent_at      AT TIME ZONE 'Asia/Tashkent' AS sent_at,
+                   created_at   AT TIME ZONE 'Asia/Tashkent' AS created_at
             FROM sms_dispatches
-            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1 AND $2
             ORDER BY id DESC
-        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        """, s, e)
         return [dict(r) for r in rows]
