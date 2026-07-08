@@ -8246,9 +8246,9 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
     if not messages:
         raise HTTPException(400, "Нет валидных номеров в группе")
 
-    async with aiohttp.ClientSession() as s:
-        if schedule_time:
-            # Dispatch API для отложенной отправки
+    if schedule_time:
+        # Dispatch API для отложенной отправки
+        async with aiohttp.ClientSession() as s:
             r = await s.post(
                 "https://notify.eskiz.uz/api/message/dispatch/create",
                 headers={"Authorization": f"Bearer {token}"},
@@ -8261,16 +8261,26 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
             )
-        else:
-            # Batch — отправить сейчас
-            r = await s.post(
-                "https://notify.eskiz.uz/api/message/sms/send-batch",
-                headers={"Authorization": f"Bearer {token}"},
-                data={"messages": _json.dumps(messages), "from": frm},
-                timeout=aiohttp.ClientTimeout(total=60),
-            )
-        data = await r.json()
-    return {"ok": True, "total": len(messages), "scheduled": bool(schedule_time), "response": data}
+            data = await r.json(content_type=None)
+        return {"ok": True, "total": len(phones), "scheduled": True, "response": data}
+    else:
+        # Отправить сейчас — индивидуальные запросы (send-batch ненадёжен)
+        results = []
+        async with aiohttp.ClientSession() as s:
+            for m in messages:
+                try:
+                    r = await s.post(
+                        "https://notify.eskiz.uz/api/message/sms/send",
+                        headers={"Authorization": f"Bearer {token}"},
+                        data={"mobile_phone": m["to"], "message": m["text"], "from": frm, "callback_url": ""},
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    )
+                    resp = await r.json(content_type=None)
+                    results.append({"to": m["to"], "status": resp.get("status"), "id": (resp.get("data") or {}).get("id")})
+                except Exception as e:
+                    results.append({"to": m["to"], "error": str(e)})
+        sent = sum(1 for r in results if r.get("status") == "waiting")
+        return {"ok": True, "total": len(messages), "sent": sent, "scheduled": False, "results": results}
 
 
 @app.get("/api/admin/sms/templates")
