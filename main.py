@@ -8217,6 +8217,55 @@ async def sms_contacts_bulk(gid: int, body: dict = Body(...), _=Depends(_get_adm
     return {"ok": True, "added": added}
 
 
+@app.get("/api/admin/sms/groups/{gid}/contacts/export")
+async def sms_contacts_export(gid: int, _=Depends(_get_admin)):
+    import csv, io
+    from fastapi.responses import StreamingResponse
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT name, phone FROM sms_contacts WHERE group_id=$1 ORDER BY created_at DESC", gid
+        )
+        grp = await conn.fetchrow("SELECT name FROM sms_groups WHERE id=$1", gid)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Имя", "Телефон"])
+    for r in rows:
+        w.writerow([r["name"] or "", r["phone"]])
+    content = buf.getvalue().encode("utf-8-sig")
+    grp_name = (grp["name"] if grp else f"group_{gid}").replace(" ", "_")
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename=sms_contacts_{grp_name}.csv"},
+    )
+
+@app.get("/api/admin/sms/contacts/export")
+async def sms_all_contacts_export(group_id: int = None, _=Depends(_get_admin)):
+    import csv, io
+    from fastapi.responses import StreamingResponse
+    async with db.pool.acquire() as conn:
+        if group_id:
+            rows = await conn.fetch(
+                "SELECT c.name, c.phone, g.name AS group_name FROM sms_contacts c "
+                "JOIN sms_groups g ON c.group_id=g.id WHERE c.group_id=$1 ORDER BY c.created_at DESC", group_id
+            )
+        else:
+            rows = await conn.fetch(
+                "SELECT c.name, c.phone, g.name AS group_name FROM sms_contacts c "
+                "JOIN sms_groups g ON c.group_id=g.id ORDER BY g.name, c.created_at DESC"
+            )
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Имя", "Телефон", "Группа"])
+    for r in rows:
+        w.writerow([r["name"] or "", r["phone"], r["group_name"] or ""])
+    content = buf.getvalue().encode("utf-8-sig")
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": "attachment; filename=sms_contacts.csv"},
+    )
+
 @app.get("/api/admin/sms/nicks")
 async def sms_nicks(_=Depends(_get_admin)):
     """Список доступных ников/alpha-name из Eskiz."""
