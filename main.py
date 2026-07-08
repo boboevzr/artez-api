@@ -8248,6 +8248,10 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
 
     if schedule_time:
         # Dispatch API для отложенной отправки
+        # Eskiz требует start_time в формате YYYY-MM-DD HH:MM:SS
+        st = schedule_time.strip()
+        if len(st) == 16:   # "YYYY-MM-DD HH:MM" → добавляем секунды
+            st += ":00"
         async with aiohttp.ClientSession() as s:
             r = await s.post(
                 "https://notify.eskiz.uz/api/message/dispatch/create",
@@ -8257,15 +8261,14 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
                     "message":    message,
                     "from":       frm,
                     "phones":     _json.dumps(phones),
-                    "start_time": schedule_time,
+                    "start_time": st,
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
             )
-            raw = await r.text()
-            try:
-                data = _json.loads(raw.strip())
-            except Exception:
-                data = {"raw": raw.strip()}
+            data = await _eskiz_parse(r)
+        logging.info(f"dispatch/create response: {data}")
+        if isinstance(data, dict) and data.get("status") not in (None, "success", "waiting", "ok"):
+            raise HTTPException(502, detail=data.get("message") or str(data))
         return {"ok": True, "total": len(phones), "scheduled": True, "response": data}
     else:
         # Отправить сейчас — индивидуальные запросы (send-batch ненадёжен)
@@ -8343,6 +8346,14 @@ async def sms_templates_delete(tid: int, _=Depends(_get_admin)):
 
 # ── SMS ОТЧЁТЫ (прокси к Eskiz API) ──────────────────────────────────────
 
+async def _eskiz_parse(r) -> dict:
+    """Безопасно парсит ответ Eskiz (возвращает text/plain вместо JSON)."""
+    raw = await r.text()
+    try:
+        return _json.loads(raw.strip())
+    except Exception:
+        return {"raw": raw.strip(), "status_code": r.status}
+
 async def _eskiz_post(path: str, data: dict) -> dict:
     token = await _eskiz_get_token()
     if not token:
@@ -8354,7 +8365,7 @@ async def _eskiz_post(path: str, data: dict) -> dict:
             data=data,
             timeout=aiohttp.ClientTimeout(total=30),
         )
-        return await r.json()
+        return await _eskiz_parse(r)
 
 async def _eskiz_get(path: str) -> dict:
     token = await _eskiz_get_token()
@@ -8366,7 +8377,7 @@ async def _eskiz_get(path: str) -> dict:
             headers={"Authorization": f"Bearer {token}"},
             timeout=aiohttp.ClientTimeout(total=30),
         )
-        return await r.json()
+        return await _eskiz_parse(r)
 
 @app.post("/api/admin/sms/reports/messages")
 async def sms_report_messages(body: dict = Body(...), _=Depends(_get_admin)):
