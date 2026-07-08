@@ -4610,7 +4610,7 @@ async def approve_expense(expense_id: int, staff=Depends(get_current_staff)):
     new_status = row.get("status","")
     # Пуш создателю расхода
     if row.get("created_by_staff_id"):
-        title = "✅ Расход утверждён" if new_status == "approved" else "📋 Расход ждёт Admin"
+        title = "✅ Расход утверждён" if new_status == "paid" else "📋 Расход ждёт Admin"
         body  = f"{approver} · {int(float(row.get('amount',0))):,} сум"
         asyncio.create_task(send_web_push(row["created_by_staff_id"], title=title, body=body, push_type="expense_approved"))
     # Если mgr_approved — пуш admin

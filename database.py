@@ -4441,7 +4441,7 @@ async def approve_expense_manager(expense_id: int, manager_id: int) -> dict:
             JOIN expense_categories ec ON ec.id=e.category_id
             WHERE e.id=$1
         """, expense_id)
-        new_status = 'approved' if cat and cat['approve_level'] == 'manager' else 'mgr_approved'
+        new_status = 'paid' if cat and cat['approve_level'] == 'manager' else 'mgr_approved'
         row = await conn.fetchrow("""
             UPDATE expenses SET status=$2, manager_id=$3, manager_at=NOW()
             WHERE id=$1 AND status='pending' RETURNING *
@@ -4452,7 +4452,7 @@ async def approve_expense_admin(expense_id: int, admin_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            UPDATE expenses SET status='approved', admin_id=$2, admin_at=NOW()
+            UPDATE expenses SET status='paid', admin_id=$2, admin_at=NOW()
             WHERE id=$1 AND status IN ('pending','mgr_approved') RETURNING *
         """, expense_id, admin_id)
         return dict(row) if row else {}
