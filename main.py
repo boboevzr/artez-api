@@ -4346,6 +4346,71 @@ async def bank_deposits_list(staff=Depends(get_current_staff)):
     rows = await db.get_bank_deposits()
     return {"ok": True, "deposits": rows}
 
+@app.post("/api/admin/cash/safe-deposit")
+async def admin_safe_deposit(
+    amount: float = Body(..., embed=True),
+    note:   str   = Body("",  embed=True),
+    staff=Depends(get_current_staff),
+):
+    """Создать pending-запрос сдачи в сейф (для администратора из staff.html)."""
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="amount required")
+    row = await db.add_safe_deposit(staff["id"], amount, note)
+    if not row:
+        raise HTTPException(status_code=500, detail="Ошибка создания")
+    handover_id = row["id"]
+    tg_id = staff.get("tg_id")
+    if tg_id:
+        from_name = f"{staff.get('last_name','')} {staff.get('first_name','')}".strip()
+        fmt_amt = f"{round(amount):,}".replace(",", " ")
+        text = (f"🔒 <b>Сдача в сейф</b>\n"
+                f"От: {from_name}\n"
+                f"Сумма: {fmt_amt} сум"
+                + (f"\n📝 {note}" if note else ""))
+        kb = {"inline_keyboard": [[
+            {"text": "✅ Подтвердить", "callback_data": f"safe_confirm_{handover_id}"},
+            {"text": "❌ Отклонить",   "callback_data": f"safe_reject_{handover_id}"},
+        ]]}
+        msg_id = await _send_tg_with_kb(str(tg_id), text, kb)
+        if msg_id:
+            await db.update_handover_tg_msg(handover_id, int(tg_id), msg_id)
+    return {"ok": True, "id": handover_id}
+
+@app.get("/api/admin/cash/pending-safe-deposits")
+async def pending_safe_deposits(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    rows = await db.get_pending_safe_deposits()
+    return {"ok": True, "deposits": rows}
+
+@app.post("/api/admin/cash/safe-deposit/{deposit_id}/confirm")
+async def confirm_safe_deposit(deposit_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    row = await db.confirm_cash_handover(deposit_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    if row.get("tg_chat_id") and row.get("tg_msg_id"):
+        fmt_amt = f"{round(row.get('amount',0)):,}".replace(",", " ")
+        await _edit_tg_handover_msg(row["tg_chat_id"], row["tg_msg_id"],
+                                    f"✅ Сдача в сейф подтверждена\nСумма: {fmt_amt} сум")
+    return {"ok": True}
+
+@app.post("/api/admin/cash/safe-deposit/{deposit_id}/reject")
+async def reject_safe_deposit(deposit_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    row = await db.reject_cash_handover(deposit_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Не найдено")
+    if row.get("tg_chat_id") and row.get("tg_msg_id"):
+        fmt_amt = f"{round(row.get('amount',0)):,}".replace(",", " ")
+        await _edit_tg_handover_msg(row["tg_chat_id"], row["tg_msg_id"],
+                                    f"❌ Сдача в сейф отклонена\nСумма: {fmt_amt} сум")
+    return {"ok": True}
+
 
 # ── Расходы ───────────────────────────────────────────────────────────────────
 

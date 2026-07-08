@@ -3244,6 +3244,31 @@ async def get_my_received_handovers(staff_id: int) -> list:
         """, staff_id)
         return [dict(r) for r in rows]
 
+async def add_safe_deposit(from_staff_id: int, amount: float, note: str = '') -> dict:
+    """Сдача в сейф от администратора: создаёт pending запись для подтверждения."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        shift_id = await _get_current_shift_id(conn)
+        row = await conn.fetchrow("""
+            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, to_type, status, shift_id)
+            VALUES ($1, NULL, $2, $3, 'safe', 'pending', $4) RETURNING *
+        """, from_staff_id, amount, note, shift_id)
+        return dict(row) if row else {}
+
+async def get_pending_safe_deposits() -> list:
+    """Pending сдачи в сейф для отображения в admin.html."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ch.*,
+                   TRIM(COALESCE(sf.last_name,'') || ' ' || COALESCE(sf.first_name,'')) AS from_name
+            FROM cash_handovers ch
+            LEFT JOIN staff sf ON sf.id = ch.from_staff_id
+            WHERE ch.to_type='safe' AND ch.status='pending'
+            ORDER BY ch.created_at DESC
+        """)
+        return [dict(r) for r in rows]
+
 async def create_bank_deposit(from_staff_id: int, amount: float, to_type: str, note: str = '') -> dict:
     """Инкассация: наличные сданы в банк/сейф. Сразу подтверждена."""
     if not pool: return {}
