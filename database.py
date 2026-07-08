@@ -3006,11 +3006,14 @@ async def get_channel_stop_full(order_id: int) -> dict | None:
 # ── Касса / наличные ──────────────────────────────────────────────────────────
 
 async def get_cashiers() -> list:
-    """Ответственные за кассу (can_manage_cash)."""
+    """Ответственные за кассу (can_manage_cash). Admins первыми."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, first_name, last_name FROM staff WHERE can_manage_cash=TRUE AND active=TRUE ORDER BY last_name, first_name")
+            """SELECT id, first_name, last_name, role, position
+               FROM staff
+               WHERE can_manage_cash=TRUE AND active=TRUE
+               ORDER BY (role='admin') DESC, last_name, first_name""")
         return [dict(r) for r in rows]
 
 async def get_my_cash_balance(staff_id: int) -> dict:
