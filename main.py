@@ -4490,14 +4490,16 @@ async def create_expense_category(
     receipt_required: bool  = Body(False,   embed=True),
     amount_threshold: float = Body(None,    embed=True),
     sort_order:       int   = Body(0,       embed=True),
+    for_staff:        bool  = Body(False,   embed=True),
     staff=Depends(get_current_staff),
 ):
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только для admin")
     cat = await db.create_expense_category(
         name_ru, name_uz, icon, parent_id, approve_level,
-        receipt_required, amount_threshold, sort_order)
+        receipt_required, amount_threshold, sort_order, for_staff)
     return {"ok": True, "category": cat}
+
 
 @app.put("/api/admin/expenses/categories/{cat_id}")
 async def update_expense_category(
@@ -4511,13 +4513,14 @@ async def update_expense_category(
     amount_threshold: float = Body(None,    embed=True),
     sort_order:       int   = Body(0,       embed=True),
     active:           bool  = Body(True,    embed=True),
+    for_staff:        bool  = Body(False,   embed=True),
     staff=Depends(get_current_staff),
 ):
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только для admin")
     cat = await db.update_expense_category(
         cat_id, name_ru, name_uz, icon, parent_id, approve_level,
-        receipt_required, amount_threshold, sort_order, active)
+        receipt_required, amount_threshold, sort_order, active, for_staff)
     if not cat:
         raise HTTPException(status_code=404, detail="Категория не найдена")
     return {"ok": True, "category": cat}
@@ -4538,13 +4541,14 @@ async def delete_expense_category(cat_id: int, staff=Depends(get_current_staff))
 
 @app.post("/api/admin/expenses")
 async def create_expense(
-    category_id: int   = Body(..., embed=True),
-    amount:      float = Body(..., embed=True),
-    description: str   = Body("",  embed=True),
+    category_id:  int   = Body(..., embed=True),
+    amount:       float = Body(..., embed=True),
+    description:  str   = Body("",   embed=True),
+    for_staff_id: int   = Body(None, embed=True),
     staff=Depends(get_current_staff),
 ):
     branch = staff.get("branch") or ""
-    row = await db.create_expense(category_id, amount, description, staff["id"], branch)
+    row = await db.create_expense(category_id, amount, description, staff["id"], branch, for_staff_id)
     if not row:
         raise HTTPException(status_code=500, detail="Ошибка создания расхода")
     # Пуш менеджерам/admin о новом расходе

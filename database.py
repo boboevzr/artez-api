@@ -376,6 +376,10 @@ async def create_tables():
         # Передачи наличных: TG-сообщение для редактирования после confirm/reject
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS tg_chat_id BIGINT DEFAULT NULL",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS tg_msg_id BIGINT DEFAULT NULL",
+        # Расходы: получатель (сотрудник) — для зарплаты/аванса
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS for_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        # Категории расходов: флаг «требует указать сотрудника»
+        "ALTER TABLE expense_categories ADD COLUMN IF NOT EXISTS for_staff BOOLEAN DEFAULT FALSE",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -4294,31 +4298,31 @@ async def get_expense_categories() -> list:
 async def create_expense_category(name_ru: str, name_uz: str, icon: str,
                                    parent_id, approve_level: str,
                                    receipt_required: bool, amount_threshold,
-                                   sort_order: int) -> dict:
+                                   sort_order: int, for_staff: bool = False) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO expense_categories
-                (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+                (name_ru, name_uz, icon, parent_id, approve_level, receipt_required, amount_threshold, sort_order, for_staff)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
         """, name_ru, name_uz, icon, parent_id, approve_level,
-             receipt_required, amount_threshold, sort_order)
+             receipt_required, amount_threshold, sort_order, for_staff)
         return dict(row) if row else {}
 
 async def update_expense_category(cat_id: int, name_ru: str, name_uz: str, icon: str,
                                    parent_id, approve_level: str,
                                    receipt_required: bool, amount_threshold,
-                                   sort_order: int, active: bool) -> dict:
+                                   sort_order: int, active: bool, for_staff: bool = False) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE expense_categories
             SET name_ru=$2, name_uz=$3, icon=$4, parent_id=$5,
                 approve_level=$6, receipt_required=$7, amount_threshold=$8,
-                sort_order=$9, active=$10
+                sort_order=$9, active=$10, for_staff=$11
             WHERE id=$1 RETURNING *
         """, cat_id, name_ru, name_uz, icon, parent_id, approve_level,
-             receipt_required, amount_threshold, sort_order, active)
+             receipt_required, amount_threshold, sort_order, active, for_staff)
         return dict(row) if row else {}
 
 async def delete_expense_category(cat_id: int) -> dict:
@@ -4336,13 +4340,13 @@ async def delete_expense_category(cat_id: int) -> dict:
         return {"ok": True}
 
 async def create_expense(category_id: int, amount: float, description: str,
-                         staff_id: int, branch: str) -> dict:
+                         staff_id: int, branch: str, for_staff_id: int = None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO expenses (category_id, amount, description, created_by_staff_id, branch)
-            VALUES ($1,$2,$3,$4,$5) RETURNING *
-        """, category_id, amount, description, staff_id, branch)
+            INSERT INTO expenses (category_id, amount, description, created_by_staff_id, branch, for_staff_id)
+            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
+        """, category_id, amount, description, staff_id, branch, for_staff_id)
         return dict(row) if row else {}
 
 async def get_expenses(branch: str = None, status: str = None,
@@ -4364,13 +4368,15 @@ async def get_expenses(branch: str = None, status: str = None,
                    ep.name_ru AS parent_name_ru, ep.name_uz AS parent_name_uz, ep.icon AS parent_icon,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name,
                    TRIM(COALESCE(sm.last_name,'') || ' ' || COALESCE(sm.first_name,'')) AS manager_name,
-                   TRIM(COALESCE(sa.last_name,'') || ' ' || COALESCE(sa.first_name,'')) AS admin_name
+                   TRIM(COALESCE(sa.last_name,'') || ' ' || COALESCE(sa.first_name,'')) AS admin_name,
+                   TRIM(COALESCE(sf.last_name,'') || ' ' || COALESCE(sf.first_name,'')) AS for_staff_name
             FROM expenses e
             LEFT JOIN expense_categories ec ON ec.id = e.category_id
             LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
             LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
             LEFT JOIN staff sm ON sm.id = e.manager_id
             LEFT JOIN staff sa ON sa.id = e.admin_id
+            LEFT JOIN staff sf ON sf.id = e.for_staff_id
             {where}
             ORDER BY e.created_at DESC LIMIT {limit}
         """, *params)
