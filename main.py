@@ -8261,7 +8261,11 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
                 },
                 timeout=aiohttp.ClientTimeout(total=30),
             )
-            data = await r.json(content_type=None)
+            raw = await r.text()
+            try:
+                data = _json.loads(raw.strip())
+            except Exception:
+                data = {"raw": raw.strip()}
         return {"ok": True, "total": len(phones), "scheduled": True, "response": data}
     else:
         # Отправить сейчас — индивидуальные запросы (send-batch ненадёжен)
