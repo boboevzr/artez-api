@@ -5098,6 +5098,23 @@ async def close_shift(
     row = await db.close_cash_shift(shift_date or date.today().isoformat(), name, note)
     return {"ok": True, "shift": row}
 
+@app.post("/api/admin/cash/open-shift")
+async def open_shift(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    row = await db.open_cash_shift(staff.get("id"))
+    return {"ok": True, "shift": row}
+
+@app.get("/api/admin/cash/current-shift")
+async def current_shift(_=Depends(get_current_staff)):
+    row = await db.get_current_shift()
+    return {"ok": True, "shift": row if row else None}
+
+@app.get("/api/admin/cash/dashboard")
+async def cash_dashboard(_=Depends(get_current_staff)):
+    data = await db.get_cash_dashboard()
+    return {"ok": True, **data}
+
 @app.get("/api/admin/cash/shifts")
 async def get_shifts(_=Depends(get_current_staff)):
     rows = await db.get_cash_shifts()

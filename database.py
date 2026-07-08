@@ -362,6 +362,13 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_sms_contacts_group ON sms_contacts(group_id)",
         "CREATE INDEX IF NOT EXISTS idx_sms_contacts_status ON sms_contacts(status)",
+        # Смены: поддержка открытия смены и привязки операций
+        "ALTER TABLE cash_shifts ADD COLUMN IF NOT EXISTS opened_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE cash_shifts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'closed'",
+        "ALTER TABLE cash_shifts ADD COLUMN IF NOT EXISTS opened_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -2554,38 +2561,79 @@ async def get_payments_log(date_from: str, date_to: str) -> list:
 async def close_cash_shift(shift_date: str, closed_by: str, note: str) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            WITH totals AS (
-                SELECT
-                    COALESCE(SUM(CASE WHEN payment_method='cash' THEN
-                        CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
-                             WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
-                             ELSE 0 END ELSE 0 END),0) AS cash_total,
-                    COALESCE(SUM(CASE WHEN payment_method='card' THEN
-                        CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
-                             WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
-                             ELSE 0 END ELSE 0 END),0) AS card_total,
-                    COALESCE(SUM(CASE WHEN payment_method='transfer' THEN
-                        CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
-                             WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
-                             ELSE 0 END ELSE 0 END),0) AS transfer_total,
-                    COUNT(*) FILTER (WHERE payment_status IN ('paid','partial')) AS orders_count
-                FROM orders
-                WHERE created_at::date = $1
-            )
-            INSERT INTO cash_shifts (shift_date, closed_by, cash_total, card_total, transfer_total, grand_total, orders_count, note)
-            SELECT $1, $2, cash_total, card_total, transfer_total,
-                   cash_total+card_total+transfer_total, orders_count, $3
-            FROM totals
-            RETURNING *
-        """, shift_date, closed_by, note)
+        totals = await conn.fetchrow("""
+            SELECT
+                COALESCE(SUM(CASE WHEN payment_method='cash' THEN
+                    CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
+                         WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                         ELSE 0 END ELSE 0 END),0) AS cash_total,
+                COALESCE(SUM(CASE WHEN payment_method='card' THEN
+                    CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
+                         WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                         ELSE 0 END ELSE 0 END),0) AS card_total,
+                COALESCE(SUM(CASE WHEN payment_method='transfer' THEN
+                    CASE WHEN payment_status='paid' THEN COALESCE(total_price,0)-COALESCE(discount_sum,0)
+                         WHEN payment_status='partial' THEN COALESCE(prepaid_amount,0)
+                         ELSE 0 END ELSE 0 END),0) AS transfer_total,
+                COUNT(*) FILTER (WHERE payment_status IN ('paid','partial')) AS orders_count
+            FROM orders WHERE created_at::date = $1
+        """, shift_date)
+        ct = float(totals['cash_total']); kt = float(totals['card_total'])
+        tt = float(totals['transfer_total']); oc = int(totals['orders_count'])
+        open_shift = await conn.fetchrow(
+            "SELECT id FROM cash_shifts WHERE status='open' ORDER BY opened_at DESC LIMIT 1")
+        if open_shift:
+            row = await conn.fetchrow("""
+                UPDATE cash_shifts SET
+                    shift_date=$1, closed_by=$2, note=$3, status='closed', closed_at=NOW(),
+                    cash_total=$4, card_total=$5, transfer_total=$6, grand_total=$7, orders_count=$8
+                WHERE id=$9 RETURNING *
+            """, shift_date, closed_by, note, ct, kt, tt, ct+kt+tt, oc, open_shift['id'])
+        else:
+            row = await conn.fetchrow("""
+                INSERT INTO cash_shifts (shift_date, closed_by, cash_total, card_total, transfer_total, grand_total, orders_count, note, status, closed_at)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'closed',NOW()) RETURNING *
+            """, shift_date, closed_by, ct, kt, tt, ct+kt+tt, oc, note)
         return dict(row) if row else {}
 
-async def get_cash_shifts(limit: int = 30) -> list:
+async def open_cash_shift(opened_by_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE cash_shifts SET status='abandoned' WHERE status='open'")
+        row = await conn.fetchrow("""
+            INSERT INTO cash_shifts (opened_at, opened_by, status, shift_date)
+            VALUES (NOW(), $1, 'open', NOW()::date) RETURNING *
+        """, opened_by_id)
+        return dict(row) if row else {}
+
+async def get_current_shift() -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT cs.*,
+                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS opener_name
+            FROM cash_shifts cs
+            LEFT JOIN staff s ON s.id = cs.opened_by
+            WHERE cs.status = 'open'
+            ORDER BY cs.opened_at DESC LIMIT 1
+        """)
+        return dict(row) if row else {}
+
+async def _get_current_shift_id(conn) -> int:
+    row = await conn.fetchrow(
+        "SELECT id FROM cash_shifts WHERE status='open' ORDER BY opened_at DESC LIMIT 1")
+    return row['id'] if row else None
+
+async def get_cash_shifts(limit: int = 50) -> list:
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT * FROM cash_shifts ORDER BY shift_date DESC, closed_at DESC LIMIT $1", limit)
+        rows = await conn.fetch("""
+            SELECT cs.*,
+                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS opener_name
+            FROM cash_shifts cs
+            LEFT JOIN staff s ON s.id = cs.opened_by
+            ORDER BY COALESCE(cs.opened_at, cs.closed_at) DESC LIMIT $1
+        """, limit)
         return [dict(r) for r in rows]
 
 # ── order_payments ────────────────────────────────────────────────────────────
@@ -3071,17 +3119,19 @@ async def get_cash_balance() -> list:
     """Баланс наличных по всем сотрудникам (два уровня: исполнители + ответственные)."""
     if not pool: return []
     async with pool.acquire() as conn:
-        rows = await conn.fetch("SELECT id, first_name, last_name, can_manage_cash FROM staff WHERE active=TRUE ORDER BY can_manage_cash DESC, last_name, first_name")
+        rows = await conn.fetch("SELECT id, first_name, last_name, can_manage_cash, role FROM staff WHERE active=TRUE ORDER BY (role='admin') DESC, can_manage_cash DESC, last_name, first_name")
         result = []
         for s in rows:
             bal = await get_my_cash_balance(s['id'])
-            if not s['can_manage_cash'] and bal['collected'] == 0 and bal['received_from_others'] == 0:
-                continue  # пропускаем исполнителей без движения; ответственных за кассу — всегда показываем
+            is_admin = s['role'] == 'admin'
+            if not is_admin and not s['can_manage_cash'] and bal['collected'] == 0 and bal['received_from_others'] == 0:
+                continue
             result.append({
                 "id": s['id'],
                 "first_name": s['first_name'],
                 "last_name":  s['last_name'],
                 "can_manage_cash": s['can_manage_cash'],
+                "role": s['role'],
                 **bal,
             })
         return result
@@ -3089,10 +3139,11 @@ async def get_cash_balance() -> list:
 async def add_cash_handover(from_staff_id: int, to_staff_id: int, amount: float, note: str) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
+        shift_id = await _get_current_shift_id(conn)
         row = await conn.fetchrow("""
-            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note)
-            VALUES ($1,$2,$3,$4) RETURNING *
-        """, from_staff_id, to_staff_id, amount, note)
+            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, shift_id)
+            VALUES ($1,$2,$3,$4,$5) RETURNING *
+        """, from_staff_id, to_staff_id, amount, note, shift_id)
         return dict(row) if row else {}
 
 async def get_cash_handovers(limit: int = 50) -> list:
@@ -3151,10 +3202,11 @@ async def create_bank_deposit(from_staff_id: int, amount: float, to_type: str, n
     """Инкассация: наличные сданы в банк/сейф. Сразу подтверждена."""
     if not pool: return {}
     async with pool.acquire() as conn:
+        shift_id = await _get_current_shift_id(conn)
         row = await conn.fetchrow("""
-            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, to_type, status, confirmed_at)
-            VALUES ($1, NULL, $2, $3, $4, 'confirmed', NOW()) RETURNING *
-        """, from_staff_id, amount, note, to_type)
+            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, to_type, status, confirmed_at, shift_id)
+            VALUES ($1, NULL, $2, $3, $4, 'confirmed', NOW(), $5) RETURNING *
+        """, from_staff_id, amount, note, to_type, shift_id)
         return dict(row) if row else {}
 
 async def get_bank_deposits(limit: int = 100) -> list:
@@ -3170,6 +3222,34 @@ async def get_bank_deposits(limit: int = 100) -> list:
             ORDER BY ch.created_at DESC LIMIT $1
         """, limit)
         return [dict(r) for r in rows]
+
+async def get_cash_dashboard() -> dict:
+    """Сводные метрики для дашборда кассы."""
+    if not pool: return {}
+    balances = await get_cash_balance()
+    staff_on_hand   = sum(float(b.get('on_hand', 0)) for b in balances if b.get('role') != 'admin' and not b.get('can_manage_cash'))
+    manager_on_hand = sum(float(b.get('on_hand', 0)) for b in balances if b.get('role') != 'admin' and b.get('can_manage_cash'))
+    admin_on_hand   = sum(float(b.get('on_hand', 0)) for b in balances if b.get('role') == 'admin')
+    from datetime import date as _date
+    today = _date.today()
+    async with pool.acquire() as conn:
+        r1 = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount),0) AS total FROM cash_handovers WHERE to_type IN ('bank','safe') AND created_at::date=$1", today)
+        r2 = await conn.fetchrow("""
+            SELECT COALESCE(SUM(GREATEST(0, COALESCE(total_price,0)-COALESCE(discount_sum,0)-COALESCE(prepaid_amount,0))),0) AS total
+            FROM orders WHERE payment_method='cash' AND payment_status IN ('unpaid','partial') AND status NOT IN ('cancelled')
+        """)
+        r3 = await conn.fetchrow(
+            "SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt FROM expenses WHERE status IN ('pending','mgr_approved')")
+    return {
+        'staff_on_hand':          staff_on_hand,
+        'manager_on_hand':        manager_on_hand,
+        'admin_on_hand':          admin_on_hand,
+        'banked_today':           float(r1['total']),
+        'pending_client_cash':    float(r2['total']),
+        'expenses_pending_sum':   float(r3['total']),
+        'expenses_pending_count': int(r3['cnt']),
+    }
 
 async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
     if not pool: return {}
