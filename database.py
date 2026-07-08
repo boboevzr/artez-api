@@ -251,6 +251,7 @@ async def create_tables():
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'pending'",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS to_type VARCHAR(20) DEFAULT 'staff'",
         # Платежи: подтверждение и фото чека
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed BOOLEAN DEFAULT FALSE",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS confirmed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
@@ -3104,6 +3105,7 @@ async def get_cash_handovers(limit: int = 50) -> list:
             FROM cash_handovers ch
             LEFT JOIN staff sf ON sf.id = ch.from_staff_id
             LEFT JOIN staff st ON st.id = ch.to_staff_id
+            WHERE ch.to_type='staff' OR ch.to_type IS NULL
             ORDER BY ch.created_at DESC LIMIT $1
         """, limit)
         return [dict(r) for r in rows]
@@ -3140,9 +3142,33 @@ async def get_my_sent_handovers(staff_id: int) -> list:
                    TRIM(COALESCE(st.last_name,'') || ' ' || COALESCE(st.first_name,'')) AS to_name
             FROM cash_handovers ch
             LEFT JOIN staff st ON st.id = ch.to_staff_id
-            WHERE ch.from_staff_id = $1
+            WHERE ch.from_staff_id = $1 AND (ch.to_type='staff' OR ch.to_type IS NULL)
             ORDER BY ch.created_at DESC LIMIT 50
         """, staff_id)
+        return [dict(r) for r in rows]
+
+async def create_bank_deposit(from_staff_id: int, amount: float, to_type: str, note: str = '') -> dict:
+    """Инкассация: наличные сданы в банк/сейф. Сразу подтверждена."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO cash_handovers (from_staff_id, to_staff_id, amount, note, to_type, status, confirmed_at)
+            VALUES ($1, NULL, $2, $3, $4, 'confirmed', NOW()) RETURNING *
+        """, from_staff_id, amount, note, to_type)
+        return dict(row) if row else {}
+
+async def get_bank_deposits(limit: int = 100) -> list:
+    """История инкассаций (bank/safe)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ch.*,
+                   TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS from_name
+            FROM cash_handovers ch
+            LEFT JOIN staff s ON s.id = ch.from_staff_id
+            WHERE ch.to_type IN ('bank','safe')
+            ORDER BY ch.created_at DESC LIMIT $1
+        """, limit)
         return [dict(r) for r in rows]
 
 async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
