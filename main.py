@@ -8405,9 +8405,13 @@ async def _eskiz_get(path: str) -> dict:
 
 @app.post("/api/admin/sms/reports/messages")
 async def sms_report_messages(body: dict = Body(...), _=Depends(_get_admin)):
+    sd = (body.get("start_date") or "")
+    ed = (body.get("end_date") or "")
+    if len(sd) == 10: sd += " 00:00"
+    if len(ed) == 10: ed += " 23:59"
     return await _eskiz_post("/message/sms/get-user-messages", {
-        "start_date": body.get("start_date", ""),
-        "end_date":   body.get("end_date", ""),
+        "start_date": sd,
+        "end_date":   ed,
         "page_size":  str(body.get("page_size", 100)),
         "count":      str(body.get("count", 0)),
         "status":     body.get("status", ""),
@@ -8417,52 +8421,46 @@ async def sms_report_messages(body: dict = Body(...), _=Depends(_get_admin)):
 
 @app.post("/api/admin/sms/reports/export")
 async def sms_report_export(body: dict = Body(...), _=Depends(_get_admin)):
+    import csv, io
     from fastapi.responses import StreamingResponse
-    token = await _eskiz_get_token()
-    if not token:
-        raise HTTPException(400, "Eskiz токен не настроен")
-    async with aiohttp.ClientSession() as s:
-        r = await s.post(
-            "https://notify.eskiz.uz/api/message/sms/export",
-            headers={"Authorization": f"Bearer {token}"},
-            data={
-                "start_date": body.get("start_date", ""),
-                "end_date":   body.get("end_date", ""),
-                "status":     body.get("status", ""),
-            },
-            timeout=aiohttp.ClientTimeout(total=60),
-        )
-        content = await r.read()
+    sd = body.get("start_date", "")
+    ed = body.get("end_date", "")
+    rows = await db.get_sms_dispatches_for_export(sd, ed)
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["ID","Название","Отправитель","Сообщение","Всего номеров","Отправлено","Статус","Запланировано","Отправлено в","Создано"])
+    for r in rows:
+        w.writerow([r["id"],r["name"],r["from_nick"],r["message"],
+                    r["total_phones"],r["sent_count"],r["status"],
+                    str(r["scheduled_at"] or ""),str(r["sent_at"] or ""),str(r["created_at"] or "")])
+    content = buf.getvalue().encode("utf-8-sig")
+    fname = f"sms_{sd}_{ed}.csv"
     return StreamingResponse(
         iter([content]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename=sms_export.csv"},
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f"attachment; filename={fname}"},
     )
 
 @app.get("/api/admin/sms/reports/by-month")
-async def sms_report_by_month(_=Depends(_get_admin)):
-    return await _eskiz_get("/message/sms/get-user-messages-by-month")
-
-@app.post("/api/admin/sms/reports/by-company")
-async def sms_report_by_company(body: dict = Body(...), _=Depends(_get_admin)):
-    return await _eskiz_post("/message/sms/totals", {
-        "start_date": body.get("start_date", ""),
-        "end_date":   body.get("end_date", ""),
-    })
+async def sms_report_by_month(start_date: str = "", end_date: str = "", _=Depends(_get_admin)):
+    if not start_date:
+        from datetime import date, timedelta
+        end_date = date.today().isoformat()
+        start_date = (date.today().replace(day=1) - timedelta(days=365)).isoformat()
+    rows = await db.get_sms_stats_by_month(start_date, end_date)
+    return {"data": rows}
 
 @app.post("/api/admin/sms/reports/by-date")
 async def sms_report_by_date(body: dict = Body(...), _=Depends(_get_admin)):
-    return await _eskiz_post("/message/sms/get-user-totals", {
-        "start_date": body.get("start_date", ""),
-        "end_date":   body.get("end_date", ""),
-    })
+    rows = await db.get_sms_stats_by_date(
+        body.get("start_date", ""), body.get("end_date", ""))
+    return {"data": rows}
 
 @app.post("/api/admin/sms/reports/by-dispatch")
 async def sms_report_by_dispatch(body: dict = Body(...), _=Depends(_get_admin)):
-    return await _eskiz_post("/message/dispatch/get-totals", {
-        "start_date": body.get("start_date", ""),
-        "end_date":   body.get("end_date", ""),
-    })
+    rows = await db.get_sms_dispatches_report(
+        body.get("start_date", ""), body.get("end_date", ""))
+    return {"data": rows}
 
 @app.get("/api/admin/sms/reports/status/{msg_id}")
 async def sms_report_status(msg_id: str, _=Depends(_get_admin)):
@@ -8470,4 +8468,4 @@ async def sms_report_status(msg_id: str, _=Depends(_get_admin)):
 
 @app.get("/api/admin/sms/reports/prices")
 async def sms_report_prices(_=Depends(_get_admin)):
-    return await _eskiz_get("/nick/list")
+    return {"data": None, "note": "Информация о ценах недоступна на текущем тарифе Eskiz. Обратитесь в поддержку Eskiz или проверьте личный кабинет."}

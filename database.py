@@ -4511,3 +4511,68 @@ async def mark_sms_dispatch_sent(dispatch_id: int, sent_count: int):
             UPDATE sms_dispatches SET status='sent', sent_at=NOW(), sent_count=$2
             WHERE id=$1
         """, dispatch_id, sent_count)
+
+async def get_sms_stats_by_month(start_date: str, end_date: str) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                TO_CHAR(COALESCE(sent_at, scheduled_at) AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM') AS month,
+                COUNT(*) AS dispatches,
+                SUM(sent_count) AS sent_sms,
+                SUM(jsonb_array_length(phones)) AS total_phones
+            FROM sms_dispatches
+            WHERE status IN ('sent','pending')
+              AND COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            GROUP BY 1 ORDER BY 1 DESC
+        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        return [dict(r) for r in rows]
+
+async def get_sms_stats_by_date(start_date: str, end_date: str) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                TO_CHAR(COALESCE(sent_at, scheduled_at) AT TIME ZONE 'Asia/Tashkent', 'YYYY-MM-DD') AS date,
+                COUNT(*) AS dispatches,
+                SUM(sent_count) AS sent_sms,
+                SUM(jsonb_array_length(phones)) AS total_phones
+            FROM sms_dispatches
+            WHERE status IN ('sent','pending')
+              AND COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            GROUP BY 1 ORDER BY 1 DESC
+        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        return [dict(r) for r in rows]
+
+async def get_sms_dispatches_report(start_date: str, end_date: str) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, name, from_nick,
+                   LEFT(message, 60) AS message_preview,
+                   jsonb_array_length(phones) AS total_phones,
+                   sent_count, status,
+                   TO_CHAR(scheduled_at AT TIME ZONE 'Asia/Tashkent', 'DD.MM.YYYY HH24:MI') AS scheduled,
+                   TO_CHAR(sent_at     AT TIME ZONE 'Asia/Tashkent', 'DD.MM.YYYY HH24:MI') AS sent_at
+            FROM sms_dispatches
+            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            ORDER BY id DESC LIMIT 200
+        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        return [dict(r) for r in rows]
+
+async def get_sms_dispatches_for_export(start_date: str, end_date: str) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, name, from_nick, message,
+                   phones::text AS phones_json,
+                   jsonb_array_length(phones) AS total_phones,
+                   sent_count, status,
+                   scheduled_at AT TIME ZONE 'Asia/Tashkent' AS scheduled_at,
+                   sent_at AT TIME ZONE 'Asia/Tashkent' AS sent_at,
+                   created_at AT TIME ZONE 'Asia/Tashkent' AS created_at
+            FROM sms_dispatches
+            WHERE COALESCE(sent_at, scheduled_at) BETWEEN $1::timestamptz AND $2::timestamptz
+            ORDER BY id DESC
+        """, start_date + ' 00:00:00+05', end_date + ' 23:59:59+05')
+        return [dict(r) for r in rows]
