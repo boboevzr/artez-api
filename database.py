@@ -3170,6 +3170,15 @@ async def confirm_cash_handover(handover_id: int, confirmed_by: int) -> dict:
         """, handover_id, confirmed_by)
         return dict(row) if row else {}
 
+async def reject_cash_handover(handover_id: int, rejected_by: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE cash_handovers SET status='rejected', confirmed_at=NOW(), confirmed_by=$2
+            WHERE id=$1 AND status='pending' RETURNING *
+        """, handover_id, rejected_by)
+        return dict(row) if row else {}
+
 async def get_pending_handovers_for(staff_id: int) -> list:
     """Входящие неподтверждённые передачи для данного сотрудника."""
     if not pool: return []
@@ -3185,7 +3194,7 @@ async def get_pending_handovers_for(staff_id: int) -> list:
         return [dict(r) for r in rows]
 
 async def get_my_sent_handovers(staff_id: int) -> list:
-    """Исходящие передачи наличных от данного сотрудника."""
+    """Исходящие передачи наличных от данного сотрудника (все типы: сотрудник / банк / сейф)."""
     if not pool: return []
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
@@ -3193,7 +3202,21 @@ async def get_my_sent_handovers(staff_id: int) -> list:
                    TRIM(COALESCE(st.last_name,'') || ' ' || COALESCE(st.first_name,'')) AS to_name
             FROM cash_handovers ch
             LEFT JOIN staff st ON st.id = ch.to_staff_id
-            WHERE ch.from_staff_id = $1 AND (ch.to_type='staff' OR ch.to_type IS NULL)
+            WHERE ch.from_staff_id = $1
+            ORDER BY ch.created_at DESC LIMIT 50
+        """, staff_id)
+        return [dict(r) for r in rows]
+
+async def get_my_received_handovers(staff_id: int) -> list:
+    """Входящие подтверждённые передачи наличных для данного сотрудника."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ch.*,
+                   TRIM(COALESCE(sf.last_name,'') || ' ' || COALESCE(sf.first_name,'')) AS from_name
+            FROM cash_handovers ch
+            LEFT JOIN staff sf ON sf.id = ch.from_staff_id
+            WHERE ch.to_staff_id = $1 AND ch.status = 'confirmed'
             ORDER BY ch.created_at DESC LIMIT 50
         """, staff_id)
         return [dict(r) for r in rows]

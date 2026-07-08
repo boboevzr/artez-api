@@ -3916,10 +3916,12 @@ async def create_cash_handover(
                f"Сумма: <b>{int(amount):,} сум</b>"
                + (f"\nПримечание: {note}" if note else ""))
     if to_staff and to_staff.get("tg_id") and handover_id:
-        asyncio.create_task(_send_tg_cash(
+        asyncio.create_task(_send_tg_with_kb(
             int(to_staff["tg_id"]), dm_text,
-            btn_label="✅ Подтвердить получение",
-            btn_cb=f"cash_confirm:{handover_id}",
+            keyboard={"inline_keyboard": [[
+                {"text": "✅ Подтвердить", "callback_data": f"cash_confirm:{handover_id}"},
+                {"text": "❌ Отклонить",   "callback_data": f"cash_reject:{handover_id}"},
+            ]]},
         ))
 
     return {"ok": True, "handover": row}
@@ -4205,10 +4207,12 @@ async def staff_cash_handover(
                f"Сумма: <b>{int(amount):,} сум</b>"
                + (f"\nПримечание: {note}" if note else ""))
     if to_staff and to_staff.get("tg_id"):
-        asyncio.create_task(_send_tg_cash(
+        asyncio.create_task(_send_tg_with_kb(
             int(to_staff["tg_id"]), dm_text,
-            btn_label="✅ Подтвердить получение",
-            btn_cb=f"cash_confirm:{handover_id}",
+            keyboard={"inline_keyboard": [[
+                {"text": "✅ Подтвердить", "callback_data": f"cash_confirm:{handover_id}"},
+                {"text": "❌ Отклонить",   "callback_data": f"cash_reject:{handover_id}"},
+            ]]},
         ))
     ch = await db.get_cash_tg_channel()
     ch_text = (f"💵 <b>Передача наличных</b>\n"
@@ -4246,6 +4250,28 @@ async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_sta
     asyncio.create_task(_send_tg_cash(ch, confirmed_text))
 
     return {"ok": True, "handover": row}
+
+
+@app.post("/api/admin/cash/staff-handover/{handover_id}/reject")
+async def reject_staff_handover(handover_id: int, staff=Depends(get_current_staff)):
+    row = await db.reject_cash_handover(handover_id, staff["id"])
+    if not row:
+        raise HTTPException(status_code=404, detail="Не найдено или уже обработано")
+    rejector_name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
+    amount = int(float(row.get("amount", 0)))
+    asyncio.create_task(send_web_push(
+        row["from_staff_id"],
+        title="❌ Передача наличных отклонена",
+        body=f"{rejector_name} отклонил {amount:,} сум",
+        push_type="cash_rejected",
+    ))
+    from_staff = await db.get_staff_by_id(row["from_staff_id"])
+    if from_staff and from_staff.get("tg_id"):
+        asyncio.create_task(send_tg(
+            int(from_staff["tg_id"]),
+            f"❌ <b>Передача наличных отклонена</b>\n{rejector_name} отклонил получение <b>{amount:,} сум</b>",
+        ))
+    return {"ok": True}
 
 
 @app.get("/api/admin/cash/pending-handovers")
@@ -5036,6 +5062,13 @@ async def get_my_cash_payments(staff=Depends(get_current_staff)):
 async def get_my_sent_handovers_ep(staff=Depends(get_current_staff)):
     """Исходящие передачи наличных текущего сотрудника."""
     handovers = await db.get_my_sent_handovers(staff["id"])
+    return {"ok": True, "handovers": handovers}
+
+
+@app.get("/api/admin/cash/my-received-handovers")
+async def get_my_received_handovers_ep(staff=Depends(get_current_staff)):
+    """Входящие подтверждённые передачи наличных текущего сотрудника."""
+    handovers = await db.get_my_received_handovers(staff["id"])
     return {"ok": True, "handovers": handovers}
 
 
