@@ -3905,6 +3905,23 @@ async def create_cash_handover(
     _=Depends(_get_admin),
 ):
     row = await db.add_cash_handover(from_staff_id, to_staff_id, amount, note)
+    handover_id = row.get("id")
+
+    from_staff = await db.get_staff_by_id(from_staff_id)
+    to_staff   = await db.get_staff_by_id(to_staff_id)
+    from_name  = " ".join(filter(None, [from_staff.get("last_name",""), from_staff.get("first_name","")])).strip() if from_staff else f"#{from_staff_id}"
+
+    dm_text = (f"💵 <b>Вам сдают наличные</b>\n"
+               f"От: {from_name}\n"
+               f"Сумма: <b>{int(amount):,} сум</b>"
+               + (f"\nПримечание: {note}" if note else ""))
+    if to_staff and to_staff.get("tg_id") and handover_id:
+        asyncio.create_task(_send_tg_cash(
+            int(to_staff["tg_id"]), dm_text,
+            btn_label="✅ Подтвердить получение",
+            btn_cb=f"cash_confirm:{handover_id}",
+        ))
+
     return {"ok": True, "handover": row}
 
 
