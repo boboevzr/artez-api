@@ -4349,8 +4349,11 @@ async def get_expenses(branch: str = None, status: str = None,
                        category_id: int = None, limit: int = 100) -> list:
     if not pool: return []
     filters, params = [], []
-    if branch:      filters.append(f"e.branch=${len(params)+1}");      params.append(branch)
-    if status:      filters.append(f"e.status=${len(params)+1}");      params.append(status)
+    if branch:      filters.append(f"e.branch=${len(params)+1}");           params.append(branch)
+    if status == 'paid':
+        filters.append("e.status IN ('paid','approved')")
+    elif status:
+        filters.append(f"e.status=${len(params)+1}"); params.append(status)
     if category_id: filters.append(f"e.category_id=${len(params)+1}"); params.append(category_id)
     where = ("WHERE " + " AND ".join(filters)) if filters else ""
     async with pool.acquire() as conn:
