@@ -106,6 +106,8 @@ async def startup():
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
+    await db.ensure_sms_dispatch_table()
+    asyncio.create_task(_sms_dispatch_worker())
     # Webhook не нужен — бот работает в режиме polling (ARTEZ-BOT сервис на Railway)
     # if BOT_TOKEN and APP_URL:
     #     asyncio.create_task(_set_tg_webhook())
@@ -191,6 +193,42 @@ async def _tg_reminder_worker():
                     await db.mark_reminder_sent(r["id"], "tg")
         except Exception as e:
             logging.warning(f"TG reminder worker error: {e}")
+        await asyncio.sleep(60)
+
+
+async def _sms_dispatch_worker():
+    """Каждую минуту: отправляет запланированные SMS-рассылки через sms/send."""
+    await asyncio.sleep(15)
+    while True:
+        try:
+            pending = await db.get_pending_sms_dispatches()
+            for dispatch in pending:
+                import json as _j2
+                phones = _j2.loads(dispatch["phones"]) if isinstance(dispatch["phones"], str) else dispatch["phones"]
+                frm    = dispatch["from_nick"] or "ARTEZ"
+                msg    = dispatch["message"]
+                token  = await _eskiz_get_token()
+                sent   = 0
+                if token and phones:
+                    async with aiohttp.ClientSession() as s:
+                        for phone in phones:
+                            try:
+                                r = await s.post(
+                                    "https://notify.eskiz.uz/api/message/sms/send",
+                                    headers={"Authorization": f"Bearer {token}"},
+                                    data={"mobile_phone": phone, "message": msg,
+                                          "from": frm, "callback_url": ""},
+                                    timeout=aiohttp.ClientTimeout(total=15),
+                                )
+                                resp = await _eskiz_parse(r)
+                                if resp.get("status") == "waiting":
+                                    sent += 1
+                            except Exception as e:
+                                logging.warning(f"_sms_dispatch_worker send error: {e}")
+                await db.mark_sms_dispatch_sent(dispatch["id"], sent)
+                logging.info(f"SMS dispatch {dispatch['id']} '{dispatch['name']}': sent {sent}/{len(phones)}")
+        except Exception as e:
+            logging.warning(f"_sms_dispatch_worker error: {e}")
         await asyncio.sleep(60)
 
 
@@ -8247,29 +8285,15 @@ async def sms_send_group(body: dict = Body(...), _=Depends(_get_admin)):
         raise HTTPException(400, "Нет валидных номеров в группе")
 
     if schedule_time:
-        # Dispatch API для отложенной отправки
-        # Eskiz требует start_time в формате YYYY-MM-DD HH:MM:SS
+        # Сохраняем в нашу БД, worker отправит в нужное время
+        from datetime import datetime
         st = schedule_time.strip()
-        if len(st) == 16:   # "YYYY-MM-DD HH:MM" → добавляем секунды
+        if len(st) == 16:
             st += ":00"
-        async with aiohttp.ClientSession() as s:
-            r = await s.post(
-                "https://notify.eskiz.uz/api/message/dispatch/create",
-                headers={"Authorization": f"Bearer {token}"},
-                data={
-                    "name":       name,
-                    "message":    message,
-                    "from":       frm,
-                    "phones":     _json.dumps(phones),
-                    "start_time": st,
-                },
-                timeout=aiohttp.ClientTimeout(total=30),
-            )
-            data = await _eskiz_parse(r)
-        logging.info(f"dispatch/create response: {data}")
-        if isinstance(data, dict) and data.get("status") not in (None, "success", "waiting", "ok"):
-            raise HTTPException(502, detail=data.get("message") or str(data))
-        return {"ok": True, "total": len(phones), "scheduled": True, "response": data}
+        scheduled_at = datetime.fromisoformat(st).astimezone(timezone.utc)
+        dispatch_id = await db.create_sms_dispatch(name, message, frm, phones, scheduled_at)
+        logging.info(f"SMS dispatch scheduled: id={dispatch_id}, time={st}, phones={len(phones)}")
+        return {"ok": True, "total": len(phones), "scheduled": True, "dispatch_id": dispatch_id}
     else:
         # Отправить сейчас — индивидуальные запросы (send-batch ненадёжен)
         results = []

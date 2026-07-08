@@ -4461,3 +4461,53 @@ async def save_expense_receipt(expense_id: int, receipt_url: str) -> dict:
             "UPDATE expenses SET receipt_url=$2 WHERE id=$1 RETURNING *",
             expense_id, receipt_url)
         return dict(row) if row else {}
+
+
+# ── SMS рассылки по расписанию ───────────────────────────────────────────────
+
+async def ensure_sms_dispatch_table():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sms_dispatches (
+                id           SERIAL PRIMARY KEY,
+                name         TEXT NOT NULL DEFAULT 'Рассылка',
+                message      TEXT NOT NULL,
+                from_nick    TEXT NOT NULL DEFAULT 'ARTEZ',
+                phones       JSONB NOT NULL,
+                scheduled_at TIMESTAMPTZ NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                sent_at      TIMESTAMPTZ,
+                sent_count   INT DEFAULT 0,
+                created_at   TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+
+async def create_sms_dispatch(name: str, message: str, from_nick: str,
+                               phones: list, scheduled_at) -> int:
+    if not pool: return 0
+    import json as _j
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO sms_dispatches (name, message, from_nick, phones, scheduled_at)
+            VALUES ($1, $2, $3, $4, $5) RETURNING id
+        """, name, message, from_nick, _j.dumps(phones), scheduled_at)
+        return row["id"] if row else 0
+
+async def get_pending_sms_dispatches() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM sms_dispatches
+            WHERE status='pending' AND scheduled_at <= NOW()
+            ORDER BY scheduled_at ASC LIMIT 20
+        """)
+        return [dict(r) for r in rows]
+
+async def mark_sms_dispatch_sent(dispatch_id: int, sent_count: int):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE sms_dispatches SET status='sent', sent_at=NOW(), sent_count=$2
+            WHERE id=$1
+        """, dispatch_id, sent_count)
