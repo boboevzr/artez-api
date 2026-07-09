@@ -1778,6 +1778,34 @@ async def delete_timesheet(ts_id: int) -> bool:
         result = await conn.execute("DELETE FROM timesheet WHERE id=$1", ts_id)
         return result == "DELETE 1"
 
+async def init_timesheet_month(year: int, month: int) -> dict:
+    """Создать записи 'work' для всех активных не-агентов на каждый будний день месяца.
+    ON CONFLICT DO NOTHING — уже существующие записи не трогает."""
+    if not pool: return {"created": 0}
+    import calendar as _cal
+    from datetime import date
+    _, last_day = _cal.monthrange(year, month)
+    async with pool.acquire() as conn:
+        staff_rows = await conn.fetch("""
+            SELECT id FROM staff
+            WHERE (active IS NULL OR active = TRUE)
+              AND COALESCE(role,'') != 'agent'
+        """)
+        count = 0
+        for s in staff_rows:
+            for day in range(1, last_day + 1):
+                d = date(year, month, day)
+                if d.weekday() == 6:  # воскресенье — пропуск
+                    continue
+                r = await conn.execute("""
+                    INSERT INTO timesheet (staff_id, date, hours, type)
+                    VALUES ($1, $2, 8, 'work')
+                    ON CONFLICT (staff_id, date) DO NOTHING
+                """, s["id"], d)
+                if r.endswith("0 1"):
+                    count += 1
+    return {"created": count}
+
 async def create_lead(data: dict) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:

@@ -1162,6 +1162,13 @@ async def delete_timesheet_ep(ts_id: int, me=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Запись не найдена")
     return {"ok": True}
 
+@app.post("/api/admin/timesheet/init-month")
+async def init_timesheet_month_ep(year: int, month: int, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403)
+    result = await db.init_timesheet_month(year, month)
+    return {"ok": True, "created": result["created"]}
+
 # ══════════════════════════════════════
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
