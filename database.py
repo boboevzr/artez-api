@@ -400,8 +400,10 @@ async def create_tables():
             type_key    VARCHAR(20) NOT NULL,
             total_rate  NUMERIC(10,2) DEFAULT 0,
             unit_rate   NUMERIC(10,2) DEFAULT 0,
+            rate_type   VARCHAR(10) DEFAULT 'sum',
             UNIQUE(staff_id, service_key, type_key)
         )""",
+        "ALTER TABLE staff_salary_per_unit ADD COLUMN IF NOT EXISTS rate_type VARCHAR(10) DEFAULT 'sum'",
         # KPI правила
         """CREATE TABLE IF NOT EXISTS staff_salary_kpi (
             id           SERIAL PRIMARY KEY,
@@ -1591,11 +1593,12 @@ async def get_staff_salary(staff_id: int) -> dict:
             "SELECT role, percent FROM staff_salary_percents WHERE staff_id=$1 ORDER BY id", staff_id)
         result["percents"] = [{"role": r["role"], "percent": float(r["percent"])} for r in prows]
         urows = await conn.fetch(
-            "SELECT service_key, type_key, total_rate, unit_rate "
+            "SELECT service_key, type_key, total_rate, unit_rate, rate_type "
             "FROM staff_salary_per_unit WHERE staff_id=$1 ORDER BY id", staff_id)
         result["per_unit"] = [{"service_key": r["service_key"], "type_key": r["type_key"],
                                 "total_rate": float(r["total_rate"] or 0),
-                                "unit_rate":  float(r["unit_rate"]  or 0)} for r in urows]
+                                "unit_rate":  float(r["unit_rate"]  or 0),
+                                "rate_type":  r["rate_type"] or "sum"} for r in urows]
         krows = await conn.fetch(
             "SELECT metric, target_value, bonus_type, bonus_value "
             "FROM staff_salary_kpi WHERE staff_id=$1 ORDER BY id", staff_id)
@@ -1621,11 +1624,12 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
         for u in (data.get("per_unit") or []):
             if u.get("service_key") and u.get("type_key"):
                 await conn.execute(
-                    "INSERT INTO staff_salary_per_unit (staff_id, service_key, type_key, total_rate, unit_rate)"
-                    " VALUES ($1,$2,$3,$4,$5)"
-                    " ON CONFLICT (staff_id, service_key, type_key) DO UPDATE SET total_rate=$4, unit_rate=$5",
+                    "INSERT INTO staff_salary_per_unit (staff_id, service_key, type_key, total_rate, unit_rate, rate_type)"
+                    " VALUES ($1,$2,$3,$4,$5,$6)"
+                    " ON CONFLICT (staff_id, service_key, type_key) DO UPDATE SET total_rate=$4, unit_rate=$5, rate_type=$6",
                     staff_id, u["service_key"], u["type_key"],
-                    float(u.get("total_rate") or 0), float(u.get("unit_rate") or 0))
+                    float(u.get("total_rate") or 0), float(u.get("unit_rate") or 0),
+                    u.get("rate_type") or "sum")
         await conn.execute("DELETE FROM staff_salary_kpi WHERE staff_id=$1", staff_id)
         for k in (data.get("kpi") or []):
             if k.get("metric") and k.get("target_value") is not None:
