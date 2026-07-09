@@ -1117,6 +1117,52 @@ async def get_all_commissions_ep(year: int = None, month: int = None,
     return {"ok": True, "commissions": rows}
 
 # ══════════════════════════════════════
+#  ТАБЕЛЬ (timesheet)
+# ══════════════════════════════════════
+
+class TimesheetEntry(BaseModel):
+    staff_id: int
+    date:     str
+    hours:    float = 8.0
+    type:     str   = "work"
+    note:     str   = ""
+
+@app.get("/api/admin/timesheet")
+async def get_timesheet_ep(year: int, month: int, staff_id: int = None,
+                            me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403)
+    rows = await db.get_timesheet(year, month, staff_id)
+    for r in rows:
+        r["date"] = str(r["date"]) if r.get("date") else ""
+    return {"ok": True, "rows": rows}
+
+@app.post("/api/admin/timesheet")
+async def create_timesheet_ep(body: TimesheetEntry, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403)
+    row = await db.save_timesheet(body.dict())
+    return {"ok": True, "entry": row}
+
+@app.put("/api/admin/timesheet/{ts_id}")
+async def update_timesheet_ep(ts_id: int, body: TimesheetEntry, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403)
+    row = await db.update_timesheet(ts_id, body.dict())
+    if not row:
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    return {"ok": True, "entry": row}
+
+@app.delete("/api/admin/timesheet/{ts_id}")
+async def delete_timesheet_ep(ts_id: int, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin", "manager"):
+        raise HTTPException(status_code=403)
+    ok = await db.delete_timesheet(ts_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Запись не найдена")
+    return {"ok": True}
+
+# ══════════════════════════════════════
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
 

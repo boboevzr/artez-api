@@ -426,6 +426,20 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_staff_commissions_staff ON staff_commissions(staff_id)",
         "CREATE INDEX IF NOT EXISTS idx_staff_commissions_order ON staff_commissions(order_id)",
+        # Табель рабочего времени
+        """CREATE TABLE IF NOT EXISTS timesheet (
+            id          SERIAL PRIMARY KEY,
+            staff_id    INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+            date        DATE NOT NULL,
+            hours       NUMERIC(4,1) DEFAULT 8,
+            type        VARCHAR(20) DEFAULT 'work'
+                        CHECK (type IN ('work','overtime','sick','vacation','dayoff')),
+            note        TEXT DEFAULT '',
+            created_at  TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(staff_id, date)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_timesheet_staff  ON timesheet(staff_id)",
+        "CREATE INDEX IF NOT EXISTS idx_timesheet_date   ON timesheet(date)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1712,6 +1726,58 @@ async def update_staff_password(staff_id: int, password_hash: str, plain: str = 
 # ══════════════════════════════════════
 #  ЛИДЫ
 # ══════════════════════════════════════
+async def get_timesheet(year: int, month: int, staff_id: int = None) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        sql = """
+            SELECT t.id, t.staff_id, t.date::text, t.hours, t.type, t.note,
+                   s.first_name, s.last_name,
+                   (s.first_name || ' ' || COALESCE(s.last_name,'')) AS staff_name
+            FROM timesheet t
+            JOIN staff s ON s.id = t.staff_id
+            WHERE EXTRACT(YEAR FROM t.date)=$1 AND EXTRACT(MONTH FROM t.date)=$2
+        """
+        args = [year, month]
+        if staff_id:
+            args.append(staff_id); sql += f" AND t.staff_id=${len(args)}"
+        sql += " ORDER BY t.date DESC, s.last_name, s.first_name"
+        rows = await conn.fetch(sql, *args)
+        return [dict(r) for r in rows]
+
+async def save_timesheet(data: dict) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO timesheet (staff_id, date, hours, type, note)
+            VALUES ($1, $2::date, $3, $4, $5)
+            ON CONFLICT (staff_id, date)
+            DO UPDATE SET hours=$3, type=$4, note=$5
+            RETURNING id, staff_id, date::text, hours, type, note
+        """, int(data["staff_id"]), data["date"],
+            float(data.get("hours") or 8),
+            data.get("type", "work"),
+            data.get("note", ""))
+        return dict(row) if row else {}
+
+async def update_timesheet(ts_id: int, data: dict) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE timesheet SET staff_id=$2, date=$3::date, hours=$4, type=$5, note=$6
+            WHERE id=$1
+            RETURNING id, staff_id, date::text, hours, type, note
+        """, ts_id, int(data["staff_id"]), data["date"],
+            float(data.get("hours") or 8),
+            data.get("type", "work"),
+            data.get("note", ""))
+        return dict(row) if row else {}
+
+async def delete_timesheet(ts_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM timesheet WHERE id=$1", ts_id)
+        return result == "DELETE 1"
+
 async def create_lead(data: dict) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
