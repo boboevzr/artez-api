@@ -1637,17 +1637,32 @@ async def trigger_order_agent_commission(order_id: int, order_num: str, total_pr
         # Проверить что это агент
         role = await conn.fetchval("SELECT role FROM staff WHERE id=$1", agent_id)
         if role != "agent": return
-        # Получить процент: сначала индивидуальный, потом глобальный
+        # Тип начисления из настроек
+        comm_type = await conn.fetchval(
+            "SELECT value FROM config WHERE key='agent_commission_type'") or "percent"
+        # Индивидуальное значение агента (переопределяет глобальное)
         pct_row = await conn.fetchrow(
             "SELECT percent FROM staff_salary_percents WHERE staff_id=$1 AND role='lead'", agent_id)
-        if pct_row:
-            pct = float(pct_row["percent"])
+        if comm_type == "fixed":
+            if pct_row and float(pct_row["percent"]) > 0:
+                amount = float(pct_row["percent"])
+            else:
+                fixed_str = await conn.fetchval(
+                    "SELECT value FROM config WHERE key='agent_commission_fixed'") or "0"
+                try: amount = float(fixed_str)
+                except ValueError: amount = 0.0
+            pct = 0  # не используется в fixed-режиме
+            if amount <= 0: return
         else:
-            pct_str = await conn.fetchval("SELECT value FROM config WHERE key='agent_commission_percent'") or "0"
-            try: pct = float(pct_str)
-            except ValueError: pct = 0.0
-        if pct <= 0: return
-        amount = round(total_price * pct / 100, 2)
+            if pct_row and float(pct_row["percent"]) > 0:
+                pct = float(pct_row["percent"])
+            else:
+                pct_str = await conn.fetchval(
+                    "SELECT value FROM config WHERE key='agent_commission_percent'") or "5.0"
+                try: pct = float(pct_str)
+                except ValueError: pct = 0.0
+            if pct <= 0: return
+            amount = round(total_price * pct / 100, 2)
         await conn.execute("""
             INSERT INTO staff_commissions
                 (staff_id, order_id, order_num, lead_id, amount, percent, order_total)
