@@ -1107,7 +1107,9 @@ async def get_staff_commissions_ep(staff_id: int, year: int = None, month: int =
 
 @app.get("/api/admin/commissions")
 async def get_all_commissions_ep(year: int = None, month: int = None,
-                                  _=Depends(get_admin)):
+                                  me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     rows = await db.get_all_commissions(year, month)
     for r in rows:
         if r.get("created_at"): r["created_at"] = str(r["created_at"])
