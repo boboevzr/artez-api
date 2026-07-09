@@ -382,6 +382,7 @@ async def create_tables():
         "ALTER TABLE expense_categories ADD COLUMN IF NOT EXISTS for_staff BOOLEAN DEFAULT FALSE",
         # Зарплата сотрудников — рабочих дней в месяц
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS salary_work_days INTEGER DEFAULT 26",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS fired BOOLEAN DEFAULT FALSE",
         # Процентные ставки по типам работ
         """CREATE TABLE IF NOT EXISTS staff_salary_percents (
             id       SERIAL PRIMARY KEY,

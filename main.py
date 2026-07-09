@@ -954,6 +954,7 @@ def _staff_public(s: dict) -> dict:
         "gender":              s.get("gender", "M"),
         "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
         "plain_password": s.get("plain_password"),
+        "fired":          bool(s.get("fired", False)),
     }
 
 @app.post("/api/staff/login")
@@ -1023,7 +1024,7 @@ async def staff_update(staff_id: int, body: dict, me=Depends(get_current_staff))
     if not is_admin and not is_self:
         raise HTTPException(status_code=403, detail="Нет доступа")
     if is_admin:
-        allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
+        allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","fired","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
     else:
         allowed = {"gender","birth_date","branch"}
     updates = {k: v for k, v in body.items() if k in allowed}
