@@ -1804,7 +1804,7 @@ async def init_timesheet_month(year: int, month: int, until_today: bool = False)
             SELECT id, salary_type, hire_date FROM staff
             WHERE (active IS NULL OR active = TRUE)
               AND COALESCE(role,'') != 'agent'
-              AND COALESCE(salary_type,'') != 'percent'
+              AND COALESCE(salary_type,'') NOT IN ('percent','per_unit','per_point')
         """)
         count = 0
         skipped = 0
