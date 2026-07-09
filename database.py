@@ -380,6 +380,35 @@ async def create_tables():
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS for_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         # Категории расходов: флаг «требует указать сотрудника»
         "ALTER TABLE expense_categories ADD COLUMN IF NOT EXISTS for_staff BOOLEAN DEFAULT FALSE",
+        # Зарплата сотрудников — рабочих дней в месяц
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS salary_work_days INTEGER DEFAULT 26",
+        # Процентные ставки по типам работ
+        """CREATE TABLE IF NOT EXISTS staff_salary_percents (
+            id       SERIAL PRIMARY KEY,
+            staff_id INTEGER REFERENCES staff(id) ON DELETE CASCADE,
+            role     VARCHAR(20) NOT NULL,
+            percent  NUMERIC(5,2) NOT NULL DEFAULT 0,
+            UNIQUE(staff_id, role)
+        )""",
+        # Ставки за единицу измерения по услугам
+        """CREATE TABLE IF NOT EXISTS staff_salary_per_unit (
+            id          SERIAL PRIMARY KEY,
+            staff_id    INTEGER REFERENCES staff(id) ON DELETE CASCADE,
+            service_key VARCHAR(30) NOT NULL,
+            type_key    VARCHAR(20) NOT NULL,
+            total_rate  NUMERIC(10,2) DEFAULT 0,
+            unit_rate   NUMERIC(10,2) DEFAULT 0,
+            UNIQUE(staff_id, service_key, type_key)
+        )""",
+        # KPI правила
+        """CREATE TABLE IF NOT EXISTS staff_salary_kpi (
+            id           SERIAL PRIMARY KEY,
+            staff_id     INTEGER REFERENCES staff(id) ON DELETE CASCADE,
+            metric       VARCHAR(30) NOT NULL,
+            target_value NUMERIC(10,2) NOT NULL,
+            bonus_type   VARCHAR(10) DEFAULT 'fixed',
+            bonus_value  NUMERIC(10,2) NOT NULL DEFAULT 0
+        )""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1499,6 +1528,66 @@ async def upsert_staff_personal(staff_id: int, data: dict) -> None:
                 ON CONFLICT (staff_id) DO UPDATE SET {updates}, updated_at=NOW()""",
             staff_id, *list(filtered.values())
         )
+
+async def get_staff_salary(staff_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT salary_type, salary_rate, salary_work_days FROM staff WHERE id=$1", staff_id)
+        if not row:
+            return {}
+        result = {
+            "salary_type":  row["salary_type"] or "fixed",
+            "base_amount":  float(row["salary_rate"] or 0),
+            "work_days":    row["salary_work_days"] or 26,
+        }
+        prows = await conn.fetch(
+            "SELECT role, percent FROM staff_salary_percents WHERE staff_id=$1 ORDER BY id", staff_id)
+        result["percents"] = [{"role": r["role"], "percent": float(r["percent"])} for r in prows]
+        urows = await conn.fetch(
+            "SELECT service_key, type_key, total_rate, unit_rate "
+            "FROM staff_salary_per_unit WHERE staff_id=$1 ORDER BY id", staff_id)
+        result["per_unit"] = [{"service_key": r["service_key"], "type_key": r["type_key"],
+                                "total_rate": float(r["total_rate"] or 0),
+                                "unit_rate":  float(r["unit_rate"]  or 0)} for r in urows]
+        krows = await conn.fetch(
+            "SELECT metric, target_value, bonus_type, bonus_value "
+            "FROM staff_salary_kpi WHERE staff_id=$1 ORDER BY id", staff_id)
+        result["kpi"] = [{"metric": r["metric"], "target_value": float(r["target_value"]),
+                           "bonus_type": r["bonus_type"], "bonus_value": float(r["bonus_value"])} for r in krows]
+        return result
+
+async def save_staff_salary(staff_id: int, data: dict) -> None:
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE staff SET salary_type=$2, salary_rate=$3, salary_work_days=$4, updated_at=NOW() WHERE id=$1",
+            staff_id, data.get("salary_type", "fixed"),
+            data.get("base_amount") or None, data.get("work_days", 26))
+        await conn.execute("DELETE FROM staff_salary_percents WHERE staff_id=$1", staff_id)
+        for p in (data.get("percents") or []):
+            if p.get("role") and p.get("percent") is not None:
+                await conn.execute(
+                    "INSERT INTO staff_salary_percents (staff_id, role, percent) VALUES ($1,$2,$3)"
+                    " ON CONFLICT (staff_id, role) DO UPDATE SET percent=$3",
+                    staff_id, p["role"], float(p["percent"]))
+        await conn.execute("DELETE FROM staff_salary_per_unit WHERE staff_id=$1", staff_id)
+        for u in (data.get("per_unit") or []):
+            if u.get("service_key") and u.get("type_key"):
+                await conn.execute(
+                    "INSERT INTO staff_salary_per_unit (staff_id, service_key, type_key, total_rate, unit_rate)"
+                    " VALUES ($1,$2,$3,$4,$5)"
+                    " ON CONFLICT (staff_id, service_key, type_key) DO UPDATE SET total_rate=$4, unit_rate=$5",
+                    staff_id, u["service_key"], u["type_key"],
+                    float(u.get("total_rate") or 0), float(u.get("unit_rate") or 0))
+        await conn.execute("DELETE FROM staff_salary_kpi WHERE staff_id=$1", staff_id)
+        for k in (data.get("kpi") or []):
+            if k.get("metric") and k.get("target_value") is not None:
+                await conn.execute(
+                    "INSERT INTO staff_salary_kpi (staff_id, metric, target_value, bonus_type, bonus_value)"
+                    " VALUES ($1,$2,$3,$4,$5)",
+                    staff_id, k["metric"], float(k["target_value"]),
+                    k.get("bonus_type", "fixed"), float(k.get("bonus_value") or 0))
 
 async def update_staff_password(staff_id: int, password_hash: str, plain: str = None):
     if not pool: return

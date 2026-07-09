@@ -1080,6 +1080,20 @@ async def save_staff_personal_ep(staff_id: int, body: dict, me=Depends(get_curre
     await db.upsert_staff_personal(staff_id, body)
     return {"ok": True}
 
+@app.get("/api/admin/staff/{staff_id}/salary")
+async def get_staff_salary_ep(staff_id: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    data = await db.get_staff_salary(staff_id)
+    return {"ok": True, "salary": data}
+
+@app.put("/api/admin/staff/{staff_id}/salary")
+async def save_staff_salary_ep(staff_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    await db.save_staff_salary(staff_id, body)
+    return {"ok": True}
+
 # ══════════════════════════════════════
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
