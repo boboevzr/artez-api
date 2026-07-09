@@ -1778,13 +1778,17 @@ async def delete_timesheet(ts_id: int) -> bool:
         result = await conn.execute("DELETE FROM timesheet WHERE id=$1", ts_id)
         return result == "DELETE 1"
 
-async def init_timesheet_month(year: int, month: int) -> dict:
+async def init_timesheet_month(year: int, month: int, until_today: bool = False) -> dict:
     """Создать записи 'work' для всех активных не-агентов на каждый будний день месяца.
-    ON CONFLICT DO NOTHING — уже существующие записи не трогает."""
+    ON CONFLICT DO NOTHING — уже существующие записи не трогает.
+    until_today=True — только до сегодняшней даты включительно."""
     if not pool: return {"created": 0}
     import calendar as _cal
     from datetime import date
     _, last_day = _cal.monthrange(year, month)
+    today = date.today()
+    if until_today and date(year, month, 1) <= today:
+        last_day = min(last_day, today.day if (today.year == year and today.month == month) else last_day)
     async with pool.acquire() as conn:
         staff_rows = await conn.fetch("""
             SELECT id FROM staff
