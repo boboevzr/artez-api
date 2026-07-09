@@ -1094,6 +1094,26 @@ async def save_staff_salary_ep(staff_id: int, body: dict, me=Depends(get_current
     await db.save_staff_salary(staff_id, body)
     return {"ok": True}
 
+@app.get("/api/admin/staff/{staff_id}/commissions")
+async def get_staff_commissions_ep(staff_id: int, year: int = None, month: int = None,
+                                    me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    rows = await db.get_agent_commissions(staff_id, year, month)
+    for r in rows:
+        if r.get("created_at"): r["created_at"] = str(r["created_at"])
+        if r.get("paid_at"):    r["paid_at"]    = str(r["paid_at"])
+    return {"ok": True, "commissions": rows}
+
+@app.get("/api/admin/commissions")
+async def get_all_commissions_ep(year: int = None, month: int = None,
+                                  _=Depends(get_admin)):
+    rows = await db.get_all_commissions(year, month)
+    for r in rows:
+        if r.get("created_at"): r["created_at"] = str(r["created_at"])
+        if r.get("paid_at"):    r["paid_at"]    = str(r["paid_at"])
+    return {"ok": True, "commissions": rows}
+
 # ══════════════════════════════════════
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
@@ -3657,6 +3677,16 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             logging.warning(f"TG notify failed for order {order_id}: {e}")
 
     # ── Синхронизировать stop_status в маршруте ──────────────────────────────
+    # ── Комиссия агента при доставке ─────────────────────────────────────────
+    if status == "delivered":
+        try:
+            total = order.get("total_price") or 0
+            onum  = order.get("order_num", "")
+            if total and onum:
+                await db.trigger_order_agent_commission(order_id, onum, float(total))
+        except Exception as _ce:
+            logging.warning(f"agent commission failed order={order_id}: {_ce}")
+
     try:
         async with db.pool.acquire() as _c:
             if status == "delivered":
@@ -6581,6 +6611,10 @@ SITE_SETTINGS_DEFAULTS = {
         "{location_link}"
     ),
     "callback_overdue_minutes": "10",
+    # Комиссия агентов за лиды
+    "agent_commission_type":    "percent",   # "percent" | "fixed"
+    "agent_commission_percent": "5.0",       # % от суммы заказа (по умолчанию)
+    "agent_commission_fixed":   "0",         # фиксированная сумма (если type=fixed)
 }
 
 async def _get_cfg(key: str) -> str:
@@ -6657,6 +6691,9 @@ class SiteSettings(BaseModel):
     leads_group_enabled:         str | None = None
     lead_notify_ru:              str | None = None
     callback_overdue_minutes:    str | None = None
+    agent_commission_type:       str | None = None
+    agent_commission_percent:    str | None = None
+    agent_commission_fixed:      str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):

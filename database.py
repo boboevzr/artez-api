@@ -409,6 +409,23 @@ async def create_tables():
             bonus_type   VARCHAR(10) DEFAULT 'fixed',
             bonus_value  NUMERIC(10,2) NOT NULL DEFAULT 0
         )""",
+        # Начисления агентам за лиды (комиссия)
+        """CREATE TABLE IF NOT EXISTS staff_commissions (
+            id           SERIAL PRIMARY KEY,
+            staff_id     INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            order_id     INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+            order_num    VARCHAR(20) DEFAULT '',
+            lead_id      INTEGER REFERENCES leads(id) ON DELETE SET NULL,
+            amount       NUMERIC(12,2) NOT NULL DEFAULT 0,
+            percent      NUMERIC(5,2)  NOT NULL DEFAULT 0,
+            order_total  NUMERIC(12,2) NOT NULL DEFAULT 0,
+            note         TEXT DEFAULT '',
+            status       VARCHAR(20) DEFAULT 'pending',
+            paid_at      TIMESTAMPTZ DEFAULT NULL,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_staff_commissions_staff ON staff_commissions(staff_id)",
+        "CREATE INDEX IF NOT EXISTS idx_staff_commissions_order ON staff_commissions(order_id)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1424,17 +1441,30 @@ async def get_staff_by_tg_id(tg_id):
                 return None
 
 async def create_agent_from_user(user: dict, password_hash: str, branch: str = "") -> int:
-    """Создаёт staff-аккаунт агента из пользователя сайта."""
+    """Создаёт staff-аккаунт агента из пользователя сайта, авто-назначает зарплату 'leads'."""
     if not pool: return None
+    # Получить глобальный процент комиссии за лид
+    pct_str = await get_config("agent_commission_percent") or "0"
+    try:
+        lead_pct = float(pct_str)
+    except ValueError:
+        lead_pct = 0.0
     async with pool.acquire() as conn:
-        return await conn.fetchval("""
+        staff_id = await conn.fetchval("""
             INSERT INTO staff (first_name, phone, login, password_hash, role,
-                               tg_id, site_user_id, active, branch)
-            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE,$7)
+                               tg_id, site_user_id, active, branch,
+                               salary_type, salary_work_days)
+            VALUES ($1,$2,$3,$4,'agent',$5,$6,TRUE,$7,'leads',26)
             ON CONFLICT (login) DO NOTHING
             RETURNING id
         """, user["first_name"], user["phone"], user["phone"],
             password_hash, user.get("tg_id"), user["id"], branch or None)
+        if staff_id and lead_pct > 0:
+            await conn.execute(
+                "INSERT INTO staff_salary_percents (staff_id, role, percent)"
+                " VALUES ($1,'lead',$2) ON CONFLICT (staff_id, role) DO NOTHING",
+                staff_id, lead_pct)
+        return staff_id
 
 async def set_staff_temp_password(staff_id: int, temp_hash: str, expires_at):
     if not pool: return
@@ -1588,6 +1618,73 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
                     " VALUES ($1,$2,$3,$4,$5)",
                     staff_id, k["metric"], float(k["target_value"]),
                     k.get("bonus_type", "fixed"), float(k.get("bonus_value") or 0))
+
+async def trigger_order_agent_commission(order_id: int, order_num: str, total_price: float) -> None:
+    """При доставке заказа начисляет комиссию агенту, который создал лид."""
+    if not pool or not total_price: return
+    async with pool.acquire() as conn:
+        # Уже начислено?
+        exists = await conn.fetchval(
+            "SELECT 1 FROM staff_commissions WHERE order_id=$1", order_id)
+        if exists: return
+        # Найти лид, из которого создан этот заказ
+        lead = await conn.fetchrow(
+            "SELECT id, created_by FROM leads WHERE converted_order=$1 AND created_by IS NOT NULL",
+            order_num)
+        if not lead: return
+        agent_id = lead["created_by"]
+        lead_id  = lead["id"]
+        # Проверить что это агент
+        role = await conn.fetchval("SELECT role FROM staff WHERE id=$1", agent_id)
+        if role != "agent": return
+        # Получить процент: сначала индивидуальный, потом глобальный
+        pct_row = await conn.fetchrow(
+            "SELECT percent FROM staff_salary_percents WHERE staff_id=$1 AND role='lead'", agent_id)
+        if pct_row:
+            pct = float(pct_row["percent"])
+        else:
+            pct_str = await conn.fetchval("SELECT value FROM config WHERE key='agent_commission_percent'") or "0"
+            try: pct = float(pct_str)
+            except ValueError: pct = 0.0
+        if pct <= 0: return
+        amount = round(total_price * pct / 100, 2)
+        await conn.execute("""
+            INSERT INTO staff_commissions
+                (staff_id, order_id, order_num, lead_id, amount, percent, order_total)
+            VALUES ($1,$2,$3,$4,$5,$6,$7)
+        """, agent_id, order_id, order_num, lead_id, amount, pct, total_price)
+
+async def get_agent_commissions(staff_id: int, year: int = None, month: int = None) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        sql = """SELECT c.*, o.order_num as o_num
+                 FROM staff_commissions c
+                 LEFT JOIN orders o ON o.id = c.order_id
+                 WHERE c.staff_id=$1"""
+        args = [staff_id]
+        if year:
+            args.append(year); sql += f" AND EXTRACT(YEAR FROM c.created_at)=${len(args)}"
+        if month:
+            args.append(month); sql += f" AND EXTRACT(MONTH FROM c.created_at)=${len(args)}"
+        sql += " ORDER BY c.created_at DESC LIMIT 200"
+        rows = await conn.fetch(sql, *args)
+        return [dict(r) for r in rows]
+
+async def get_all_commissions(year: int = None, month: int = None) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        sql = """SELECT c.*, s.first_name, s.last_name
+                 FROM staff_commissions c
+                 LEFT JOIN staff s ON s.id = c.staff_id
+                 WHERE 1=1"""
+        args = []
+        if year:
+            args.append(year); sql += f" AND EXTRACT(YEAR FROM c.created_at)=${len(args)}"
+        if month:
+            args.append(month); sql += f" AND EXTRACT(MONTH FROM c.created_at)=${len(args)}"
+        sql += " ORDER BY c.created_at DESC LIMIT 500"
+        rows = await conn.fetch(sql, *args)
+        return [dict(r) for r in rows]
 
 async def update_staff_password(staff_id: int, password_hash: str, plain: str = None):
     if not pool: return
