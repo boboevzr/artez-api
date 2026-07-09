@@ -1810,6 +1810,15 @@ async def init_timesheet_month(year: int, month: int, until_today: bool = False)
                     count += 1
     return {"created": count}
 
+async def reset_timesheet_month(year: int, month: int) -> dict:
+    if not pool: return {"deleted": 0}
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM timesheet WHERE EXTRACT(YEAR FROM date)=$1 AND EXTRACT(MONTH FROM date)=$2",
+            year, month)
+        deleted = int(result.split()[-1]) if result else 0
+    return {"deleted": deleted}
+
 async def create_lead(data: dict) -> dict:
     if not pool: return None
     async with pool.acquire() as conn:

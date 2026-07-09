@@ -1169,6 +1169,16 @@ async def init_timesheet_month_ep(year: int, month: int, until_today: bool = Fal
     result = await db.init_timesheet_month(year, month, until_today=until_today)
     return {"ok": True, "created": result["created"]}
 
+@app.post("/api/admin/timesheet/reset-month")
+async def reset_timesheet_month_ep(year: int, month: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403)
+    password = body.get("password", "")
+    if not password or password != await get_admin_pass():
+        raise HTTPException(status_code=403, detail="Неверный пароль")
+    result = await db.reset_timesheet_month(year, month)
+    return {"ok": True, "deleted": result["deleted"]}
+
 # ══════════════════════════════════════
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
