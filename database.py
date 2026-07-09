@@ -1746,14 +1746,17 @@ async def get_timesheet(year: int, month: int, staff_id: int = None) -> list:
 
 async def save_timesheet(data: dict) -> dict:
     if not pool: return {}
+    from datetime import date as _date
+    d = data["date"]
+    if isinstance(d, str): d = _date.fromisoformat(d)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO timesheet (staff_id, date, hours, type, note)
-            VALUES ($1, $2::date, $3, $4, $5)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (staff_id, date)
             DO UPDATE SET hours=$3, type=$4, note=$5
             RETURNING id, staff_id, date::text, hours, type, note
-        """, int(data["staff_id"]), data["date"],
+        """, int(data["staff_id"]), d,
             float(data.get("hours") or 8),
             data.get("type", "work"),
             data.get("note", ""))
@@ -1761,12 +1764,15 @@ async def save_timesheet(data: dict) -> dict:
 
 async def update_timesheet(ts_id: int, data: dict) -> dict:
     if not pool: return {}
+    from datetime import date as _date
+    d = data["date"]
+    if isinstance(d, str): d = _date.fromisoformat(d)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            UPDATE timesheet SET staff_id=$2, date=$3::date, hours=$4, type=$5, note=$6
+            UPDATE timesheet SET staff_id=$2, date=$3, hours=$4, type=$5, note=$6
             WHERE id=$1
             RETURNING id, staff_id, date::text, hours, type, note
-        """, ts_id, int(data["staff_id"]), data["date"],
+        """, ts_id, int(data["staff_id"]), d,
             float(data.get("hours") or 8),
             data.get("type", "work"),
             data.get("note", ""))
