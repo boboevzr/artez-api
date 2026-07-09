@@ -1097,6 +1097,13 @@ async def save_staff_salary_ep(staff_id: int, body: dict, me=Depends(get_current
     await db.save_staff_salary(staff_id, body)
     return {"ok": True}
 
+@app.get("/api/admin/salary/monthly")
+async def get_monthly_salary_ep(year: int, month: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    data = await db.get_monthly_salary_calc(year, month)
+    return {"ok": True, "staff": data}
+
 @app.get("/api/admin/staff/{staff_id}/commissions")
 async def get_staff_commissions_ep(staff_id: int, year: int = None, month: int = None,
                                     me=Depends(get_current_staff)):

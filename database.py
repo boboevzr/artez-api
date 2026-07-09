@@ -1639,6 +1639,88 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
                     staff_id, k["metric"], float(k["target_value"]),
                     k.get("bonus_type", "fixed"), float(k.get("bonus_value") or 0))
 
+async def get_monthly_salary_calc(year: int, month: int) -> list:
+    """Расчёт зарплаты всех активных сотрудников за месяц."""
+    if not pool: return []
+    import calendar as _cal
+    from datetime import date as _date
+    start = _date(year, month, 1)
+    end   = _date(year, month, _cal.monthrange(year, month)[1])
+
+    async with pool.acquire() as conn:
+        staff_rows = await conn.fetch("""
+            SELECT s.id, s.first_name, s.last_name, s.role, s.branch,
+                   s.salary_type, s.salary_rate, s.salary_work_days
+            FROM staff s
+            WHERE (s.active = TRUE OR s.active IS NULL) AND s.role <> 'agent'
+            ORDER BY s.branch NULLS LAST, s.last_name, s.first_name
+        """)
+        # Забор/доставка водителей за период одним запросом
+        route_rows = await conn.fetch("""
+            SELECT r.driver_id,
+                COUNT(CASE WHEN r.type = 'pickup' AND ro.stop_status = 'done' THEN 1 END) AS pickup_done,
+                COUNT(CASE WHEN r.type IN ('delivery','mixed') AND ro.stop_status = 'done' THEN 1 END) AS delivery_done
+            FROM routes r
+            JOIN route_orders ro ON ro.route_id = r.id
+            WHERE r.date >= $1 AND r.date <= $2 AND r.driver_id IS NOT NULL
+            GROUP BY r.driver_id
+        """, start, end)
+        route_map = {r['driver_id']: r for r in route_rows}
+
+        # Ставки за точку
+        pu_rows = await conn.fetch("""
+            SELECT staff_id, service_key, unit_rate, rate_type
+            FROM staff_salary_per_unit
+            WHERE service_key IN ('__pickup__','__delivery__')
+        """)
+        pu_map = {}
+        for r in pu_rows:
+            pu_map.setdefault(r['staff_id'], {})[r['service_key']] = r
+
+        results = []
+        for s in staff_rows:
+            sid      = s['id']
+            sal_type = s['salary_type'] or 'fixed'
+            base     = float(s['salary_rate'] or 0)
+            entry = {
+                'staff_id': sid,
+                'name':     f"{s['last_name'] or ''} {s['first_name'] or ''}".strip(),
+                'role':     s['role'],
+                'branch':   s['branch'],
+                'salary_type': sal_type,
+                'base_amount': base,
+                'calc': {},
+                'total': None,
+            }
+
+            if sal_type == 'fixed':
+                entry['total'] = base
+
+            elif sal_type == 'per_point':
+                rd = route_map.get(sid, {})
+                pickup_cnt   = int(rd.get('pickup_done')   or 0)
+                delivery_cnt = int(rd.get('delivery_done') or 0)
+                rates = pu_map.get(sid, {})
+                p_row = rates.get('__pickup__')
+                d_row = rates.get('__delivery__')
+                p_rate = float(p_row['unit_rate'] if p_row else 0)
+                d_rate = float(d_row['unit_rate'] if d_row else 0)
+                entry['calc'] = {
+                    'pickup_count':    pickup_cnt,
+                    'pickup_rate':     p_rate,
+                    'delivery_count':  delivery_cnt,
+                    'delivery_rate':   d_rate,
+                }
+                entry['total'] = pickup_cnt * p_rate + delivery_cnt * d_rate
+
+            elif sal_type in ('percent', 'fixed_percent', 'per_unit', 'kpi', 'leads'):
+                entry['total'] = None  # Этап 2
+
+            results.append(entry)
+
+        return results
+
+
 async def trigger_order_agent_commission(order_id: int, order_num: str, total_price: float) -> None:
     """При доставке заказа начисляет комиссию агенту, который создал лид."""
     if not pool or not total_price: return
