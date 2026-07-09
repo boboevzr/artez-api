@@ -953,8 +953,10 @@ def _staff_public(s: dict) -> dict:
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
         "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
-        "plain_password": s.get("plain_password"),
-        "fired":          bool(s.get("fired", False)),
+        "plain_password":       s.get("plain_password"),
+        "fired":                bool(s.get("fired", False)),
+        "can_view_timesheet":   bool(s.get("can_view_timesheet", False)),
+        "salary_type":          s.get("salary_type"),
     }
 
 @app.post("/api/staff/login")
@@ -1024,7 +1026,7 @@ async def staff_update(staff_id: int, body: dict, me=Depends(get_current_staff))
     if not is_admin and not is_self:
         raise HTTPException(status_code=403, detail="Нет доступа")
     if is_admin:
-        allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","fired","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
+        allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","fired","can_view_timesheet","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
     else:
         allowed = {"gender","birth_date","branch"}
     updates = {k: v for k, v in body.items() if k in allowed}
@@ -1128,26 +1130,32 @@ class TimesheetEntry(BaseModel):
     type:     str   = "work"
     note:     str   = ""
 
+def _can_timesheet(me: dict) -> bool:
+    return me.get("role") in ("admin", "manager") or bool(me.get("can_view_timesheet"))
+
 @app.get("/api/admin/timesheet")
 async def get_timesheet_ep(year: int, month: int, staff_id: int = None,
                             me=Depends(get_current_staff)):
-    if me.get("role") not in ("admin", "manager"):
+    if not _can_timesheet(me):
         raise HTTPException(status_code=403)
+    # non-admin/manager can only see their own data
+    if me.get("role") not in ("admin", "manager"):
+        staff_id = me.get("id")
     rows = await db.get_timesheet(year, month, staff_id)
     for r in rows:
         r["date"] = str(r["date"]) if r.get("date") else ""
-    return {"ok": True, "rows": rows}
+    return {"ok": True, "rows": rows, "records": rows}
 
 @app.post("/api/admin/timesheet")
 async def create_timesheet_ep(body: TimesheetEntry, me=Depends(get_current_staff)):
-    if me.get("role") not in ("admin", "manager"):
+    if not _can_timesheet(me):
         raise HTTPException(status_code=403)
     row = await db.save_timesheet(body.dict())
     return {"ok": True, "entry": row}
 
 @app.put("/api/admin/timesheet/{ts_id}")
 async def update_timesheet_ep(ts_id: int, body: TimesheetEntry, me=Depends(get_current_staff)):
-    if me.get("role") not in ("admin", "manager"):
+    if not _can_timesheet(me):
         raise HTTPException(status_code=403)
     row = await db.update_timesheet(ts_id, body.dict())
     if not row:
@@ -1156,7 +1164,7 @@ async def update_timesheet_ep(ts_id: int, body: TimesheetEntry, me=Depends(get_c
 
 @app.delete("/api/admin/timesheet/{ts_id}")
 async def delete_timesheet_ep(ts_id: int, me=Depends(get_current_staff)):
-    if me.get("role") not in ("admin", "manager"):
+    if not _can_timesheet(me):
         raise HTTPException(status_code=403)
     ok = await db.delete_timesheet(ts_id)
     if not ok:
@@ -1165,7 +1173,7 @@ async def delete_timesheet_ep(ts_id: int, me=Depends(get_current_staff)):
 
 @app.post("/api/admin/timesheet/init-month")
 async def init_timesheet_month_ep(year: int, month: int, until_today: bool = False, me=Depends(get_current_staff)):
-    if me.get("role") not in ("admin", "manager"):
+    if not _can_timesheet(me):
         raise HTTPException(status_code=403)
     result = await db.init_timesheet_month(year, month, until_today=until_today)
     return {"ok": True, "created": result["created"]}
