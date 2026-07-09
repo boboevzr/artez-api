@@ -1136,10 +1136,10 @@ def _can_timesheet(me: dict) -> bool:
 @app.get("/api/admin/timesheet")
 async def get_timesheet_ep(year: int, month: int, staff_id: int = None,
                             me=Depends(get_current_staff)):
+    # All staff can view their own timesheet; only can_timesheet users can view others
     if not _can_timesheet(me):
-        raise HTTPException(status_code=403)
-    # non-admin/manager can only see their own data
-    if me.get("role") not in ("admin", "manager"):
+        staff_id = me.get("id")
+    elif me.get("role") not in ("admin", "manager"):
         staff_id = me.get("id")
     rows = await db.get_timesheet(year, month, staff_id)
     for r in rows:
