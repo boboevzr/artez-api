@@ -5939,6 +5939,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     notify_new_users:     bool = Body(False, embed=True),
     can_approve_debt:     bool = Body(False, embed=True),
     can_drive:            bool = Body(False, embed=True),
+    can_view_timesheet:   bool = Body(False, embed=True),
     order_stages:         str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -5949,19 +5950,20 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_create_order=$6, can_confirm_order=$7, order_stages=$8,
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
-                   can_approve_debt=$15, can_drive=$16
+                   can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users,
-                         can_approve_debt, can_drive""",
+                         can_approve_debt, can_drive, can_view_timesheet""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
-            can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt, can_drive)
+            can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt,
+            can_drive, can_view_timesheet)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
