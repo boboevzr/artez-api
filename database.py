@@ -1780,8 +1780,9 @@ async def delete_timesheet(ts_id: int) -> bool:
 
 async def init_timesheet_month(year: int, month: int, until_today: bool = False) -> dict:
     """Создать записи 'work' для всех активных не-агентов на каждый будний день месяца.
-    ON CONFLICT DO NOTHING — уже существующие записи не трогает.
-    until_today=True — только до сегодняшней даты включительно."""
+    Пропускает сотрудников с salary_type='percent'.
+    Учитывает hire_date — не создаёт записи раньше даты приёма.
+    ON CONFLICT DO NOTHING — уже существующие записи не трогает."""
     if not pool: return {"created": 0}
     import calendar as _cal
     from datetime import date
@@ -1789,15 +1790,24 @@ async def init_timesheet_month(year: int, month: int, until_today: bool = False)
     today = date.today()
     if until_today and date(year, month, 1) <= today:
         last_day = min(last_day, today.day if (today.year == year and today.month == month) else last_day)
+    month_start = date(year, month, 1)
     async with pool.acquire() as conn:
         staff_rows = await conn.fetch("""
-            SELECT id FROM staff
+            SELECT id, salary_type, hire_date FROM staff
             WHERE (active IS NULL OR active = TRUE)
               AND COALESCE(role,'') != 'agent'
+              AND COALESCE(salary_type,'') != 'percent'
         """)
         count = 0
+        skipped = 0
         for s in staff_rows:
-            for day in range(1, last_day + 1):
+            # Дата приёма: если нанят позже начала месяца — начинаем с его даты
+            hire = s["hire_date"]
+            if hire and hire > date(year, month, last_day):
+                skipped += 1
+                continue  # ещё не работал в этом месяце
+            start_day = max(1, hire.day if (hire and hire.year == year and hire.month == month) else 1)
+            for day in range(start_day, last_day + 1):
                 d = date(year, month, day)
                 if d.weekday() == 6:  # воскресенье — пропуск
                     continue
@@ -1808,7 +1818,7 @@ async def init_timesheet_month(year: int, month: int, until_today: bool = False)
                 """, s["id"], d)
                 if r.endswith("0 1"):
                     count += 1
-    return {"created": count}
+    return {"created": count, "skipped": skipped}
 
 async def reset_timesheet_month(year: int, month: int) -> dict:
     if not pool: return {"deleted": 0}
