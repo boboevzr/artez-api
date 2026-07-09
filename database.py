@@ -383,6 +383,7 @@ async def create_tables():
         # Зарплата сотрудников — рабочих дней в месяц
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS salary_work_days INTEGER DEFAULT 26",
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS fired BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS can_view_timesheet BOOLEAN DEFAULT FALSE",
         # Процентные ставки по типам работ
         """CREATE TABLE IF NOT EXISTS staff_salary_percents (
             id       SERIAL PRIMARY KEY,
