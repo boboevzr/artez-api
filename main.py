@@ -885,7 +885,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "callcenter": ["leads", "orders", "clients"],
     "driver":     ["leads", "orders", "status_delivery"],
     "logistics":  ["leads", "orders", "status"],
-    "washer":     ["leads", "orders", "status_wash"],
+    "washer":     ["orders", "status_wash"],
     "packer":     ["orders", "status"],
     "agent":      ["leads_own"],  # агент видит только свои лиды
 }
@@ -895,6 +895,7 @@ WASHER_STATUS_FLOW = {
     "received": "washing",
     "washing":  "drying",
     "drying":   "packing",
+    "packing":  "ready",
 }
 ALL_ORDER_STATUSES = [
     "new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"
