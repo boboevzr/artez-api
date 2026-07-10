@@ -19,6 +19,7 @@ from passlib.context import CryptContext
 from jose import jwt, JWTError
 
 import database as db
+import receipt
 
 logging.basicConfig(level=logging.INFO)
 
@@ -3993,6 +3994,63 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
         logging.warning(f"[channel_kb] failed order={order_id}: {e}", exc_info=True)
 
     return {"ok": True, "order": order}
+
+
+@app.post("/api/admin/orders/{order_id}/send-receipt")
+async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staff)):
+    """Отправляет клиенту JPG-чек заказа в Telegram (для статуса «Готов»)."""
+    role = staff.get("role", "")
+    if role != "admin" and "status" not in ROLE_PERMISSIONS.get(role, []):
+        raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
+
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+
+    items = await db.get_order_items(order_id)
+
+    branch = order.get("branch")
+    if branch == "navoi":
+        c1, c2 = await _get_cfg("contact_navoi_1"), await _get_cfg("contact_navoi_2")
+    else:
+        c1, c2 = await _get_cfg("contact_zarafshan_1"), await _get_cfg("contact_zarafshan_2")
+    if not c1 and not c2:
+        c1, c2 = await _get_cfg("contact_short"), await _get_cfg("contact_main")
+    branch_contacts = [c for c in (c1, c2) if c]
+
+    tg_id = await db.get_receipt_tg_id(order)
+    if not tg_id:
+        raise HTTPException(status_code=400, detail="У клиента нет Telegram")
+
+    try:
+        jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts)
+    except Exception as e:
+        logging.error(f"send-receipt render failed order={order_id}: {e}")
+        raise HTTPException(status_code=500, detail="Не удалось сформировать чек")
+
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=502, detail="BOT_TOKEN не настроен")
+
+    try:
+        form = aiohttp.FormData()
+        form.add_field("chat_id", str(tg_id))
+        form.add_field("photo", jpeg_bytes, filename="receipt.jpg", content_type="image/jpeg")
+        async with aiohttp.ClientSession() as session:
+            resp = await session.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
+                data=form, timeout=aiohttp.ClientTimeout(total=10))
+            resp_json = await resp.json()
+        if resp.status != 200 or not resp_json.get("ok"):
+            logging.error(f"send-receipt TG error order={order_id}: {resp_json}")
+            raise HTTPException(status_code=502, detail=resp_json.get("description") or "Ошибка отправки в Telegram")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"send-receipt TG request failed order={order_id}: {e}")
+        raise HTTPException(status_code=502, detail="Ошибка отправки в Telegram")
+
+    return {"ok": True}
+
 
 @app.get("/api/admin/orders/{order_id}/items")
 async def admin_get_order_items(order_id: int, _=Depends(get_current_staff)):

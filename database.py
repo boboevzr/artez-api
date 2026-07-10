@@ -1015,6 +1015,17 @@ async def get_tg_id_by_phone(phone: str):
         return row["tg_id"] if row else None
 
 
+async def get_receipt_tg_id(order: dict) -> int | None:
+    """Определяет tg_id клиента для отправки чека: сначала client_tg_id заказа, потом по телефону."""
+    tg_id = order.get('client_tg_id')
+    if tg_id:
+        return tg_id
+    phone = order.get('client_phone')
+    if phone:
+        return await get_tg_id_by_phone(phone)
+    return None
+
+
 async def update_user_name(user_id: int, first_name: str):
     if not pool: return
     async with pool.acquire() as conn:
