@@ -6159,6 +6159,19 @@ async def delete_month_accruals(staff_id: int, year: int, month: int, _=Depends(
     deleted = await db.delete_month_accruals(staff_id, year, month)
     return {"ok": True, "deleted": deleted}
 
+@app.post("/api/admin/salary/opening-balance")
+async def set_opening_balance(body: dict = Body(...), me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(403)
+    result = await db.set_opening_balance(
+        staff_id   = int(body["staff_id"]),
+        year       = int(body["year"]),
+        month      = int(body["month"]),
+        target     = float(body["amount"]),
+        created_by = me["id"],
+    )
+    return {"ok": True, **result}
+
 @app.patch("/api/admin/salary/ledger/{entry_id}")
 async def salary_ledger_update(entry_id: int, body: dict = Body(...), _=Depends(_get_admin)):
     row = await db.update_salary_ledger_entry(entry_id, float(body["amount"]), body.get("note",""))

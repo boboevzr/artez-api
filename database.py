@@ -5271,6 +5271,7 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
             elif t == 'fine': fine += amt
             else: other += amt
 
+        # running — только движения внутри месяца (без opening_balance)
         running = round(op + accrual + advance + salary_payment + fine + other, 2)
         result_days.append({
             'date': date_str,
@@ -5284,12 +5285,51 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
             'closing': running,
             'entries': entries,
         })
+
+    # Итоги за месяц
+    total_accrual = sum(d['accrual'] for d in result_days)
+    total_advance = sum(d['advance'] for d in result_days)
+    total_fine    = sum(d['fine']    for d in result_days)
+    total_payment = sum(d['salary_payment'] for d in result_days)
+    total_other   = sum(d['other']   for d in result_days)
+    month_balance = round(total_accrual + total_advance + total_fine + total_payment + total_other, 2)
+
     return {
         'days': result_days,
         'opening_balance': opening_balance,
         'salary_type': sal_type,
         'hourly_rate': hourly_rate,
+        'total_accrual': total_accrual,
+        'total_advance': abs(total_advance),
+        'total_fine': abs(total_fine),
+        'total_payment': abs(total_payment),
+        'month_balance': month_balance,
+        'final_balance': round(opening_balance + month_balance, 2),
     }
+
+async def set_opening_balance(staff_id: int, year: int, month: int,
+                               target: float, created_by: int) -> dict:
+    """Устанавливает остаток на начало месяца через корректирующую запись в предыдущем периоде."""
+    if not pool: return {}
+    from datetime import date as _date
+    period = _date(year, month, 1)
+    async with pool.acquire() as conn:
+        current = float(await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM salary_ledger WHERE staff_id=$1 AND period < $2",
+            staff_id, period) or 0)
+        diff = round(target - current, 2)
+        if diff == 0:
+            return {'ok': True, 'diff': 0}
+        # Корректировка записывается в предыдущий период
+        prev_month = month - 1 if month > 1 else 12
+        prev_year  = year if month > 1 else year - 1
+        prev_period = _date(prev_year, prev_month, 1)
+        row = await conn.fetchrow("""
+            INSERT INTO salary_ledger (staff_id, period, type, amount, note, created_by)
+            VALUES ($1,$2,'adjustment',$3,'Ручная корректировка входящего остатка',$4)
+            RETURNING id
+        """, staff_id, prev_period, diff, created_by)
+        return {'ok': True, 'diff': diff, 'entry_id': row['id'] if row else None}
 
 async def delete_month_accruals(staff_id: int, year: int, month: int) -> int:
     """Удаляет все записи типа 'accrual' за указанный период для сотрудника."""
