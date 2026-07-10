@@ -3846,58 +3846,46 @@ async def get_cash_dashboard() -> dict:
             "SELECT COALESCE(SUM(amount),0) AS total FROM cash_handovers WHERE to_type IN ('bank','safe') AND created_at::date=$1", today)
         r3 = await conn.fetchrow(
             "SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt FROM expenses WHERE status IN ('pending','mgr_approved')")
-        r24 = await conn.fetchrow("""
-            WITH pmt AS (
-                SELECT order_id, COALESCE(SUM(amount),0) AS paid
-                FROM order_payments
-                WHERE NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
-                GROUP BY order_id
-            )
-            SELECT
-                COALESCE(SUM(
-                    CASE WHEN o.payment_method='cash'
-                              AND o.payment_status IN ('unpaid','partial')
-                              AND o.status NOT IN ('cancelled','delivered')
-                    THEN GREATEST(0,
-                        COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
-                        - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
-                        - COALESCE(p.paid,0))
-                    ELSE 0 END
-                ), 0) AS pending_cash,
-                COALESCE(SUM(
-                    CASE WHEN o.debt_responsible_id IS NOT NULL
-                              AND o.payment_status IN ('unpaid','partial')
-                    THEN GREATEST(0,
-                        COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
-                        - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
-                        - COALESCE(p.paid,0))
-                    ELSE 0 END
-                ), 0) AS debt_total,
-                COUNT(*) FILTER (
-                    WHERE o.debt_responsible_id IS NOT NULL
-                      AND o.payment_status IN ('unpaid','partial')
-                ) AS debt_count,
-                COUNT(*) FILTER (
-                    WHERE o.debt_responsible_id IS NOT NULL
-                      AND o.payment_status IN ('unpaid','partial')
-                      AND o.debt_due_date IS NOT NULL
-                      AND o.debt_due_date < CURRENT_DATE
-                ) AS overdue_cnt
+        # К оплате: все заказы в работе (не доставлены), у которых есть остаток
+        r_pending = await conn.fetchrow("""
+            SELECT COALESCE(SUM(GREATEST(0,
+                COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                - COALESCE((SELECT SUM(op.amount) FROM order_payments op
+                             WHERE op.order_id = o.id
+                               AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)), 0)
+            )), 0) AS total
             FROM orders o
-            LEFT JOIN pmt p ON p.order_id = o.id
-            WHERE o.status NOT IN ('cancelled')
+            WHERE o.payment_status IN ('unpaid','partial')
+              AND o.status NOT IN ('cancelled','delivered')
+        """)
+        # Долги: доставленные с debt_responsible_id, ещё не оплачены полностью
+        r_debt = await conn.fetchrow("""
+            SELECT
+                COUNT(*) AS total_cnt,
+                COUNT(CASE WHEN o.debt_due_date IS NOT NULL AND o.debt_due_date < CURRENT_DATE THEN 1 END) AS overdue_cnt,
+                COALESCE(SUM(GREATEST(0,
+                    COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                    - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                    - COALESCE((SELECT SUM(op.amount) FROM order_payments op
+                                 WHERE op.order_id = o.id
+                                   AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)), 0)
+                )), 0) AS total_debt
+            FROM orders o
+            WHERE o.debt_responsible_id IS NOT NULL
+              AND o.payment_status IN ('unpaid','partial')
         """)
     return {
         'staff_on_hand':          staff_on_hand,
         'manager_on_hand':        manager_on_hand,
         'admin_on_hand':          admin_on_hand,
         'banked_today':           float(r1['total']),
-        'pending_client_cash':    float(r24['pending_cash']),
+        'pending_client_cash':    float(r_pending['total']),
         'expenses_pending_sum':   float(r3['total']),
         'expenses_pending_count': int(r3['cnt']),
-        'debt_total':             float(r24['debt_total']),
-        'debt_count':             int(r24['debt_count']),
-        'debt_overdue_count':     int(r24['overdue_cnt']),
+        'debt_total':             float(r_debt['total_debt']),
+        'debt_count':             int(r_debt['total_cnt']),
+        'debt_overdue_count':     int(r_debt['overdue_cnt']),
     }
 
 async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
