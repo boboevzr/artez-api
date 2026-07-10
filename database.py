@@ -3849,7 +3849,10 @@ async def get_cash_dashboard() -> dict:
         # К оплате: все заказы в работе (не доставлены), у которых есть остаток
         r_pending = await conn.fetchrow("""
             SELECT COALESCE(SUM(GREATEST(0,
-                COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                COALESCE(NULLIF((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                                  FROM order_items WHERE order_id=o.id), 0),
+                         COALESCE(o.total_price,0), 0)
+                - COALESCE(o.discount_sum,0)
                 - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
                 - COALESCE((SELECT SUM(op.amount) FROM order_payments op
                              WHERE op.order_id = o.id
@@ -3865,7 +3868,10 @@ async def get_cash_dashboard() -> dict:
                 COUNT(*) AS total_cnt,
                 COUNT(CASE WHEN o.debt_due_date IS NOT NULL AND o.debt_due_date < CURRENT_DATE THEN 1 END) AS overdue_cnt,
                 COALESCE(SUM(GREATEST(0,
-                    COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                    COALESCE(NULLIF((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                                      FROM order_items WHERE order_id=o.id), 0),
+                             COALESCE(o.total_price,0), 0)
+                    - COALESCE(o.discount_sum,0)
                     - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
                     - COALESCE((SELECT SUM(op.amount) FROM order_payments op
                                  WHERE op.order_id = o.id
@@ -4408,7 +4414,10 @@ async def get_orders_with_debt() -> list:
                    TRIM(COALESCE(sr.last_name,'') || ' ' || COALESCE(sr.first_name,'')) AS responsible_name,
                    sr.id AS responsible_id,
                    GREATEST(0,
-                     COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
+                     COALESCE(NULLIF((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                                       FROM order_items WHERE order_id=o.id), 0),
+                              COALESCE(o.total_price,0), 0)
+                     - COALESCE(o.discount_sum,0)
                      - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
                      - COALESCE((SELECT SUM(amount) FROM order_payments
                                   WHERE order_id=o.id
