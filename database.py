@@ -1650,11 +1650,19 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
     async with pool.acquire() as conn:
         staff_rows = await conn.fetch("""
             SELECT s.id, s.first_name, s.last_name, s.role, s.branch,
-                   s.salary_type, s.salary_rate, s.salary_work_days
+                   s.salary_type, s.salary_rate, s.salary_work_days,
+                   COALESCE(s.active, TRUE) AS active
             FROM staff s
-            WHERE (s.active = TRUE OR s.active IS NULL) AND s.role <> 'agent'
+            WHERE s.role <> 'agent'
+              AND (
+                s.active = TRUE OR s.active IS NULL
+                OR EXISTS (
+                  SELECT 1 FROM timesheet t
+                  WHERE t.staff_id = s.id AND t.date >= $1 AND t.date <= $2
+                )
+              )
             ORDER BY s.branch NULLS LAST, s.last_name, s.first_name
-        """)
+        """, start, end)
 
         # Часы из табеля за период (все типы записей)
         ts_rows = await conn.fetch("""
@@ -1700,6 +1708,7 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 'name':        f"{s['last_name'] or ''} {s['first_name'] or ''}".strip(),
                 'role':        s['role'],
                 'branch':      s['branch'],
+                'active':      bool(s['active']),
                 'salary_type': sal_type,
                 'base_amount': base,
                 'calc':        {},
