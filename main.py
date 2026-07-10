@@ -1187,6 +1187,18 @@ async def get_monthly_salary_ep(year: int, month: int, me=Depends(get_current_st
     data = await db.get_monthly_salary_calc(year, month)
     return {"ok": True, "staff": data}
 
+@app.get("/api/admin/monitoring/agents")
+async def get_agent_monitoring_ep(me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    data = await db.get_agent_monitoring_stats()
+    return {
+        "ok": True,
+        "agents": data.get("agents", []),
+        "order_status_breakdown": data.get("order_status_breakdown", {}),
+        "activity_trend_7d": data.get("activity_trend_7d", []),
+    }
+
 @app.get("/api/admin/staff/{staff_id}/commissions")
 async def get_staff_commissions_ep(staff_id: int, year: int = None, month: int = None,
                                     me=Depends(get_current_staff)):

@@ -5509,6 +5509,174 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
         'final_balance': round(opening_balance + month_balance, 2),
     }
 
+async def get_agent_monitoring_stats() -> dict:
+    """Мониторинг активности персонала (эвристика по order_activity/lead_calls/chat_messages,
+    без отдельной колонки last_active в БД)."""
+    if not pool: return {"agents": [], "order_status_breakdown": {}, "activity_trend_7d": []}
+
+    from datetime import date as _date3
+
+    today_tk = datetime.now(_TASHKENT).date()
+    yesterday_tk = today_tk - timedelta(days=1)
+    week_start_tk = today_tk - timedelta(days=6)
+    ts_from, ts_to = _tz_range(str(week_start_tk), str(today_tk))
+
+    async with pool.acquire() as conn:
+        staff_rows = await conn.fetch(
+            "SELECT id, first_name, last_name, role, branch FROM staff WHERE active = true")
+
+        oa_rows = await conn.fetch("""
+            SELECT staff_id,
+                   MAX(created_at) AS last_active,
+                   COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS actions_today,
+                   COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2) AS actions_yesterday
+            FROM order_activity
+            WHERE staff_id IS NOT NULL
+            GROUP BY staff_id
+        """, today_tk, yesterday_tk)
+
+        lc_rows = await conn.fetch("""
+            SELECT operator_id AS staff_id,
+                   MAX(created_at) AS last_active,
+                   COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS actions_today,
+                   COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2) AS actions_yesterday
+            FROM lead_calls
+            WHERE operator_id IS NOT NULL
+            GROUP BY operator_id
+        """, today_tk, yesterday_tk)
+
+        cm_rows = await conn.fetch("""
+            SELECT sender_name,
+                   MAX(created_at) AS last_active,
+                   COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS actions_today,
+                   COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2) AS actions_yesterday
+            FROM chat_messages
+            WHERE sender_type = 'staff'
+            GROUP BY sender_name
+        """, today_tk, yesterday_tk)
+
+        status_row = await conn.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (WHERE status NOT IN ('delivered','cancelled')) AS in_progress,
+                COUNT(*) FILTER (
+                    WHERE status = 'delivered'
+                      AND (updated_at AT TIME ZONE 'Asia/Tashkent')::date = $1
+                ) AS delivered_today,
+                COUNT(*) FILTER (
+                    WHERE status = 'cancelled'
+                      AND (updated_at AT TIME ZONE 'Asia/Tashkent')::date = $1
+                ) AS cancelled_today
+            FROM orders
+        """, today_tk)
+
+        trend_oa_rows = await conn.fetch("""
+            SELECT (created_at AT TIME ZONE 'Asia/Tashkent')::date AS day, COUNT(*) AS cnt
+            FROM order_activity
+            WHERE created_at >= $1 AND created_at < $2
+            GROUP BY day
+        """, ts_from, ts_to)
+
+        trend_lc_rows = await conn.fetch("""
+            SELECT (created_at AT TIME ZONE 'Asia/Tashkent')::date AS day, COUNT(*) AS cnt
+            FROM lead_calls
+            WHERE created_at >= $1 AND created_at < $2
+            GROUP BY day
+        """, ts_from, ts_to)
+
+    # ── merge по staff_id: order_activity + lead_calls ──────────────────
+    by_id: dict = {}
+    for r in oa_rows:
+        by_id[r['staff_id']] = {
+            'last_active': r['last_active'],
+            'actions_today': r['actions_today'] or 0,
+            'actions_yesterday': r['actions_yesterday'] or 0,
+        }
+    for r in lc_rows:
+        sid = r['staff_id']
+        cur = by_id.get(sid)
+        if cur is None:
+            by_id[sid] = {
+                'last_active': r['last_active'],
+                'actions_today': r['actions_today'] or 0,
+                'actions_yesterday': r['actions_yesterday'] or 0,
+            }
+        else:
+            if r['last_active'] and (cur['last_active'] is None or r['last_active'] > cur['last_active']):
+                cur['last_active'] = r['last_active']
+            cur['actions_today'] += r['actions_today'] or 0
+            cur['actions_yesterday'] += r['actions_yesterday'] or 0
+
+    # ── merge по имени (sender_name) для chat_messages ───────────────────
+    by_name: dict = {}
+    for r in cm_rows:
+        name = (r['sender_name'] or '').strip()
+        if not name:
+            continue
+        by_name[name] = {
+            'last_active': r['last_active'],
+            'actions_today': r['actions_today'] or 0,
+            'actions_yesterday': r['actions_yesterday'] or 0,
+        }
+
+    agents = []
+    for s in staff_rows:
+        sid = s['id']
+        full_name = f"{(s['last_name'] or '').strip()} {(s['first_name'] or '').strip()}".strip()
+        name_key = ((s['last_name'] or '') + ' ' + (s['first_name'] or '')).strip()
+
+        last_active = None
+        actions_today = 0
+        actions_yesterday = 0
+
+        m1 = by_id.get(sid)
+        if m1:
+            last_active = m1['last_active']
+            actions_today += m1['actions_today']
+            actions_yesterday += m1['actions_yesterday']
+
+        m2 = by_name.get(name_key)
+        if m2:
+            if m2['last_active'] and (last_active is None or m2['last_active'] > last_active):
+                last_active = m2['last_active']
+            actions_today += m2['actions_today']
+            actions_yesterday += m2['actions_yesterday']
+
+        agents.append({
+            'id': sid,
+            'name': full_name,
+            'role': s['role'],
+            'branch': s['branch'],
+            'last_active': last_active.isoformat() if last_active else None,
+            'actions_today': int(actions_today),
+            'actions_yesterday': int(actions_yesterday),
+        })
+
+    order_status_breakdown = {
+        'in_progress': int(status_row['in_progress']) if status_row else 0,
+        'delivered_today': int(status_row['delivered_today']) if status_row else 0,
+        'cancelled_today': int(status_row['cancelled_today']) if status_row else 0,
+    }
+
+    trend_map: dict = {}
+    for r in trend_oa_rows:
+        trend_map[r['day']] = trend_map.get(r['day'], 0) + (r['cnt'] or 0)
+    for r in trend_lc_rows:
+        trend_map[r['day']] = trend_map.get(r['day'], 0) + (r['cnt'] or 0)
+
+    activity_trend_7d = []
+    for i in range(7):
+        d = week_start_tk + timedelta(days=i)
+        activity_trend_7d.append({
+            'date': str(d),
+            'actions': int(trend_map.get(d, 0)),
+        })
+
+    return {
+        'agents': agents,
+        'order_status_breakdown': order_status_breakdown,
+        'activity_trend_7d': activity_trend_7d,
+    }
+
 async def set_opening_balance(staff_id: int, year: int, month: int,
                                target: float, created_by: int) -> dict:
     """Устанавливает остаток на начало месяца через корректирующую запись в предыдущем периоде."""
