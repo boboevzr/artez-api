@@ -2789,8 +2789,8 @@ async def update_order_status(order_id: int, status: str, note: str = "") -> dic
         row = await conn.fetchrow("""
             UPDATE orders SET
                 status=$2,
-                washed_at = CASE WHEN $2='washing' THEN NOW() ELSE washed_at END,
-                packed_at = CASE WHEN $2='packing' THEN NOW() ELSE packed_at END
+                washed_at = CASE WHEN $2::text='washing' THEN NOW() ELSE washed_at END,
+                packed_at = CASE WHEN $2::text='packing' THEN NOW() ELSE packed_at END
             WHERE id=$1 RETURNING *""", order_id, status)
         if row:
             await conn.execute("""
