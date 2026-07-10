@@ -1761,6 +1761,22 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         lead_sum_map = {r['staff_id']: {'total': float(r['total']), 'count': int(r['count'])}
                         for r in lead_sum_rows}
 
+        # Упакованные заказы за период (для percent packing)
+        packing_rows = await conn.fetch("""
+            SELECT s.id AS staff_id,
+                COALESCE(SUM(COALESCE(o.total_price, 0)), 0) AS total_sum,
+                COUNT(DISTINCT o.id) AS order_count
+            FROM staff s
+            JOIN orders o ON o.packer_login = s.login
+            WHERE s.login IS NOT NULL
+              AND o.status NOT IN ('cancelled')
+              AND o.created_at >= $1::timestamptz
+              AND o.created_at <  $2::timestamptz
+            GROUP BY s.id
+        """, start, end)
+        packing_map = {r['staff_id']: {'total': float(r['total_sum']), 'count': int(r['order_count'])}
+                       for r in packing_rows}
+
         results = []
         for s in staff_rows:
             sid      = s['id']
@@ -1868,6 +1884,18 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                     calc_lines['lead'] = {
                         'pct': lead_pct, 'base': l_sum,
                         'earn': l_earn, 'count': l_cnt,
+                    }
+
+                packing_pct = rates.get('packing', 0)
+                if packing_pct:
+                    pd = packing_map.get(sid, {})
+                    pk_sum  = float(pd.get('total', 0) or 0)
+                    pk_cnt  = int  (pd.get('count', 0) or 0)
+                    pk_earn = round(pk_sum * packing_pct / 100, 2)
+                    total_pct += pk_earn
+                    calc_lines['packing'] = {
+                        'pct': packing_pct, 'base': pk_sum,
+                        'earn': pk_earn, 'count': pk_cnt,
                     }
 
                 if sal_type == 'fixed_percent' and fixed_earn:
@@ -5240,6 +5268,8 @@ async def ensure_salary_ledger_table():
             "ALTER TABLE settings ADD COLUMN IF NOT EXISTS advance_max_percent NUMERIC(5,2) DEFAULT 50")
         await conn.execute(
             "ALTER TABLE salary_ledger ADD COLUMN IF NOT EXISTS fine_reason TEXT DEFAULT NULL")
+        await conn.execute(
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS packer_login VARCHAR(100) DEFAULT NULL")
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0

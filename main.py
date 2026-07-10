@@ -3758,10 +3758,39 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
     await db.update_lead_status(lead_id, "converted")
     return {"ok": True, "order_num": order_num}
 
+@app.get("/api/admin/staff/packers")
+async def get_packers(_=Depends(get_current_staff)):
+    """Активные сотрудники с ролью упаковщика. Fallback — все активные не-агенты."""
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, login, first_name, last_name, branch, role
+            FROM staff
+            WHERE (active IS NULL OR active = TRUE)
+            ORDER BY last_name, first_name
+        """)
+    packers = [dict(r) for r in rows if r['role'] in ('packer', 'operator_packing')]
+    if not packers:
+        packers = [dict(r) for r in rows if r['role'] not in ('agent',)]
+    return {"ok": True, "packers": packers}
+
+
+@app.patch("/api/admin/orders/{order_id}/packer")
+async def set_order_packer(order_id: int,
+                            packer_login: str = Body(..., embed=True),
+                            staff=Depends(get_current_staff)):
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE orders SET packer_login=$1 WHERE id=$2 RETURNING id", packer_login, order_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    return {"ok": True}
+
+
 @app.patch("/api/admin/orders/{order_id}/status")
 async def admin_change_order_status(order_id: int, staff=Depends(get_current_staff),
                                      status: str = Body(..., embed=True),
-                                     note: str = Body("", embed=True)):
+                                     note: str = Body("", embed=True),
+                                     packer_login: str = Body(None, embed=True)):
     role = staff.get("role", "")
     if role == "washer":
         order = await db.get_order_by_id(order_id)
@@ -3791,6 +3820,9 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
         raise HTTPException(status_code=400, detail="Неизвестный статус")
     order = await db.update_order_status(order_id, status,
                                           note=note or f"Статус изменён сотрудником {staff.get('login','')}")
+    if status == 'packing' and packer_login:
+        async with db.pool.acquire() as _pc:
+            await _pc.execute("UPDATE orders SET packer_login=$1 WHERE id=$2", packer_login, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
 
