@@ -8003,8 +8003,9 @@ async def autodial_create(body: _AutodialCreate, _=Depends(_get_admin)):
 
 @app.put("/api/admin/autodial/campaigns/{cid}")
 async def autodial_update(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    import json as _json
     allowed = {'name','ivr_exten','max_parallel','sched_time_from','sched_time_to',
-               'sched_days','sched_date_from','sched_date_to'}
+               'sched_days','sched_date_from','sched_date_to','group_ids'}
     raw = {k: v for k, v in body.items() if k in allowed}
     if not raw: raise HTTPException(400, "no updatable fields")
     fields = {}
@@ -8013,6 +8014,8 @@ async def autodial_update(cid: int, body: dict = Body(...), _=Depends(_get_admin
             fields[k] = _parse_time(v)
         elif k in ('sched_date_from', 'sched_date_to'):
             fields[k] = _parse_date(v)
+        elif k == 'group_ids':
+            fields[k] = _json.dumps(v or [])
         else:
             fields[k] = v or None
     sets = ', '.join(f"{k}=${i+2}" for i, k in enumerate(fields))
