@@ -1299,6 +1299,8 @@ async def attendance_checkin_ep(me=Depends(get_current_staff)):
     if me.get("salary_type") not in ("fixed", "fixed_percent"):
         raise HTTPException(status_code=403, detail="Доступно только для сотрудников с окладом")
     row = await db.attendance_check_in(me["id"])
+    if row.get("error") == "already_in":
+        raise HTTPException(status_code=400, detail="Вы уже отметили приход, сначала отметьте уход")
     return {"ok": True, "attendance": row}
 
 @app.post("/api/staff/attendance/checkout")
@@ -1312,8 +1314,8 @@ async def attendance_checkout_ep(me=Depends(get_current_staff)):
 
 @app.get("/api/staff/attendance/today")
 async def attendance_today_ep(me=Depends(get_current_staff)):
-    row = await db.get_attendance_today(me["id"])
-    return {"ok": True, "attendance": row}
+    data = await db.get_attendance_today(me["id"])
+    return {"ok": True, **data}
 
 @app.get("/api/admin/attendance")
 async def admin_attendance_ep(year: int, month: int, staff_id: int = None,
