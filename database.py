@@ -1694,11 +1694,15 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         route_sum_rows = await conn.fetch("""
             SELECT r.driver_id,
                 COALESCE(SUM(CASE WHEN r.type = 'pickup'
-                    THEN COALESCE(o.total_price,0) END), 0) AS pickup_sum,
+                    THEN COALESCE((SELECT SUM(COALESCE(oi.actual_total_sum,
+                                                       oi.price_per_sqm * COALESCE(oi.actual_sqm, oi.sqm), 0))
+                                   FROM order_items oi WHERE oi.order_id = o.id), 0) END), 0) AS pickup_sum,
                 COUNT(DISTINCT CASE WHEN r.type = 'pickup'
                     THEN ro.order_id END) AS pickup_count,
                 COALESCE(SUM(CASE WHEN r.type IN ('delivery','mixed')
-                    THEN COALESCE(o.total_price,0) END), 0) AS delivery_sum,
+                    THEN COALESCE((SELECT SUM(COALESCE(oi.actual_total_sum,
+                                                       oi.price_per_sqm * COALESCE(oi.actual_sqm, oi.sqm), 0))
+                                   FROM order_items oi WHERE oi.order_id = o.id), 0) END), 0) AS delivery_sum,
                 COUNT(DISTINCT CASE WHEN r.type IN ('delivery','mixed')
                     THEN ro.order_id END) AS delivery_count
             FROM routes r
@@ -1749,7 +1753,11 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         lead_sum_rows = await conn.fetch("""
             SELECT l.assigned_to AS staff_id,
                 COUNT(l.id) AS count,
-                COALESCE(SUM(COALESCE(o.total_price, 0)), 0) AS total
+                COALESCE(SUM(
+                    COALESCE((SELECT SUM(COALESCE(oi.actual_total_sum,
+                                                  oi.price_per_sqm * COALESCE(oi.actual_sqm, oi.sqm), 0))
+                              FROM order_items oi WHERE oi.order_id = o.id), 0)
+                ), 0) AS total
             FROM leads l
             LEFT JOIN orders o ON o.order_num = l.converted_order
             WHERE l.status = 'converted'
@@ -1764,7 +1772,11 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         # Упакованные заказы за период (для percent packing)
         packing_rows = await conn.fetch("""
             SELECT s.id AS staff_id,
-                COALESCE(SUM(COALESCE(o.total_price, 0)), 0) AS total_sum,
+                COALESCE(SUM(
+                    COALESCE((SELECT SUM(COALESCE(oi.actual_total_sum,
+                                                  oi.price_per_sqm * COALESCE(oi.actual_sqm, oi.sqm), 0))
+                              FROM order_items oi WHERE oi.order_id = o.id), 0)
+                ), 0) AS total_sum,
                 COUNT(DISTINCT o.id) AS order_count
             FROM staff s
             JOIN orders o ON o.packer_login = s.login
