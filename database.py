@@ -4411,8 +4411,14 @@ async def get_orders_with_debt() -> list:
         rows = await conn.fetch("""
             SELECT o.id, o.order_num, o.status, o.debt_due_date, o.debt_approved_at,
                    o.client_first_name, o.client_last_name, o.client_phone,
+                   o.payment_status, o.total_price,
                    TRIM(COALESCE(sr.last_name,'') || ' ' || COALESCE(sr.first_name,'')) AS responsible_name,
                    sr.id AS responsible_id,
+                   COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                               FROM order_items WHERE order_id=o.id), 0) AS items_total,
+                   COALESCE((SELECT SUM(amount) FROM order_payments
+                              WHERE order_id=o.id
+                                AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)),0) AS paid_amount,
                    GREATEST(0,
                      COALESCE(NULLIF((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                                        FROM order_items WHERE order_id=o.id), 0),
@@ -4428,7 +4434,7 @@ async def get_orders_with_debt() -> list:
              WHERE o.debt_responsible_id IS NOT NULL
              ORDER BY o.debt_due_date ASC NULLS LAST, o.id DESC
         """)
-        return [r for r in [dict(r) for r in rows] if r["debt_amount"] > 0]
+        return [dict(r) for r in rows]
 
 async def extend_debt_due_date(order_id: int, new_due_date_str: str, note: str = '') -> bool:
     if not pool: return False
