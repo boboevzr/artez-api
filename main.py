@@ -1291,6 +1291,39 @@ async def reset_timesheet_month_ep(year: int, month: int, body: dict, me=Depends
     return {"ok": True, "deleted": result["deleted"]}
 
 # ══════════════════════════════════════
+#  ОТМЕТКИ ПРИХОДА/УХОДА (staff_attendance)
+# ══════════════════════════════════════
+
+@app.post("/api/staff/attendance/checkin")
+async def attendance_checkin_ep(me=Depends(get_current_staff)):
+    if me.get("salary_type") not in ("fixed", "fixed_percent"):
+        raise HTTPException(status_code=403, detail="Доступно только для сотрудников с окладом")
+    row = await db.attendance_check_in(me["id"])
+    return {"ok": True, "attendance": row}
+
+@app.post("/api/staff/attendance/checkout")
+async def attendance_checkout_ep(me=Depends(get_current_staff)):
+    if me.get("salary_type") not in ("fixed", "fixed_percent"):
+        raise HTTPException(status_code=403, detail="Доступно только для сотрудников с окладом")
+    row = await db.attendance_check_out(me["id"])
+    if row.get("error") == "not_checked_in":
+        raise HTTPException(status_code=400, detail="Сначала отметьте приход")
+    return {"ok": True, "attendance": row}
+
+@app.get("/api/staff/attendance/today")
+async def attendance_today_ep(me=Depends(get_current_staff)):
+    row = await db.get_attendance_today(me["id"])
+    return {"ok": True, "attendance": row}
+
+@app.get("/api/admin/attendance")
+async def admin_attendance_ep(year: int, month: int, staff_id: int = None,
+                               me=Depends(get_current_staff)):
+    if not _can_timesheet(me):
+        staff_id = me.get("id")
+    records = await db.get_admin_attendance(year, month, staff_id)
+    return {"ok": True, "records": records}
+
+# ══════════════════════════════════════
 #  МАРШРУТЫ (routes)
 # ══════════════════════════════════════
 

@@ -444,6 +444,17 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_timesheet_staff  ON timesheet(staff_id)",
         "CREATE INDEX IF NOT EXISTS idx_timesheet_date   ON timesheet(date)",
+        # Отметки прихода/ухода (для почасовых сотрудников)
+        """CREATE TABLE IF NOT EXISTS staff_attendance (
+            id            SERIAL PRIMARY KEY,
+            staff_id      INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+            date          DATE NOT NULL,
+            check_in_at   TIMESTAMPTZ,
+            check_out_at  TIMESTAMPTZ,
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(staff_id, date)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_staff_attendance_staff ON staff_attendance(staff_id)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -2136,6 +2147,78 @@ async def reset_timesheet_month(year: int, month: int) -> dict:
             year, month)
         deleted = int(result.split()[-1]) if result else 0
     return {"deleted": deleted}
+
+# ══════════════════════════════════════
+#  ОТМЕТКИ ПРИХОДА/УХОДА (staff_attendance)
+# ══════════════════════════════════════
+
+async def attendance_check_in(staff_id: int) -> dict:
+    if not pool: return {}
+    today = datetime.now(_TASHKENT).date()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO staff_attendance (staff_id, date, check_in_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (staff_id, date)
+            DO UPDATE SET check_in_at = COALESCE(staff_attendance.check_in_at, EXCLUDED.check_in_at)
+            RETURNING id, staff_id, date, check_in_at, check_out_at
+        """, staff_id, today)
+        return dict(row) if row else {}
+
+async def attendance_check_out(staff_id: int) -> dict:
+    if not pool: return {}
+    today = datetime.now(_TASHKENT).date()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT id, staff_id, date, check_in_at, check_out_at FROM staff_attendance WHERE staff_id=$1 AND date=$2",
+            staff_id, today)
+        if not existing or existing["check_in_at"] is None:
+            return {"error": "not_checked_in"}
+        if existing["check_out_at"] is not None:
+            return dict(existing)
+        row = await conn.fetchrow("""
+            UPDATE staff_attendance SET check_out_at = NOW()
+            WHERE staff_id=$1 AND date=$2
+            RETURNING id, staff_id, date, check_in_at, check_out_at
+        """, staff_id, today)
+        return dict(row) if row else {}
+
+async def get_attendance_today(staff_id: int) -> dict | None:
+    if not pool: return None
+    today = datetime.now(_TASHKENT).date()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, staff_id, date, check_in_at, check_out_at FROM staff_attendance WHERE staff_id=$1 AND date=$2",
+            staff_id, today)
+        return dict(row) if row else None
+
+async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        sql = """
+            SELECT a.staff_id, a.date, a.check_in_at, a.check_out_at,
+                   s.first_name, s.last_name, s.role, s.branch, s.salary_type
+            FROM staff_attendance a
+            JOIN staff s ON s.id = a.staff_id
+            WHERE EXTRACT(YEAR FROM a.date)=$1 AND EXTRACT(MONTH FROM a.date)=$2
+        """
+        args = [year, month]
+        if staff_id:
+            args.append(staff_id); sql += f" AND a.staff_id=${len(args)}"
+        sql += " ORDER BY a.date DESC, a.staff_id"
+        rows = await conn.fetch(sql, *args)
+        result = []
+        for r in rows:
+            result.append({
+                "staff_id": r["staff_id"],
+                "name": f"{r['last_name'] or ''} {r['first_name'] or ''}".strip(),
+                "role": r["role"],
+                "branch": r["branch"],
+                "date": str(r["date"]) if r["date"] else None,
+                "check_in_at": r["check_in_at"].isoformat() if r["check_in_at"] else None,
+                "check_out_at": r["check_out_at"].isoformat() if r["check_out_at"] else None,
+            })
+        return result
 
 async def create_lead(data: dict) -> dict:
     if not pool: return None
