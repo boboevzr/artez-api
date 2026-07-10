@@ -2782,6 +2782,19 @@ async def get_order_status_history(order_num: str) -> list:
             order_num)
         return [dict(r) for r in rows]
 
+async def get_order_debt_history(order_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT h.new_status, h.note, h.created_at
+              FROM order_status_history h
+              JOIN orders o ON o.order_num = h.order_num
+             WHERE o.id = $1
+               AND h.new_status IN ('delivered','debt_extended','debt_paid')
+             ORDER BY h.created_at
+        """, order_id)
+        return [dict(r) for r in rows]
+
 # ══════════════════════════════════════
 #  ДУБЛИКАТЫ ТЕЛЕФОНА
 # ══════════════════════════════════════

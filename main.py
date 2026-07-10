@@ -6090,6 +6090,11 @@ async def staff_mark_delivered(
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
 
+@app.get("/api/admin/orders/{order_id}/debt-history")
+async def get_debt_history(order_id: int, _=Depends(get_current_staff)):
+    rows = await db.get_order_debt_history(order_id)
+    return {"ok": True, "history": rows}
+
 @app.patch("/api/admin/orders/{order_id}/debt-due-date")
 async def patch_debt_due_date(order_id: int, due_date: str = Body(..., embed=True), note: str = Body('', embed=True), me=Depends(get_current_staff)):
     if me.get("role") != "admin":
