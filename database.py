@@ -3135,13 +3135,17 @@ async def get_cash_daily_total(date_str: str) -> dict:
         """, ts_from, ts_to)
         return dict(row) if row else {}
 
-async def get_cash_payment_history(year: int, month: int, branch: str = '') -> list:
+async def get_cash_payment_history(year: int, month: int, branch: str = '', day: int = 0) -> list:
     if not pool: return []
     from datetime import date as _date
     import calendar
-    first_day = _date(year, month, 1)
-    last_day  = _date(year, month, calendar.monthrange(year, month)[1])
-    ts_from, ts_to = _tz_range(str(first_day), str(last_day))
+    if day > 0:
+        target = _date(year, month, day)
+        ts_from, ts_to = _tz_range(str(target), str(target))
+    else:
+        first_day = _date(year, month, 1)
+        last_day  = _date(year, month, calendar.monthrange(year, month)[1])
+        ts_from, ts_to = _tz_range(str(first_day), str(last_day))
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT
