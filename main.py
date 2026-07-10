@@ -5496,6 +5496,24 @@ async def get_shifts(_=Depends(get_current_staff)):
     rows = await db.get_cash_shifts()
     return {"ok": True, "shifts": rows}
 
+@app.get("/api/admin/cash/daily-total")
+async def cash_daily_total(date: str = None, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403)
+    from datetime import date as _date
+    d = date or str(_date.today())
+    data = await db.get_cash_daily_total(d)
+    return {"ok": True, "date": d, **data}
+
+@app.get("/api/admin/cash/history")
+async def cash_payment_history(year: int = None, month: int = None, branch: str = '', me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403)
+    from datetime import date as _date
+    today = _date.today()
+    rows = await db.get_cash_payment_history(year or today.year, month or today.month, branch)
+    return {"ok": True, "rows": rows}
+
 @app.get("/api/media/{photo_id}")
 async def serve_order_photo(
     photo_id: int,

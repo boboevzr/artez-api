@@ -3119,6 +3119,50 @@ async def get_cash_shifts(limit: int = 50) -> list:
         """, limit)
         return [dict(r) for r in rows]
 
+async def get_cash_daily_total(date_str: str) -> dict:
+    if not pool: return {}
+    ts_from, ts_to = _tz_range(date_str, date_str)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT
+                COALESCE(SUM(CASE WHEN method='cash'     THEN amount ELSE 0 END), 0) AS cash,
+                COALESCE(SUM(CASE WHEN method='card'     THEN amount ELSE 0 END), 0) AS card,
+                COALESCE(SUM(CASE WHEN method='transfer' THEN amount ELSE 0 END), 0) AS transfer,
+                COALESCE(SUM(amount), 0) AS total
+            FROM order_payments
+            WHERE created_at >= $1 AND created_at < $2
+              AND NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
+        """, ts_from, ts_to)
+        return dict(row) if row else {}
+
+async def get_cash_payment_history(year: int, month: int, branch: str = '') -> list:
+    if not pool: return []
+    from datetime import date as _date
+    import calendar
+    first_day = _date(year, month, 1)
+    last_day  = _date(year, month, calendar.monthrange(year, month)[1])
+    ts_from, ts_to = _tz_range(str(first_day), str(last_day))
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT
+                (op.created_at AT TIME ZONE 'Asia/Tashkent')::date AS pay_date,
+                s.id AS staff_id,
+                TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS staff_name,
+                s.branch,
+                COALESCE(SUM(CASE WHEN op.method='cash'     THEN op.amount ELSE 0 END), 0) AS cash,
+                COALESCE(SUM(CASE WHEN op.method='card'     THEN op.amount ELSE 0 END), 0) AS card,
+                COALESCE(SUM(CASE WHEN op.method='transfer' THEN op.amount ELSE 0 END), 0) AS transfer,
+                COALESCE(SUM(op.amount), 0) AS total
+            FROM order_payments op
+            JOIN staff s ON s.id = op.created_by_staff_id
+            WHERE op.created_at >= $1 AND op.created_at < $2
+              AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)
+              AND ($3 = '' OR s.branch = $3)
+            GROUP BY pay_date, s.id, s.last_name, s.first_name, s.branch
+            ORDER BY pay_date DESC, staff_name
+        """, ts_from, ts_to, branch)
+        return [dict(r) for r in rows]
+
 # ── order_payments ────────────────────────────────────────────────────────────
 
 async def get_order_payments(order_id: int) -> list:
