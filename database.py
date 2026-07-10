@@ -1652,7 +1652,7 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
 
     async with pool.acquire() as conn:
         staff_rows = await conn.fetch("""
-            SELECT s.id, s.first_name, s.last_name, s.role, s.branch,
+            SELECT s.id, s.first_name, s.last_name, s.role, s.branch, s.login,
                    s.salary_type, s.salary_rate, s.salary_work_days,
                    COALESCE(s.active, TRUE) AS active
             FROM staff s
@@ -1699,6 +1699,32 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         pu_map = {}
         for r in pu_rows:
             pu_map.setdefault(r['staff_id'], {})[r['service_key']] = r
+
+        # Процентные ставки сотрудников (тип percent / fixed_percent)
+        sp_rows = await conn.fetch("SELECT staff_id, role, percent FROM staff_salary_percents")
+        sp_map: dict = {}  # staff_id -> {role: percent}
+        for r in sp_rows:
+            sp_map.setdefault(r['staff_id'], {})[r['role']] = float(r['percent'])
+
+        # Объём позиций по washer_login за период (для role='washing')
+        washing_rows = await conn.fetch("""
+            SELECT s.id AS staff_id,
+                   COALESCE(SUM(
+                       COALESCE(oi.actual_total_sum,
+                                oi.price_per_sqm * COALESCE(oi.actual_sqm, oi.sqm), 0)
+                   ), 0) AS total_sum,
+                   COUNT(DISTINCT oi.id) AS item_count
+            FROM staff s
+            JOIN order_items oi ON oi.washer_login = s.login
+            JOIN orders o ON o.id = oi.order_id
+            WHERE s.login IS NOT NULL
+              AND o.status != 'cancelled'
+              AND o.created_at >= $1::timestamptz
+              AND o.created_at <  $2::timestamptz
+            GROUP BY s.id
+        """, start, end)
+        washing_map = {r['staff_id']: {'total': float(r['total_sum']), 'count': int(r['item_count'])}
+                       for r in washing_rows}
 
         results = []
         for s in staff_rows:
@@ -1753,8 +1779,34 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 }
                 entry['total'] = pickup_cnt * p_rate + delivery_cnt * d_rate
 
+            elif sal_type in ('percent', 'fixed_percent'):
+                rates = sp_map.get(sid, {})
+                total_pct = 0.0
+                calc_lines = {}
+
+                washing_pct = rates.get('washing', 0)
+                if washing_pct:
+                    wd = washing_map.get(sid, {})
+                    w_sum  = wd.get('total', 0)
+                    w_cnt  = wd.get('count', 0)
+                    w_earn = round(w_sum * washing_pct / 100, 2)
+                    total_pct += w_earn
+                    calc_lines['washing'] = {'pct': washing_pct, 'base': w_sum, 'earn': w_earn, 'count': w_cnt}
+
+                # Фиксированная часть (fixed_percent)
+                fixed_earn = 0.0
+                if sal_type == 'fixed_percent' and base > 0:
+                    ts = ts_map.get(sid)
+                    norm_hours = norm_days * 8.0
+                    if ts:
+                        fixed_earn = round(base / norm_hours * float(ts['total_hours']), 2) if norm_hours > 0 else 0
+                    calc_lines['fixed'] = {'rate': base, 'earn': fixed_earn}
+
+                entry['calc'] = {'lines': calc_lines, 'norm_days': norm_days}
+                entry['total'] = round(total_pct + fixed_earn, 2)
+
             else:
-                entry['total'] = None  # Этап 2
+                entry['total'] = None  # не реализован
 
             # Часы из табеля — добавляем для любого типа, если есть
             if sal_type not in ('fixed', 'fixed_percent'):
