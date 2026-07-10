@@ -6132,7 +6132,9 @@ async def salary_ledger_list(staff_id: int, year: int, month: int, _=Depends(_ge
     return {"ok": True, "entries": rows}
 
 @app.post("/api/admin/salary/ledger")
-async def salary_ledger_add(body: dict = Body(...), me=Depends(_get_admin)):
+async def salary_ledger_add(body: dict = Body(...), me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
     row = await db.add_salary_ledger_entry(
         staff_id   = int(body["staff_id"]),
         period_str = body["period"],
