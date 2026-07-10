@@ -5193,64 +5193,90 @@ async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
         return dict(row) if row else {}
 
 async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> dict:
-    """Посуточный регистр за месяц: остаток на начало/конец каждого дня."""
+    """Посуточный регистр: начисление считается из табеля, авансы/штрафы из ledger."""
     if not pool: return {}
     from datetime import date as _date
+    import calendar as _cal
     period = _date(year, month, 1)
+    next_m = month + 1 if month < 12 else 1
+    next_y = year if month < 12 else year + 1
+    period_end = _date(next_y, next_m, 1)
+
     async with pool.acquire() as conn:
-        # Остаток до начала месяца
-        opening_balance = float(await conn.fetchval("""
-            SELECT COALESCE(SUM(amount), 0)
-            FROM salary_ledger
-            WHERE staff_id=$1 AND period < $2
-        """, staff_id, period) or 0)
-        # Все записи за месяц — начисления отображаем на 1-й день периода (не по created_at)
-        rows = await conn.fetch("""
-            SELECT sl.*,
-                   CASE WHEN sl.type = 'accrual'
-                        THEN sl.period
-                        ELSE DATE(sl.created_at AT TIME ZONE 'Asia/Tashkent')
-                   END AS entry_date,
+        # Накопленный баланс ДО этого месяца (все типы, все периоды < текущего)
+        opening_balance = float(await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM salary_ledger WHERE staff_id=$1 AND period < $2",
+            staff_id, period) or 0)
+
+        # Ставка и норма из staff
+        st = await conn.fetchrow(
+            "SELECT salary_type, salary_rate, salary_work_days FROM staff WHERE id=$1", staff_id)
+        sal_type   = (st['salary_type'] or 'fixed') if st else 'fixed'
+        sal_rate   = float((st['salary_rate'] or 0)) if st else 0.0
+        norm_days  = int((st['salary_work_days'] or 26)) if st else 26
+        norm_hours = norm_days * 8.0
+        hourly_rate = sal_rate / norm_hours if (sal_type in ('fixed','fixed_percent') and norm_hours > 0) else 0.0
+
+        # Табель за месяц
+        ts_rows = await conn.fetch(
+            "SELECT date, hours, type FROM timesheet WHERE staff_id=$1 AND date>=$2 AND date<$3 ORDER BY date",
+            staff_id, period, period_end)
+
+        # Ledger — только НЕ начисления (авансы, штрафы, выплаты) за этот период
+        ledger_rows = await conn.fetch("""
+            SELECT sl.*, DATE(sl.created_at AT TIME ZONE 'Asia/Tashkent') AS entry_date,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
             FROM salary_ledger sl
             LEFT JOIN staff sc ON sc.id = sl.created_by
-            WHERE sl.staff_id=$1 AND sl.period=$2
+            WHERE sl.staff_id=$1 AND sl.period=$2 AND sl.type != 'accrual'
             ORDER BY sl.created_at
         """, staff_id, period)
-    # Группируем по дням
+
+    # Карта табеля {date_str: hours}
+    ts_map = {str(r['date']): float(r['hours'] or 0) for r in ts_rows
+              if r['type'] in ('work', 'overtime')}
+
+    # Карта ledger по дате транзакции
     from collections import defaultdict
+    ledger_by_date = defaultdict(list)
+    for r in ledger_rows:
+        rd = dict(r)
+        rd['amount'] = float(r['amount'])
+        rd['entry_date'] = str(r['entry_date'])
+        ledger_by_date[rd['entry_date']].append(rd)
+
+    # Строим посуточную таблицу
     from datetime import date as _date2
-    day_entries = defaultdict(list)
-    for r in rows:
-        row_dict = dict(r)
-        row_dict['entry_date'] = str(r['entry_date'])  # serialize date to string
-        row_dict['amount'] = float(r['amount'])
-        day_entries[row_dict['entry_date']].append(row_dict)
-    # Строим посуточную таблицу (все дни с 1-го до сегодня или конца месяца)
-    import calendar
-    days_in_month = calendar.monthrange(year, month)[1]
+    days_in_month = _cal.monthrange(year, month)[1]
     today = _date2.today()
     last_day = days_in_month if (year < today.year or month < today.month) else min(days_in_month, today.day)
+
     result_days = []
     running = opening_balance
     for d in range(1, last_day + 1):
         date_str = f"{year}-{month:02d}-{d:02d}"
-        entries = day_entries.get(date_str, [])
+        entries  = ledger_by_date.get(date_str, [])
         op = running
-        accrual = 0.0; advance = 0.0; salary_payment = 0.0; fine = 0.0; other = 0.0
+
+        # Начисление из табеля
+        hours_today = ts_map.get(date_str, 0.0)
+        accrual = round(hourly_rate * hours_today, 2) if hourly_rate > 0 else 0.0
+
+        advance = 0.0; salary_payment = 0.0; fine = 0.0; other = 0.0
         for e in entries:
-            amt = float(e['amount'])
-            t = e['type']
-            if t == 'accrual': accrual += amt
-            elif t == 'advance': advance += amt
+            amt = e['amount']
+            t   = e['type']
+            if t == 'advance': advance += amt
             elif t == 'salary_payment': salary_payment += amt
             elif t == 'fine': fine += amt
             else: other += amt
-        running = op + accrual + advance + salary_payment + fine + other
+
+        running = round(op + accrual + advance + salary_payment + fine + other, 2)
         result_days.append({
             'date': date_str,
             'opening': op,
             'accrual': accrual,
+            'hours': hours_today,
             'advance': advance,
             'salary_payment': salary_payment,
             'fine': fine,
@@ -5258,7 +5284,12 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
             'closing': running,
             'entries': entries,
         })
-    return {'days': result_days, 'opening_balance': opening_balance}
+    return {
+        'days': result_days,
+        'opening_balance': opening_balance,
+        'salary_type': sal_type,
+        'hourly_rate': hourly_rate,
+    }
 
 async def delete_month_accruals(staff_id: int, year: int, month: int) -> int:
     """Удаляет все записи типа 'accrual' за указанный период для сотрудника."""
