@@ -109,6 +109,7 @@ async def startup():
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
     asyncio.create_task(_debt_reminder_worker())
+    asyncio.create_task(_route_rollover_worker())
     await db.ensure_sms_dispatch_table()
     await db.ensure_sms_operator_prices()
     asyncio.create_task(_sms_dispatch_worker())
@@ -380,6 +381,21 @@ async def _salary_accrual_worker():
             logging.info(f"salary accrual: {count} entries created")
         except Exception as e:
             logging.warning(f"salary accrual error: {e}")
+
+async def _route_rollover_worker():
+    """Каждый день в 00:00:05 Ташкент переносит просроченные planned/active маршруты на сегодня."""
+    from datetime import timezone as _tz, timedelta as _td, datetime as _dt
+    _TZ5 = _tz(_td(hours=5))
+    while True:
+        now = _dt.now(_TZ5)
+        next_midnight = (now + _td(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+        await asyncio.sleep((next_midnight - now).total_seconds())
+        try:
+            n = await db.roll_forward_stale_routes()
+            if n:
+                logging.info(f"route rollover: перенесено маршрутов на сегодня: {n}")
+        except Exception as e:
+            logging.warning(f"route rollover error: {e}")
 
 async def _edit_tg_handover_msg(chat_id: int, msg_id: int, text: str):
     """Редактировать TG-сообщение передачи наличных: обновить текст, убрать кнопки."""
@@ -1348,6 +1364,7 @@ async def list_routes(date: str | None = None, driver_id: int | None = None,
                       me=Depends(get_current_staff)):
     if me.get("role") not in ("admin","logistics","manager"):
         raise HTTPException(status_code=403)
+    await db.roll_forward_stale_routes()
     rows = await db.get_routes(date=date, driver_id=driver_id, branch=branch, status=status)
     for r in rows:
         if r.get("date"): r["date"] = str(r["date"])
@@ -6339,6 +6356,7 @@ def _can_drive(staff: dict) -> bool:
 async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
         raise HTTPException(403, "Нет доступа")
+    await db.roll_forward_stale_routes()
     routes = await db.get_routes_today(staff.get("branch"))
     payment_events = []
     try:

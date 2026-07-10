@@ -3751,6 +3751,17 @@ async def get_routes(date: str | None = None, driver_id: int | None = None,
         """, *vals)
         return [dict(r) for r in rows]
 
+async def roll_forward_stale_routes() -> int:
+    """Переносит planned/active маршруты с прошедшей датой на сегодня (Asia/Tashkent)."""
+    if not pool: return 0
+    today = datetime.now(_TASHKENT).date()
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE routes SET date = $1, updated_at = NOW()
+            WHERE status IN ('planned','active') AND date < $1
+        """, today)
+        return int(result.split()[-1]) if result else 0
+
 async def create_route(data: dict) -> dict:
     if not pool: return {}
     from datetime import date as _date
