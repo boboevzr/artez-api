@@ -5027,7 +5027,7 @@ async def get_pending_expenses_for_admin() -> list:
             LEFT JOIN expense_categories ep ON ep.id = ec.parent_id
             LEFT JOIN staff sc ON sc.id = e.created_by_staff_id
             LEFT JOIN staff sm ON sm.id = e.manager_id
-            WHERE (e.status='pending' AND ec.approve_level='admin')
+            WHERE (e.status='pending' AND ec.approve_level IN ('admin','both'))
                OR e.status='mgr_approved'
             ORDER BY e.created_at DESC
         """)
