@@ -6141,10 +6141,16 @@ async def salary_ledger_add(body: dict = Body(...), me=Depends(_get_admin)):
         note       = body.get("note", ""),
         expense_id = body.get("expense_id"),
         created_by = me["id"],
+        fine_reason= body.get("fine_reason"),
     )
     if not row:
         raise HTTPException(status_code=400, detail="Ошибка создания записи")
     return {"ok": True, "entry": row}
+
+@app.get("/api/admin/salary/daily")
+async def salary_daily_breakdown(staff_id: int, year: int, month: int, _=Depends(_get_admin)):
+    data = await db.get_salary_daily_breakdown(staff_id, year, month)
+    return {"ok": True, **data}
 
 @app.patch("/api/admin/salary/ledger/{entry_id}")
 async def salary_ledger_update(entry_id: int, body: dict = Body(...), _=Depends(_get_admin)):

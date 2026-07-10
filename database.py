@@ -5114,6 +5114,8 @@ async def ensure_salary_ledger_table():
             "ALTER TABLE staff ADD COLUMN IF NOT EXISTS advance_percent NUMERIC(5,2) DEFAULT NULL")
         await conn.execute(
             "ALTER TABLE settings ADD COLUMN IF NOT EXISTS advance_max_percent NUMERIC(5,2) DEFAULT 50")
+        await conn.execute(
+            "ALTER TABLE salary_ledger ADD COLUMN IF NOT EXISTS fine_reason TEXT DEFAULT NULL")
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0
@@ -5178,16 +5180,79 @@ async def get_salary_ledger(staff_id: int, year: int, month: int) -> list:
 
 async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
                                    amount: float, note: str = '',
-                                   expense_id: int = None, created_by: int = None) -> dict:
+                                   expense_id: int = None, created_by: int = None,
+                                   fine_reason: str = None) -> dict:
     if not pool: return {}
     from datetime import date as _date
     period = _date.fromisoformat(period_str)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
-        """, staff_id, period, type_, amount, note, expense_id, created_by)
+            INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by, fine_reason)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        """, staff_id, period, type_, amount, note, expense_id, created_by, fine_reason)
         return dict(row) if row else {}
+
+async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> dict:
+    """Посуточный регистр за месяц: остаток на начало/конец каждого дня."""
+    if not pool: return {}
+    from datetime import date as _date
+    period = _date(year, month, 1)
+    async with pool.acquire() as conn:
+        # Остаток до начала месяца
+        opening_balance = float(await conn.fetchval("""
+            SELECT COALESCE(SUM(amount), 0)
+            FROM salary_ledger
+            WHERE staff_id=$1 AND period < $2
+        """, staff_id, period) or 0)
+        # Все записи за месяц, отсортированные по дате
+        rows = await conn.fetch("""
+            SELECT sl.*,
+                   DATE(sl.created_at AT TIME ZONE 'Asia/Tashkent') AS entry_date,
+                   TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
+            FROM salary_ledger sl
+            LEFT JOIN staff sc ON sc.id = sl.created_by
+            WHERE sl.staff_id=$1 AND sl.period=$2
+            ORDER BY sl.created_at
+        """, staff_id, period)
+    # Группируем по дням
+    from collections import defaultdict
+    day_entries = defaultdict(list)
+    for r in rows:
+        day_entries[str(r['entry_date'])].append(dict(r))
+    # Строим посуточную таблицу
+    import calendar
+    days_in_month = calendar.monthrange(year, month)[1]
+    result_days = []
+    running = opening_balance
+    for d in range(1, days_in_month + 1):
+        date_str = f"{year}-{month:02d}-{d:02d}"
+        entries = day_entries.get(date_str, [])
+        if not entries and not result_days and d < days_in_month:
+            continue  # пропускаем пустые дни до первой записи
+        op = running
+        accrual = 0.0; advance = 0.0; salary_payment = 0.0; fine = 0.0; other = 0.0
+        for e in entries:
+            amt = float(e['amount'])
+            t = e['type']
+            if t == 'accrual': accrual += amt
+            elif t == 'advance': advance += amt
+            elif t == 'salary_payment': salary_payment += amt
+            elif t == 'fine': fine += amt
+            else: other += amt
+        running = op + accrual + advance + salary_payment + fine + other
+        if entries or result_days:
+            result_days.append({
+                'date': date_str,
+                'opening': op,
+                'accrual': accrual,
+                'advance': advance,
+                'salary_payment': salary_payment,
+                'fine': fine,
+                'other': other,
+                'closing': running,
+                'entries': entries,
+            })
+    return {'days': result_days, 'opening_balance': opening_balance}
 
 async def update_salary_ledger_entry(entry_id: int, amount: float, note: str) -> dict:
     if not pool: return {}
