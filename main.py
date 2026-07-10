@@ -5467,10 +5467,19 @@ async def close_shift(
 
 @app.post("/api/admin/cash/open-shift")
 async def open_shift(staff=Depends(get_current_staff)):
-    if staff.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
+    if staff.get("role") != "admin" and not staff.get("can_manage_cash"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
     row = await db.open_cash_shift(staff.get("id"))
+    if row is None:
+        raise HTTPException(status_code=409, detail="Уже есть открытая смена — сначала закройте её")
     return {"ok": True, "shift": row}
+
+@app.delete("/api/admin/cash/shifts/{shift_id}")
+async def delete_shift(shift_id: int, me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    await db.delete_cash_shift(shift_id)
+    return {"ok": True}
 
 @app.get("/api/admin/cash/current-shift")
 async def current_shift(_=Depends(get_current_staff)):

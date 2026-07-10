@@ -3069,15 +3069,25 @@ async def close_cash_shift(shift_date, closed_by: str, note: str) -> dict:
             """, shift_date, closed_by, ct, kt, tt, ct+kt+tt, oc, note)
         return dict(row) if row else {}
 
-async def open_cash_shift(opened_by_id: int) -> dict:
+async def open_cash_shift(opened_by_id: int) -> dict | None:
+    """None — если уже есть открытая смена."""
     if not pool: return {}
     async with pool.acquire() as conn:
-        await conn.execute("UPDATE cash_shifts SET status='abandoned' WHERE status='open'")
+        existing = await conn.fetchval(
+            "SELECT id FROM cash_shifts WHERE status='open' LIMIT 1")
+        if existing:
+            return None
         row = await conn.fetchrow("""
             INSERT INTO cash_shifts (opened_at, opened_by, status, shift_date)
             VALUES (NOW(), $1, 'open', NOW()::date) RETURNING *
         """, opened_by_id)
         return dict(row) if row else {}
+
+async def delete_cash_shift(shift_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        res = await conn.execute("DELETE FROM cash_shifts WHERE id=$1", shift_id)
+        return res == "DELETE 1"
 
 async def get_current_shift() -> dict:
     if not pool: return {}
