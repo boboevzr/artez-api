@@ -1738,8 +1738,8 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
             JOIN orders o ON o.id = oi.order_id
             WHERE s.login IS NOT NULL
               AND o.status != 'cancelled'
-              AND o.created_at >= $1::timestamptz
-              AND o.created_at <  $2::timestamptz
+              AND COALESCE(o.washed_at, o.created_at) >= $1::timestamptz
+              AND COALESCE(o.washed_at, o.created_at) <  $2::timestamptz
             GROUP BY s.id
         """, start, end)
         washing_map = {r['staff_id']: {'total': float(r['total_sum']), 'count': int(r['item_count'])}
@@ -1770,8 +1770,8 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
             JOIN orders o ON o.packer_login = s.login
             WHERE s.login IS NOT NULL
               AND o.status NOT IN ('cancelled')
-              AND o.created_at >= $1::timestamptz
-              AND o.created_at <  $2::timestamptz
+              AND COALESCE(o.packed_at, o.created_at) >= $1::timestamptz
+              AND COALESCE(o.packed_at, o.created_at) <  $2::timestamptz
             GROUP BY s.id
         """, start, end)
         packing_map = {r['staff_id']: {'total': float(r['total_sum']), 'count': int(r['order_count'])}
@@ -2786,8 +2786,12 @@ async def delete_all_contacts() -> int:
 async def update_order_status(order_id: int, status: str, note: str = "") -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "UPDATE orders SET status=$2 WHERE id=$1 RETURNING *", order_id, status)
+        row = await conn.fetchrow("""
+            UPDATE orders SET
+                status=$2,
+                washed_at = CASE WHEN $2='washing' THEN NOW() ELSE washed_at END,
+                packed_at = CASE WHEN $2='packing' THEN NOW() ELSE packed_at END
+            WHERE id=$1 RETURNING *""", order_id, status)
         if row:
             await conn.execute("""
                 INSERT INTO order_status_history (order_num, new_status, note)
@@ -5270,6 +5274,10 @@ async def ensure_salary_ledger_table():
             "ALTER TABLE salary_ledger ADD COLUMN IF NOT EXISTS fine_reason TEXT DEFAULT NULL")
         await conn.execute(
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS packer_login VARCHAR(100) DEFAULT NULL")
+        await conn.execute(
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS washed_at TIMESTAMPTZ DEFAULT NULL")
+        await conn.execute(
+            "ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TIMESTAMPTZ DEFAULT NULL")
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0
