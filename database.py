@@ -1581,13 +1581,14 @@ async def get_staff_salary(staff_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT salary_type, salary_rate, salary_work_days FROM staff WHERE id=$1", staff_id)
+            "SELECT salary_type, salary_rate, salary_work_days, advance_percent FROM staff WHERE id=$1", staff_id)
         if not row:
             return {}
         result = {
-            "salary_type":  row["salary_type"] or "fixed",
-            "base_amount":  float(row["salary_rate"] or 0),
-            "work_days":    row["salary_work_days"] or 26,
+            "salary_type":     row["salary_type"] or "fixed",
+            "base_amount":     float(row["salary_rate"] or 0),
+            "work_days":       row["salary_work_days"] or 26,
+            "advance_percent": float(row["advance_percent"]) if row["advance_percent"] else None,
         }
         prows = await conn.fetch(
             "SELECT role, percent FROM staff_salary_percents WHERE staff_id=$1 ORDER BY id", staff_id)
@@ -1609,10 +1610,12 @@ async def get_staff_salary(staff_id: int) -> dict:
 async def save_staff_salary(staff_id: int, data: dict) -> None:
     if not pool: return
     async with pool.acquire() as conn:
+        adv_pct = data.get("advance_percent")
         await conn.execute(
-            "UPDATE staff SET salary_type=$2, salary_rate=$3, salary_work_days=$4, updated_at=NOW() WHERE id=$1",
+            "UPDATE staff SET salary_type=$2, salary_rate=$3, salary_work_days=$4, advance_percent=$5, updated_at=NOW() WHERE id=$1",
             staff_id, data.get("salary_type", "fixed"),
-            data.get("base_amount") or None, data.get("work_days", 26))
+            data.get("base_amount") or None, data.get("work_days", 26),
+            float(adv_pct) if adv_pct is not None else None)
         await conn.execute("DELETE FROM staff_salary_percents WHERE staff_id=$1", staff_id)
         for p in (data.get("percents") or []):
             if p.get("role") and p.get("percent") is not None:
@@ -5037,7 +5040,7 @@ async def approve_expense_manager(expense_id: int, manager_id: int) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         cat = await conn.fetchrow("""
-            SELECT ec.approve_level FROM expenses e
+            SELECT ec.approve_level, ec.name_ru AS category_name_ru FROM expenses e
             JOIN expense_categories ec ON ec.id=e.category_id
             WHERE e.id=$1
         """, expense_id)
@@ -5046,6 +5049,10 @@ async def approve_expense_manager(expense_id: int, manager_id: int) -> dict:
             UPDATE expenses SET status=$2, manager_id=$3, manager_at=NOW()
             WHERE id=$1 AND status='pending' RETURNING *
         """, expense_id, new_status, manager_id)
+        if row and new_status == 'paid':
+            exp = dict(row)
+            exp['category_name_ru'] = cat['category_name_ru'] if cat else ''
+            await _create_ledger_for_expense(conn, exp)
         return dict(row) if row else {}
 
 async def approve_expense_admin(expense_id: int, admin_id: int) -> dict:
@@ -5055,6 +5062,12 @@ async def approve_expense_admin(expense_id: int, admin_id: int) -> dict:
             UPDATE expenses SET status='paid', admin_id=$2, admin_at=NOW()
             WHERE id=$1 AND status IN ('pending','mgr_approved') RETURNING *
         """, expense_id, admin_id)
+        if row:
+            cat = await conn.fetchval(
+                "SELECT name_ru FROM expense_categories WHERE id=$1", row['category_id'])
+            exp = dict(row)
+            exp['category_name_ru'] = cat or ''
+            await _create_ledger_for_expense(conn, exp)
         return dict(row) if row else {}
 
 async def reject_expense(expense_id: int, staff_id: int, reason: str) -> dict:
@@ -5078,6 +5091,168 @@ async def save_expense_receipt(expense_id: int, receipt_url: str) -> dict:
 
 
 # ── SMS рассылки по расписанию ───────────────────────────────────────────────
+
+async def ensure_salary_ledger_table():
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS salary_ledger (
+                id          SERIAL PRIMARY KEY,
+                staff_id    INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+                period      DATE    NOT NULL,
+                type        VARCHAR(30) NOT NULL DEFAULT 'accrual',
+                amount      NUMERIC(12,2) NOT NULL,
+                note        TEXT DEFAULT '',
+                expense_id  INTEGER REFERENCES expenses(id) ON DELETE SET NULL,
+                created_by  INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+                created_at  TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_salary_ledger_staff_period ON salary_ledger(staff_id, period)")
+        await conn.execute(
+            "ALTER TABLE staff ADD COLUMN IF NOT EXISTS advance_percent NUMERIC(5,2) DEFAULT NULL")
+        await conn.execute(
+            "ALTER TABLE settings ADD COLUMN IF NOT EXISTS advance_max_percent NUMERIC(5,2) DEFAULT 50")
+
+async def get_advance_max_percent() -> float:
+    if not pool: return 50.0
+    async with pool.acquire() as conn:
+        v = await conn.fetchval("SELECT COALESCE(advance_max_percent, 50) FROM settings LIMIT 1")
+        return float(v or 50)
+
+async def save_advance_max_percent(pct: float) -> None:
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE settings SET advance_max_percent=$1", pct)
+
+async def get_salary_balance(staff_id: int) -> dict:
+    """Баланс сотрудника: общий остаток, разбивка за текущий месяц, лимит аванса."""
+    if not pool: return {}
+    from datetime import date as _date
+    today = _date.today()
+    period = _date(today.year, today.month, 1)
+    async with pool.acquire() as conn:
+        # Общий накопленный баланс
+        total = await conn.fetchval(
+            "SELECT COALESCE(SUM(amount),0) FROM salary_ledger WHERE staff_id=$1", staff_id)
+        # За текущий месяц
+        month_rows = await conn.fetch("""
+            SELECT type, COALESCE(SUM(amount),0) AS s
+            FROM salary_ledger WHERE staff_id=$1 AND period=$2
+            GROUP BY type
+        """, staff_id, period)
+        month_map = {r['type']: float(r['s']) for r in month_rows}
+        accrual_month   = month_map.get('accrual', 0)
+        advances_month  = abs(month_map.get('advance', 0))
+        # advance_percent: личный или глобальный
+        pct_row = await conn.fetchrow("""
+            SELECT s.advance_percent, st.advance_max_percent
+            FROM staff s, settings st
+            WHERE s.id=$1
+            LIMIT 1
+        """, staff_id)
+        pct = float(pct_row['advance_percent'] or pct_row['advance_max_percent'] or 50)
+        advance_limit = max(0.0, accrual_month * pct / 100 - advances_month)
+        return {
+            'balance':        float(total or 0),
+            'accrual_month':  accrual_month,
+            'advances_month': advances_month,
+            'advance_pct':    pct,
+            'advance_limit':  advance_limit,
+        }
+
+async def get_salary_ledger(staff_id: int, year: int, month: int) -> list:
+    if not pool: return []
+    from datetime import date as _date
+    period = _date(year, month, 1)
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT sl.*, TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
+            FROM salary_ledger sl
+            LEFT JOIN staff sc ON sc.id = sl.created_by
+            WHERE sl.staff_id=$1 AND sl.period=$2
+            ORDER BY sl.created_at
+        """, staff_id, period)
+        return [dict(r) for r in rows]
+
+async def add_salary_ledger_entry(staff_id: int, period_str: str, type_: str,
+                                   amount: float, note: str = '',
+                                   expense_id: int = None, created_by: int = None) -> dict:
+    if not pool: return {}
+    from datetime import date as _date
+    period = _date.fromisoformat(period_str)
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, staff_id, period, type_, amount, note, expense_id, created_by)
+        return dict(row) if row else {}
+
+async def update_salary_ledger_entry(entry_id: int, amount: float, note: str) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE salary_ledger SET amount=$2, note=$3 WHERE id=$1 RETURNING *
+        """, entry_id, amount, note)
+        return dict(row) if row else {}
+
+async def delete_salary_ledger_entry(entry_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        r = await conn.execute("DELETE FROM salary_ledger WHERE id=$1", entry_id)
+        return r == "DELETE 1"
+
+async def auto_accrue_monthly_salaries() -> int:
+    """Начисляет оклады 1-го числа месяца. Пропускает если уже есть accrual за период."""
+    if not pool: return 0
+    from datetime import date as _date
+    today = _date.today()
+    period = _date(today.year, today.month, 1)
+    async with pool.acquire() as conn:
+        staff_rows = await conn.fetch("""
+            SELECT id, salary_type, salary_rate
+            FROM staff
+            WHERE (active = TRUE OR active IS NULL)
+              AND role <> 'agent'
+              AND salary_type IS NOT NULL AND salary_rate > 0
+        """)
+        count = 0
+        for s in staff_rows:
+            exists = await conn.fetchval(
+                "SELECT 1 FROM salary_ledger WHERE staff_id=$1 AND period=$2 AND type='accrual'",
+                s['id'], period)
+            if exists:
+                continue
+            await conn.execute("""
+                INSERT INTO salary_ledger (staff_id, period, type, amount, note)
+                VALUES ($1, $2, 'accrual', $3, 'Автоначисление оклада')
+            """, s['id'], period, float(s['salary_rate'] or 0))
+            count += 1
+        return count
+
+async def _create_ledger_for_expense(conn, expense: dict) -> None:
+    """Создаёт запись salary_ledger при утверждении расхода на сотрудника."""
+    if not expense.get('for_staff_id'):
+        return
+    cat_name = (expense.get('category_name_ru') or '').lower()
+    if 'аванс' in cat_name:
+        ltype = 'advance'
+    elif 'зарплат' in cat_name:
+        ltype = 'salary_payment'
+    elif 'бонус' in cat_name or 'премия' in cat_name:
+        ltype = 'bonus'
+    else:
+        ltype = 'deduction'
+    from datetime import date as _date
+    today = _date.today()
+    period = _date(today.year, today.month, 1)
+    await conn.execute("""
+        INSERT INTO salary_ledger (staff_id, period, type, amount, note, expense_id, created_by)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT DO NOTHING
+    """, expense['for_staff_id'], period, ltype, -float(expense['amount']),
+        expense.get('description') or '', expense.get('id'), expense.get('admin_id') or expense.get('manager_id'))
 
 async def ensure_sms_dispatch_table():
     if not pool: return

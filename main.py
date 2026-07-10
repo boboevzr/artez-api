@@ -103,7 +103,9 @@ async def startup():
     await db.ensure_chat_tables()
     await db.ensure_chat_templates()
     await db.ensure_expense_tables()
+    await db.ensure_salary_ledger_table()
     asyncio.create_task(_tg_reminder_worker())
+    asyncio.create_task(_salary_accrual_worker())
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
     asyncio.create_task(_debt_reminder_worker())
@@ -360,6 +362,24 @@ async def _debt_reminder_worker():
             await _send_debt_reminders()
         except Exception as e:
             logging.warning(f"debt reminder error: {e}")
+
+async def _salary_accrual_worker():
+    """Запускает автоначисление зарплат 1-го числа каждого месяца в 00:05 Ташкент."""
+    from datetime import timezone as _tz, timedelta as _td, datetime as _dt, date as _date
+    _TZ5 = _tz(_td(hours=5))
+    while True:
+        now = _dt.now(_TZ5)
+        # Следующее 1-е число месяца 00:05
+        if now.month == 12:
+            nxt = _dt(now.year + 1, 1, 1, 0, 5, tzinfo=_TZ5)
+        else:
+            nxt = _dt(now.year, now.month + 1, 1, 0, 5, tzinfo=_TZ5)
+        await asyncio.sleep((nxt - now).total_seconds())
+        try:
+            count = await db.auto_accrue_monthly_salaries()
+            logging.info(f"salary accrual: {count} entries created")
+        except Exception as e:
+            logging.warning(f"salary accrual error: {e}")
 
 async def _edit_tg_handover_msg(chat_id: int, msg_id: int, text: str):
     """Редактировать TG-сообщение передачи наличных: обновить текст, убрать кнопки."""
@@ -6103,6 +6123,62 @@ async def patch_debt_due_date(order_id: int, due_date: str = Body(..., embed=Tru
     if not ok:
         raise HTTPException(status_code=404, detail="Заказ не найден или не является долгом")
     return {"ok": True}
+
+# ── Salary ledger ─────────────────────────────────────────────────────────────
+
+@app.get("/api/admin/salary/ledger")
+async def salary_ledger_list(staff_id: int, year: int, month: int, _=Depends(_get_admin)):
+    rows = await db.get_salary_ledger(staff_id, year, month)
+    return {"ok": True, "entries": rows}
+
+@app.post("/api/admin/salary/ledger")
+async def salary_ledger_add(body: dict = Body(...), me=Depends(_get_admin)):
+    row = await db.add_salary_ledger_entry(
+        staff_id   = int(body["staff_id"]),
+        period_str = body["period"],
+        type_      = body.get("type", "accrual"),
+        amount     = float(body["amount"]),
+        note       = body.get("note", ""),
+        expense_id = body.get("expense_id"),
+        created_by = me["id"],
+    )
+    if not row:
+        raise HTTPException(status_code=400, detail="Ошибка создания записи")
+    return {"ok": True, "entry": row}
+
+@app.patch("/api/admin/salary/ledger/{entry_id}")
+async def salary_ledger_update(entry_id: int, body: dict = Body(...), _=Depends(_get_admin)):
+    row = await db.update_salary_ledger_entry(entry_id, float(body["amount"]), body.get("note",""))
+    if not row:
+        raise HTTPException(status_code=404)
+    return {"ok": True, "entry": row}
+
+@app.delete("/api/admin/salary/ledger/{entry_id}")
+async def salary_ledger_delete(entry_id: int, _=Depends(_get_admin)):
+    ok = await db.delete_salary_ledger_entry(entry_id)
+    if not ok:
+        raise HTTPException(status_code=404)
+    return {"ok": True}
+
+@app.get("/api/admin/salary/balance/{staff_id}")
+async def salary_balance(staff_id: int, _=Depends(get_current_staff)):
+    data = await db.get_salary_balance(staff_id)
+    return {"ok": True, **data}
+
+@app.get("/api/admin/salary/advance-percent")
+async def get_advance_pct(_=Depends(_get_admin)):
+    pct = await db.get_advance_max_percent()
+    return {"ok": True, "advance_max_percent": pct}
+
+@app.patch("/api/admin/salary/advance-percent")
+async def save_advance_pct(body: dict = Body(...), _=Depends(_get_admin)):
+    await db.save_advance_max_percent(float(body["advance_max_percent"]))
+    return {"ok": True}
+
+@app.post("/api/admin/salary/accrue")
+async def manual_accrue(_=Depends(_get_admin)):
+    count = await db.auto_accrue_monthly_salaries()
+    return {"ok": True, "count": count}
 
 # ── discount requests ──────────────────────────────────────────────────────────
 
