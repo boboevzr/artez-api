@@ -1741,8 +1741,18 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 }
                 entry['total'] = pickup_cnt * p_rate + delivery_cnt * d_rate
 
-            elif sal_type in ('percent', 'per_unit', 'kpi', 'leads'):
+            else:
                 entry['total'] = None  # Этап 2
+
+            # Часы из табеля — добавляем для любого типа, если есть
+            if sal_type not in ('fixed', 'fixed_percent'):
+                ts = ts_map.get(sid)
+                if ts:
+                    norm_hours = norm_days * 8.0
+                    entry['calc']['work_hours'] = float(ts['total_hours'])
+                    entry['calc']['norm_hours'] = norm_hours
+                    entry['calc']['work_days']  = int(ts['days_count'])
+                    entry['calc']['norm_days']  = norm_days
 
             results.append(entry)
 
