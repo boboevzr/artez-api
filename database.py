@@ -2786,12 +2786,13 @@ async def delete_all_contacts() -> int:
 async def update_order_status(order_id: int, status: str, note: str = "") -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            UPDATE orders SET
-                status=$2,
-                washed_at = CASE WHEN $2::text='washing' THEN NOW() ELSE washed_at END,
-                packed_at = CASE WHEN $2::text='packing' THEN NOW() ELSE packed_at END
-            WHERE id=$1 RETURNING *""", order_id, status)
+        if status == 'washing':
+            sql = "UPDATE orders SET status=$2, washed_at=NOW() WHERE id=$1 RETURNING *"
+        elif status == 'packing':
+            sql = "UPDATE orders SET status=$2, packed_at=NOW() WHERE id=$1 RETURNING *"
+        else:
+            sql = "UPDATE orders SET status=$2 WHERE id=$1 RETURNING *"
+        row = await conn.fetchrow(sql, order_id, status)
         if row:
             await conn.execute("""
                 INSERT INTO order_status_history (order_num, new_status, note)
