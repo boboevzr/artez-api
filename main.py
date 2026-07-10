@@ -106,6 +106,7 @@ async def startup():
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_chat_timeout_worker())
     asyncio.create_task(_measure_review_worker())
+    asyncio.create_task(_debt_reminder_worker())
     await db.ensure_sms_dispatch_table()
     await db.ensure_sms_operator_prices()
     asyncio.create_task(_sms_dispatch_worker())
@@ -299,6 +300,66 @@ async def send_tg(chat_id, text: str):
     except Exception as e:
         logging.warning(f"send_tg error: {e}")
 
+
+async def _send_debt_reminders():
+    from datetime import date as _date
+    today = _date.today()
+    debts = await db.get_orders_with_debt()
+    if not debts:
+        return
+    approvers = await db.get_debt_approvers()
+    approver_tg_ids = [a['tg_id'] for a in approvers if a.get('tg_id')]
+    sent = set()
+    async with db.pool.acquire() as conn:
+        for d in debts:
+            due = d.get('debt_due_date')
+            if not due:
+                continue
+            if hasattr(due, 'isoformat'):
+                due_date = due
+            else:
+                from datetime import date as _d2
+                due_date = _d2.fromisoformat(str(due))
+            if due_date > today:
+                continue
+            days_over = (today - due_date).days
+            status_line = f"🔴 Просрочен {days_over} дн." if days_over > 0 else "🟡 Срок сегодня"
+            msg = (
+                f"{status_line}\n"
+                f"💸 Долг по заказу {d['order_num']}\n"
+                f"👤 {d.get('client_first_name','')} {d.get('client_last_name','')}\n"
+                f"📞 {d.get('client_phone') or '—'}\n"
+                f"💰 {int(d['debt_amount']):,} сум\n"
+                f"📅 Срок: {due_date.strftime('%d.%m.%Y')}"
+            ).replace(',', ' ')
+            if d.get('responsible_id'):
+                row = await conn.fetchrow("SELECT tg_id FROM staff WHERE id=$1", d['responsible_id'])
+                if row and row['tg_id']:
+                    key = (d['responsible_id'], d['id'])
+                    if key not in sent:
+                        await send_tg(row['tg_id'], msg)
+                        sent.add(key)
+            if days_over > 0:
+                for tg_id in approver_tg_ids:
+                    key = (f"appr_{tg_id}", d['id'])
+                    if key not in sent:
+                        await send_tg(tg_id, msg)
+                        sent.add(key)
+
+async def _debt_reminder_worker():
+    from datetime import timezone as _tz, timedelta as _td
+    _TZ5 = _tz(_td(hours=5))
+    while True:
+        from datetime import datetime as _dt
+        now = _dt.now(_TZ5)
+        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target = target + _td(days=1)
+        await asyncio.sleep((target - now).total_seconds())
+        try:
+            await _send_debt_reminders()
+        except Exception as e:
+            logging.warning(f"debt reminder error: {e}")
 
 async def _edit_tg_handover_msg(chat_id: int, msg_id: int, text: str):
     """Редактировать TG-сообщение передачи наличных: обновить текст, убрать кнопки."""
@@ -6028,6 +6089,15 @@ async def staff_mark_delivered(
 async def get_debt_orders(_=Depends(_get_admin)):
     rows = await db.get_orders_with_debt()
     return {"ok": True, "debts": rows}
+
+@app.patch("/api/admin/orders/{order_id}/debt-due-date")
+async def patch_debt_due_date(order_id: int, due_date: str = Body(..., embed=True), note: str = Body('', embed=True), me=Depends(get_current_staff)):
+    if me.get("role") != "admin":
+        raise HTTPException(status_code=403)
+    ok = await db.extend_debt_due_date(order_id, due_date, note)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Заказ не найден или не является долгом")
+    return {"ok": True}
 
 # ── discount requests ──────────────────────────────────────────────────────────
 

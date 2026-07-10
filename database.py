@@ -3846,10 +3846,22 @@ async def get_cash_dashboard() -> dict:
             "SELECT COALESCE(SUM(amount),0) AS total FROM cash_handovers WHERE to_type IN ('bank','safe') AND created_at::date=$1", today)
         r2 = await conn.fetchrow("""
             SELECT COALESCE(SUM(GREATEST(0, COALESCE(total_price,0)-COALESCE(discount_sum,0)-COALESCE(prepaid_amount,0))),0) AS total
-            FROM orders WHERE payment_method='cash' AND payment_status IN ('unpaid','partial') AND status NOT IN ('cancelled')
+            FROM orders WHERE payment_method='cash' AND payment_status IN ('unpaid','partial') AND status NOT IN ('cancelled','delivered')
         """)
         r3 = await conn.fetchrow(
             "SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt FROM expenses WHERE status IN ('pending','mgr_approved')")
+        r4 = await conn.fetchrow("""
+            SELECT
+              COUNT(*) AS total_cnt,
+              COUNT(*) FILTER (WHERE debt_due_date IS NOT NULL AND debt_due_date < CURRENT_DATE) AS overdue_cnt,
+              COALESCE(SUM(GREATEST(0,
+                COALESCE(total_price,0) - COALESCE(discount_sum,0) - COALESCE(delivery_discount,0) - COALESCE(manual_discount,0)
+                - COALESCE(prepaid_amount,0)
+              )), 0) AS total_debt
+            FROM orders
+            WHERE debt_responsible_id IS NOT NULL
+              AND payment_status IN ('unpaid','partial')
+        """)
     return {
         'staff_on_hand':          staff_on_hand,
         'manager_on_hand':        manager_on_hand,
@@ -3858,6 +3870,9 @@ async def get_cash_dashboard() -> dict:
         'pending_client_cash':    float(r2['total']),
         'expenses_pending_sum':   float(r3['total']),
         'expenses_pending_count': int(r3['cnt']),
+        'debt_total':             float(r4['total_debt']),
+        'debt_count':             int(r4['total_cnt']),
+        'debt_overdue_count':     int(r4['overdue_cnt']),
     }
 
 async def confirm_payment(payment_id: int, confirmed_by: int) -> dict:
@@ -4392,6 +4407,27 @@ async def get_orders_with_debt() -> list:
              ORDER BY o.debt_due_date ASC NULLS LAST, o.id DESC
         """)
         return [r for r in [dict(r) for r in rows] if r["debt_amount"] > 0]
+
+async def extend_debt_due_date(order_id: int, new_due_date_str: str, note: str = '') -> bool:
+    if not pool: return False
+    from datetime import date as _date
+    try:
+        new_due = _date.fromisoformat(new_due_date_str)
+    except Exception:
+        return False
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "UPDATE orders SET debt_due_date=$2 WHERE id=$1 AND debt_responsible_id IS NOT NULL",
+            order_id, new_due
+        )
+        if res == "UPDATE 1":
+            suffix = f": {note}" if note else ""
+            await conn.execute(
+                "INSERT INTO order_status_history(order_num, new_status, note) "
+                "SELECT order_num, 'debt_extended', $2 FROM orders WHERE id=$1",
+                order_id, f"Срок долга продлён до {new_due_date_str}{suffix}"
+            )
+        return res == "UPDATE 1"
 
 # ── discount_requests ─────────────────────────────────────────────────────────
 
