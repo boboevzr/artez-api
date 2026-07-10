@@ -3640,6 +3640,11 @@ async def admin_get_orders(_=Depends(get_admin), status: str = None, limit: int 
     prices = await db.get_admin_orders(status=status, limit=limit)
     return {"ok": True, "orders": [dict(o) for o in prices]}
 
+@app.get("/api/admin/orders/debts")
+async def get_debt_orders(_=Depends(_get_admin)):
+    rows = await db.get_orders_with_debt()
+    return {"ok": True, "debts": rows}
+
 @app.get("/api/admin/orders/{order_id}")
 async def admin_get_order(order_id: int, _=Depends(get_current_staff)):
     order = await db.get_order_by_id(order_id)
@@ -6084,11 +6089,6 @@ async def staff_mark_delivered(
         raise HTTPException(500, "Ошибка обновления")
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
-
-@app.get("/api/admin/orders/debts")
-async def get_debt_orders(_=Depends(_get_admin)):
-    rows = await db.get_orders_with_debt()
-    return {"ok": True, "debts": rows}
 
 @app.patch("/api/admin/orders/{order_id}/debt-due-date")
 async def patch_debt_due_date(order_id: int, due_date: str = Body(..., embed=True), note: str = Body('', embed=True), me=Depends(get_current_staff)):
