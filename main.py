@@ -886,6 +886,7 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "driver":     ["leads", "orders", "status_delivery"],
     "logistics":  ["leads", "orders", "status"],
     "washer":     ["leads", "orders", "status_wash"],
+    "packer":     ["orders", "status"],
     "agent":      ["leads_own"],  # агент видит только свои лиды
 }
 
