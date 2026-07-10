@@ -5222,7 +5222,10 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
     from datetime import date as _date2
     day_entries = defaultdict(list)
     for r in rows:
-        day_entries[str(r['entry_date'])].append(dict(r))
+        row_dict = dict(r)
+        row_dict['entry_date'] = str(r['entry_date'])  # serialize date to string
+        row_dict['amount'] = float(r['amount'])
+        day_entries[row_dict['entry_date']].append(row_dict)
     # Строим посуточную таблицу (все дни с 1-го до сегодня или конца месяца)
     import calendar
     days_in_month = calendar.monthrange(year, month)[1]
