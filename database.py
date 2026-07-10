@@ -1655,6 +1655,18 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
             WHERE (s.active = TRUE OR s.active IS NULL) AND s.role <> 'agent'
             ORDER BY s.branch NULLS LAST, s.last_name, s.first_name
         """)
+
+        # Часы из табеля за период (все типы записей)
+        ts_rows = await conn.fetch("""
+            SELECT staff_id,
+                   COALESCE(SUM(hours), 0)  AS total_hours,
+                   COUNT(*)                  AS days_count
+            FROM timesheet
+            WHERE date >= $1 AND date <= $2
+            GROUP BY staff_id
+        """, start, end)
+        ts_map = {r['staff_id']: r for r in ts_rows}
+
         # Забор/доставка водителей за период одним запросом
         route_rows = await conn.fetch("""
             SELECT r.driver_id,
@@ -1682,19 +1694,35 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
             sid      = s['id']
             sal_type = s['salary_type'] or 'fixed'
             base     = float(s['salary_rate'] or 0)
+            norm_days = int(s['salary_work_days'] or 26)
             entry = {
-                'staff_id': sid,
-                'name':     f"{s['last_name'] or ''} {s['first_name'] or ''}".strip(),
-                'role':     s['role'],
-                'branch':   s['branch'],
+                'staff_id':    sid,
+                'name':        f"{s['last_name'] or ''} {s['first_name'] or ''}".strip(),
+                'role':        s['role'],
+                'branch':      s['branch'],
                 'salary_type': sal_type,
                 'base_amount': base,
-                'calc': {},
-                'total': None,
+                'calc':        {},
+                'total':       None,
             }
 
-            if sal_type == 'fixed':
-                entry['total'] = base
+            if sal_type in ('fixed', 'fixed_percent'):
+                ts = ts_map.get(sid)
+                norm_hours = norm_days * 8.0
+                if ts:
+                    work_hours = float(ts['total_hours'])
+                    work_days  = int(ts['days_count'])
+                    total = round(base / norm_hours * work_hours, 2) if norm_hours > 0 else 0
+                    entry['calc'] = {
+                        'work_hours': work_hours,
+                        'norm_hours': norm_hours,
+                        'work_days':  work_days,
+                        'norm_days':  norm_days,
+                    }
+                    entry['total'] = total
+                else:
+                    entry['calc'] = {'no_timesheet': True, 'norm_days': norm_days}
+                    entry['total'] = None  # нет данных табеля
 
             elif sal_type == 'per_point':
                 rd = route_map.get(sid, {})
@@ -1706,14 +1734,14 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 p_rate = float(p_row['unit_rate'] if p_row else 0)
                 d_rate = float(d_row['unit_rate'] if d_row else 0)
                 entry['calc'] = {
-                    'pickup_count':    pickup_cnt,
-                    'pickup_rate':     p_rate,
-                    'delivery_count':  delivery_cnt,
-                    'delivery_rate':   d_rate,
+                    'pickup_count':   pickup_cnt,
+                    'pickup_rate':    p_rate,
+                    'delivery_count': delivery_cnt,
+                    'delivery_rate':  d_rate,
                 }
                 entry['total'] = pickup_cnt * p_rate + delivery_cnt * d_rate
 
-            elif sal_type in ('percent', 'fixed_percent', 'per_unit', 'kpi', 'leads'):
+            elif sal_type in ('percent', 'per_unit', 'kpi', 'leads'):
                 entry['total'] = None  # Этап 2
 
             results.append(entry)
