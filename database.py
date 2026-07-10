@@ -3028,8 +3028,11 @@ async def get_payments_log(date_from: str, date_to: str) -> list:
         """, ts_from, ts_to)
         return [dict(r) for r in rows]
 
-async def close_cash_shift(shift_date: str, closed_by: str, note: str) -> dict:
+async def close_cash_shift(shift_date, closed_by: str, note: str) -> dict:
     if not pool: return {}
+    from datetime import date as _date
+    if isinstance(shift_date, str):
+        shift_date = _date.fromisoformat(shift_date)
     async with pool.acquire() as conn:
         totals = await conn.fetchrow("""
             SELECT

@@ -5461,7 +5461,8 @@ async def close_shift(
 ):
     from datetime import date
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
-    row = await db.close_cash_shift(shift_date or date.today().isoformat(), name, note)
+    d = date.fromisoformat(shift_date) if shift_date else date.today()
+    row = await db.close_cash_shift(d, name, note)
     return {"ok": True, "shift": row}
 
 @app.post("/api/admin/cash/open-shift")
