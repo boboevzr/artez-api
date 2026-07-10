@@ -8152,6 +8152,108 @@ async def autodial_calls(cid: int, _=Depends(_get_admin)):
         rows = await conn.fetch("SELECT * FROM autodial_calls WHERE campaign_id=$1 ORDER BY id", cid)
     return [dict(r) for r in rows]
 
+@app.post("/api/admin/autodial/campaigns/{cid}/create-group")
+async def autodial_create_group_from_calls(cid: int, body: dict = Body(...), _=Depends(_get_admin)):
+    """Создать группу автодозвона из звонков с нужным статусом (answered / no_answer / all)"""
+    import re as _re
+    status_filter = body.get("status", "answered")
+    group_name = (body.get("name") or "").strip()
+    if not group_name:
+        raise HTTPException(400, "name required")
+    async with db.pool.acquire() as conn:
+        if not await conn.fetchrow("SELECT id FROM autodial_campaigns WHERE id=$1", cid):
+            raise HTTPException(404)
+        if status_filter == "all":
+            calls = await conn.fetch(
+                "SELECT DISTINCT phone, name FROM autodial_calls WHERE campaign_id=$1 AND status NOT IN ('pending','calling')", cid)
+        else:
+            calls = await conn.fetch(
+                "SELECT DISTINCT phone, name FROM autodial_calls WHERE campaign_id=$1 AND status=$2", cid, status_filter)
+        if not calls:
+            raise HTTPException(400, "Нет звонков с таким статусом")
+        group = await conn.fetchrow("INSERT INTO autodial_groups (name) VALUES ($1) RETURNING *", group_name)
+        gid = group["id"]
+        inserted = 0
+        for c in calls:
+            phone = _ami_phone(str(c["phone"]).strip())
+            if not phone:
+                continue
+            await conn.execute(
+                "INSERT INTO autodial_group_members (group_id,phone,name,source_type) "
+                "VALUES ($1,$2,$3,'campaign') ON CONFLICT (group_id,phone) DO NOTHING",
+                gid, phone, c["name"] or "")
+            inserted += 1
+    return {"ok": True, "group_id": gid, "group_name": group_name, "inserted": inserted}
+
+
+@app.post("/api/admin/autodial/campaigns/{cid}/fork")
+async def autodial_fork(cid: int, _=Depends(_get_admin)):
+    """Создать повтор-кампанию /2 из недозвонившихся"""
+    import re as _re
+    async with db.pool.acquire() as conn:
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        if not campaign:
+            raise HTTPException(404)
+        calls = await conn.fetch(
+            "SELECT DISTINCT phone, name FROM autodial_calls WHERE campaign_id=$1 AND status='no_answer'", cid)
+        if not calls:
+            raise HTTPException(400, "Нет недозвонившихся")
+        base_name = _re.sub(r'\s*/\s*\d+$', '', campaign["name"]).strip()
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM autodial_campaigns WHERE name ~ $1",
+            r'^' + _re.escape(base_name) + r'(\s*/\s*\d+)?$')
+        new_name = f"{base_name} / {count + 1}"
+        new_camp = await conn.fetchrow(
+            "INSERT INTO autodial_campaigns (name,source_type,ivr_exten,max_parallel,caller_id,"
+            "sched_time_from,sched_time_to,sched_days) VALUES ($1,'fork',$2,$3,$4,$5,$6,$7) RETURNING *",
+            new_name, campaign["ivr_exten"], campaign["max_parallel"] or 1,
+            campaign["caller_id"] or "1000", campaign["sched_time_from"],
+            campaign["sched_time_to"], campaign["sched_days"])
+        new_cid = new_camp["id"]
+        for c in calls:
+            phone = _ami_phone(str(c["phone"]).strip())
+            if phone:
+                await conn.execute(
+                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'fork',$2,$3)",
+                    new_cid, phone, c["name"] or "")
+        total = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", new_cid)
+        await conn.execute("UPDATE autodial_campaigns SET total_count=$2 WHERE id=$1", new_cid, total)
+    return {"ok": True, "campaign_id": new_cid, "name": new_name, "total": int(total)}
+
+
+@app.post("/api/admin/autodial/campaigns/{cid}/clone")
+async def autodial_clone(cid: int, _=Depends(_get_admin)):
+    """Клонировать кампанию со всеми контактами"""
+    import re as _re
+    async with db.pool.acquire() as conn:
+        campaign = await conn.fetchrow("SELECT * FROM autodial_campaigns WHERE id=$1", cid)
+        if not campaign:
+            raise HTTPException(404)
+        calls = await conn.fetch("SELECT phone, name FROM autodial_calls WHERE campaign_id=$1", cid)
+        base_name = _re.sub(r'\s*\(копия\s*\d*\)\s*$', '', campaign["name"]).strip()
+        count = await conn.fetchval(
+            "SELECT COUNT(*) FROM autodial_campaigns WHERE name ~ $1",
+            r'^' + _re.escape(base_name) + r'(\s*\(копия(\s*\d+)?\))?$')
+        suffix = "" if count == 1 else f" {count}"
+        new_name = f"{base_name} (копия{suffix})"
+        new_camp = await conn.fetchrow(
+            "INSERT INTO autodial_campaigns (name,source_type,ivr_exten,max_parallel,caller_id,"
+            "sched_time_from,sched_time_to,sched_days) VALUES ($1,'manual',$2,$3,$4,$5,$6,$7) RETURNING *",
+            new_name, campaign["ivr_exten"], campaign["max_parallel"] or 1,
+            campaign["caller_id"] or "1000", campaign["sched_time_from"],
+            campaign["sched_time_to"], campaign["sched_days"])
+        new_cid = new_camp["id"]
+        for c in calls:
+            phone = _ami_phone(str(c["phone"]).strip())
+            if phone:
+                await conn.execute(
+                    "INSERT INTO autodial_calls (campaign_id,source_type,phone,name) VALUES ($1,'clone',$2,$3)",
+                    new_cid, phone, c["name"] or "")
+        total = await conn.fetchval("SELECT COUNT(*) FROM autodial_calls WHERE campaign_id=$1", new_cid)
+        await conn.execute("UPDATE autodial_campaigns SET total_count=$2 WHERE id=$1", new_cid, total)
+    return {"ok": True, "campaign_id": new_cid, "name": new_name}
+
+
 @app.delete("/api/admin/autodial/campaigns/{cid}")
 async def autodial_delete(cid: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
