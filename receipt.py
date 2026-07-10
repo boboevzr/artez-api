@@ -52,7 +52,10 @@ def _dashed_line(draw, y):
         x += 12
 
 
-def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[str]) -> bytes:
+def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[str],
+                           header_text: str = "ARTEZ",
+                           slogan: str = "Химчистка ковров, мебели, матрасов и штор",
+                           footer_note: str = "") -> bytes:
     """
     Рисует JPEG-чек заказа и возвращает его байты.
 
@@ -61,6 +64,9 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
     items: список позиций заказа (как из db.get_order_items) — service,
            width_cm, length_cm, sqm, price_per_sqm, total_sum.
     branch_contacts: список строк контактов филиала (уже отобранных вызывающей стороной).
+    header_text: текст шапки-логотипа чека (по умолчанию "ARTEZ").
+    slogan: слоган в подвале чека.
+    footer_note: доп. строка в подвале чека (не выводится, если пустая).
     """
     f = _fonts()
 
@@ -80,7 +86,7 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
     draw = ImageDraw.Draw(img)
 
     y = PAD
-    y += _center_text(draw, y, "ARTEZ", f["logo"]) + 8
+    y += _center_text(draw, y, header_text, f["logo"]) + 8
     y += _center_text(draw, y, f"Заказ №{order_num}  ·  {order_date_str}", f["h2"]) + 4
     if client_name:
         y += _center_text(draw, y, client_name, f["h2"]) + 10
@@ -123,7 +129,9 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
             continue
         y += _center_text(draw, y, c, f["footer"]) + 4
     y += 8
-    y += _center_text(draw, y, "Химчистка ковров, мебели, матрасов и штор", f["footer"]) + 4
+    y += _center_text(draw, y, slogan, f["footer"]) + 4
+    if footer_note:
+        y += _center_text(draw, y, footer_note, f["footer"]) + 4
     y += PAD
 
     final = img.crop((0, 0, W, int(y)))

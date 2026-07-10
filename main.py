@@ -10,7 +10,7 @@ from typing import Optional
 
 import json as _json
 import aiohttp
-from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Depends, Header, Body, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
@@ -4022,8 +4022,13 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
     if not tg_id:
         raise HTTPException(status_code=400, detail="У клиента нет Telegram")
 
+    header_text = await _get_cfg("receipt_header_text")
+    slogan      = await _get_cfg("receipt_slogan")
+    footer_note = await _get_cfg("receipt_footer_note")
+
     try:
-        jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts)
+        jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts,
+                                                     header_text, slogan, footer_note)
     except Exception as e:
         logging.error(f"send-receipt render failed order={order_id}: {e}")
         raise HTTPException(status_code=500, detail="Не удалось сформировать чек")
@@ -4050,6 +4055,25 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
         raise HTTPException(status_code=502, detail="Ошибка отправки в Telegram")
 
     return {"ok": True}
+
+
+@app.post("/api/admin/receipt/preview")
+async def preview_receipt(body: dict, _=Depends(get_admin)):
+    """Рендерит превью JPEG-чека с переданными текстами шапки/слогана/примечания (для настроек сайта)."""
+    header_text = body.get("header_text") or "ARTEZ"
+    slogan      = body.get("slogan") or ""
+    footer_note = body.get("footer_note") or ""
+    mock_order = {
+        "id": 0, "order_num": "0000", "created_at": datetime.now(),
+        "client_first_name": "Иванов", "client_last_name": "Пётр",
+    }
+    mock_items = [
+        {"service": "Ковёр шерстяной", "width_cm": 200, "length_cm": 300, "sqm": 6.0, "price_per_sqm": 25000, "total_sum": 150000},
+        {"service": "Диван 3-местный", "width_cm": None, "length_cm": None, "sqm": None, "price_per_sqm": None, "total_sum": 300000},
+    ]
+    contacts = [c for c in (await _get_cfg("contact_zarafshan_1"), await _get_cfg("contact_zarafshan_2")) if c]
+    jpeg_bytes = receipt.generate_receipt_jpeg(mock_order, mock_items, contacts, header_text, slogan, footer_note)
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 
 @app.get("/api/admin/orders/{order_id}/items")
@@ -7060,6 +7084,10 @@ SITE_SETTINGS_DEFAULTS = {
     "agent_commission_type":    "percent",   # "percent" | "fixed"
     "agent_commission_percent": "5.0",       # % от суммы заказа (по умолчанию)
     "agent_commission_fixed":   "0",         # фиксированная сумма (если type=fixed)
+    # Текст чека (JPEG-квитанция)
+    "receipt_header_text": "ARTEZ",
+    "receipt_slogan":      "Химчистка ковров, мебели, матрасов и штор",
+    "receipt_footer_note": "",
 }
 
 async def _get_cfg(key: str) -> str:
@@ -7139,6 +7167,9 @@ class SiteSettings(BaseModel):
     agent_commission_type:       str | None = None
     agent_commission_percent:    str | None = None
     agent_commission_fixed:      str | None = None
+    receipt_header_text: str | None = None
+    receipt_slogan:      str | None = None
+    receipt_footer_note: str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
