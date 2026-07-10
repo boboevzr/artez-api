@@ -5204,10 +5204,13 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
             FROM salary_ledger
             WHERE staff_id=$1 AND period < $2
         """, staff_id, period) or 0)
-        # Все записи за месяц, отсортированные по дате
+        # Все записи за месяц — начисления отображаем на 1-й день периода (не по created_at)
         rows = await conn.fetch("""
             SELECT sl.*,
-                   DATE(sl.created_at AT TIME ZONE 'Asia/Tashkent') AS entry_date,
+                   CASE WHEN sl.type = 'accrual'
+                        THEN sl.period
+                        ELSE DATE(sl.created_at AT TIME ZONE 'Asia/Tashkent')
+                   END AS entry_date,
                    TRIM(COALESCE(sc.last_name,'') || ' ' || COALESCE(sc.first_name,'')) AS creator_name
             FROM salary_ledger sl
             LEFT JOIN staff sc ON sc.id = sl.created_by
@@ -5216,19 +5219,20 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
         """, staff_id, period)
     # Группируем по дням
     from collections import defaultdict
+    from datetime import date as _date2
     day_entries = defaultdict(list)
     for r in rows:
         day_entries[str(r['entry_date'])].append(dict(r))
-    # Строим посуточную таблицу
+    # Строим посуточную таблицу (все дни с 1-го до сегодня или конца месяца)
     import calendar
     days_in_month = calendar.monthrange(year, month)[1]
+    today = _date2.today()
+    last_day = days_in_month if (year < today.year or month < today.month) else min(days_in_month, today.day)
     result_days = []
     running = opening_balance
-    for d in range(1, days_in_month + 1):
+    for d in range(1, last_day + 1):
         date_str = f"{year}-{month:02d}-{d:02d}"
         entries = day_entries.get(date_str, [])
-        if not entries and not result_days and d < days_in_month:
-            continue  # пропускаем пустые дни до первой записи
         op = running
         accrual = 0.0; advance = 0.0; salary_payment = 0.0; fine = 0.0; other = 0.0
         for e in entries:
@@ -5240,19 +5244,29 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
             elif t == 'fine': fine += amt
             else: other += amt
         running = op + accrual + advance + salary_payment + fine + other
-        if entries or result_days:
-            result_days.append({
-                'date': date_str,
-                'opening': op,
-                'accrual': accrual,
-                'advance': advance,
-                'salary_payment': salary_payment,
-                'fine': fine,
-                'other': other,
-                'closing': running,
-                'entries': entries,
-            })
+        result_days.append({
+            'date': date_str,
+            'opening': op,
+            'accrual': accrual,
+            'advance': advance,
+            'salary_payment': salary_payment,
+            'fine': fine,
+            'other': other,
+            'closing': running,
+            'entries': entries,
+        })
     return {'days': result_days, 'opening_balance': opening_balance}
+
+async def delete_month_accruals(staff_id: int, year: int, month: int) -> int:
+    """Удаляет все записи типа 'accrual' за указанный период для сотрудника."""
+    if not pool: return 0
+    from datetime import date as _date
+    period = _date(year, month, 1)
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM salary_ledger WHERE staff_id=$1 AND period=$2 AND type='accrual'",
+            staff_id, period)
+        return int(result.split()[-1])
 
 async def update_salary_ledger_entry(entry_id: int, amount: float, note: str) -> dict:
     if not pool: return {}

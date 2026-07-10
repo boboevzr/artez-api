@@ -6152,6 +6152,11 @@ async def salary_daily_breakdown(staff_id: int, year: int, month: int, _=Depends
     data = await db.get_salary_daily_breakdown(staff_id, year, month)
     return {"ok": True, **data}
 
+@app.delete("/api/admin/salary/accruals")
+async def delete_month_accruals(staff_id: int, year: int, month: int, _=Depends(_get_admin)):
+    deleted = await db.delete_month_accruals(staff_id, year, month)
+    return {"ok": True, "deleted": deleted}
+
 @app.patch("/api/admin/salary/ledger/{entry_id}")
 async def salary_ledger_update(entry_id: int, body: dict = Body(...), _=Depends(_get_admin)):
     row = await db.update_salary_ledger_entry(entry_id, float(body["amount"]), body.get("note",""))
