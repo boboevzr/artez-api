@@ -3857,7 +3857,7 @@ async def get_cash_dashboard() -> dict:
             )), 0) AS total
             FROM orders o
             WHERE o.payment_status IN ('unpaid','partial')
-              AND o.status NOT IN ('cancelled','delivered')
+              AND o.status IN ('ready','delivery')
         """)
         # Долги: доставленные с debt_responsible_id, ещё не оплачены полностью
         r_debt = await conn.fetchrow("""
