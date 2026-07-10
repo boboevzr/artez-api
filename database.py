@@ -1690,6 +1690,25 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         """, start, end)
         route_map = {r['driver_id']: r for r in route_rows}
 
+        # Суммы заказов водителей за период (для percent pickup/delivery)
+        route_sum_rows = await conn.fetch("""
+            SELECT r.driver_id,
+                COALESCE(SUM(CASE WHEN r.type = 'pickup'
+                    THEN COALESCE(o.total_price,0) END), 0) AS pickup_sum,
+                COUNT(DISTINCT CASE WHEN r.type = 'pickup'
+                    THEN ro.order_id END) AS pickup_count,
+                COALESCE(SUM(CASE WHEN r.type IN ('delivery','mixed')
+                    THEN COALESCE(o.total_price,0) END), 0) AS delivery_sum,
+                COUNT(DISTINCT CASE WHEN r.type IN ('delivery','mixed')
+                    THEN ro.order_id END) AS delivery_count
+            FROM routes r
+            JOIN route_orders ro ON ro.route_id = r.id AND ro.stop_status = 'done'
+            JOIN orders o ON o.id = ro.order_id
+            WHERE r.date >= $1 AND r.date <= $2 AND r.driver_id IS NOT NULL
+            GROUP BY r.driver_id
+        """, start, end)
+        route_sum_map = {r['driver_id']: dict(r) for r in route_sum_rows}
+
         # Ставки за точку
         pu_rows = await conn.fetch("""
             SELECT staff_id, service_key, unit_rate, rate_type
@@ -1726,6 +1745,22 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         washing_map = {r['staff_id']: {'total': float(r['total_sum']), 'count': int(r['item_count'])}
                        for r in washing_rows}
 
+        # Конвертированные лиды за период (для percent lead)
+        lead_sum_rows = await conn.fetch("""
+            SELECT l.assigned_to AS staff_id,
+                COUNT(l.id) AS count,
+                COALESCE(SUM(COALESCE(o.total_price, 0)), 0) AS total
+            FROM leads l
+            LEFT JOIN orders o ON o.order_num = l.converted_order
+            WHERE l.status = 'converted'
+              AND l.updated_at >= $1::timestamptz
+              AND l.updated_at <  $2::timestamptz
+              AND l.assigned_to IS NOT NULL
+            GROUP BY l.assigned_to
+        """, start, end)
+        lead_sum_map = {r['staff_id']: {'total': float(r['total']), 'count': int(r['count'])}
+                        for r in lead_sum_rows}
+
         results = []
         for s in staff_rows:
             sid      = s['id']
@@ -1744,25 +1779,31 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 'total':       None,
             }
 
+            # ── A: Фиксированная основа (fixed и fixed_percent) ──
+            fixed_earn = 0.0
             if sal_type in ('fixed', 'fixed_percent'):
                 ts = ts_map.get(sid)
                 norm_hours = norm_days * 8.0
                 if ts:
                     work_hours = float(ts['total_hours'])
                     work_days  = int(ts['days_count'])
-                    total = round(base / norm_hours * work_hours, 2) if norm_hours > 0 else 0
-                    entry['calc'] = {
-                        'work_hours': work_hours,
-                        'norm_hours': norm_hours,
-                        'work_days':  work_days,
-                        'norm_days':  norm_days,
-                    }
-                    entry['total'] = total
+                    if base > 0 and norm_hours > 0:
+                        fixed_earn = round(base / norm_hours * work_hours, 2)
+                    if sal_type == 'fixed':
+                        entry['calc']  = {
+                            'work_hours': work_hours, 'norm_hours': norm_hours,
+                            'work_days':  work_days,  'norm_days':  norm_days,
+                        }
+                        entry['total'] = fixed_earn
                 else:
-                    entry['calc'] = {'no_timesheet': True, 'norm_days': norm_days}
-                    entry['total'] = None  # нет данных табеля
+                    entry['calc']  = {'no_timesheet': True, 'norm_days': norm_days}
+                    entry['total'] = None
+                    if sal_type == 'fixed':
+                        results.append(entry)
+                        continue
 
-            elif sal_type == 'per_point':
+            # ── B: Зарплата за точку ──
+            if sal_type == 'per_point':
                 rd = route_map.get(sid, {})
                 pickup_cnt   = int(rd.get('pickup_done')   or 0)
                 delivery_cnt = int(rd.get('delivery_done') or 0)
@@ -1771,44 +1812,75 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 d_row = rates.get('__delivery__')
                 p_rate = float(p_row['unit_rate'] if p_row else 0)
                 d_rate = float(d_row['unit_rate'] if d_row else 0)
-                entry['calc'] = {
-                    'pickup_count':   pickup_cnt,
-                    'pickup_rate':    p_rate,
-                    'delivery_count': delivery_cnt,
-                    'delivery_rate':  d_rate,
+                entry['calc']  = {
+                    'pickup_count':   pickup_cnt,  'pickup_rate':    p_rate,
+                    'delivery_count': delivery_cnt, 'delivery_rate':  d_rate,
                 }
                 entry['total'] = pickup_cnt * p_rate + delivery_cnt * d_rate
 
+            # ── C: Процентные составляющие (percent и fixed_percent) ──
             elif sal_type in ('percent', 'fixed_percent'):
                 rates = sp_map.get(sid, {})
-                total_pct = 0.0
+                total_pct  = 0.0
                 calc_lines = {}
 
                 washing_pct = rates.get('washing', 0)
                 if washing_pct:
                     wd = washing_map.get(sid, {})
-                    w_sum  = wd.get('total', 0)
-                    w_cnt  = wd.get('count', 0)
-                    w_earn = round(w_sum * washing_pct / 100, 2)
+                    w_earn = round(wd.get('total', 0) * washing_pct / 100, 2)
                     total_pct += w_earn
-                    calc_lines['washing'] = {'pct': washing_pct, 'base': w_sum, 'earn': w_earn, 'count': w_cnt}
+                    calc_lines['washing'] = {
+                        'pct': washing_pct, 'base': wd.get('total', 0),
+                        'earn': w_earn, 'count': wd.get('count', 0),
+                    }
 
-                # Фиксированная часть (fixed_percent)
-                fixed_earn = 0.0
-                if sal_type == 'fixed_percent' and base > 0:
-                    ts = ts_map.get(sid)
-                    norm_hours = norm_days * 8.0
-                    if ts:
-                        fixed_earn = round(base / norm_hours * float(ts['total_hours']), 2) if norm_hours > 0 else 0
+                pickup_pct = rates.get('pickup', 0)
+                if pickup_pct:
+                    rd = route_sum_map.get(sid, {})
+                    p_sum  = float(rd.get('pickup_sum',   0) or 0)
+                    p_cnt  = int  (rd.get('pickup_count', 0) or 0)
+                    p_earn = round(p_sum * pickup_pct / 100, 2)
+                    total_pct += p_earn
+                    calc_lines['pickup'] = {
+                        'pct': pickup_pct, 'base': p_sum,
+                        'earn': p_earn, 'count': p_cnt,
+                    }
+
+                delivery_pct = rates.get('delivery', 0)
+                if delivery_pct:
+                    rd = route_sum_map.get(sid, {})
+                    d_sum  = float(rd.get('delivery_sum',   0) or 0)
+                    d_cnt  = int  (rd.get('delivery_count', 0) or 0)
+                    d_earn = round(d_sum * delivery_pct / 100, 2)
+                    total_pct += d_earn
+                    calc_lines['delivery'] = {
+                        'pct': delivery_pct, 'base': d_sum,
+                        'earn': d_earn, 'count': d_cnt,
+                    }
+
+                lead_pct = rates.get('lead', 0)
+                if lead_pct:
+                    ld = lead_sum_map.get(sid, {})
+                    l_sum  = float(ld.get('total', 0) or 0)
+                    l_cnt  = int  (ld.get('count', 0) or 0)
+                    l_earn = round(l_sum * lead_pct / 100, 2)
+                    total_pct += l_earn
+                    calc_lines['lead'] = {
+                        'pct': lead_pct, 'base': l_sum,
+                        'earn': l_earn, 'count': l_cnt,
+                    }
+
+                if sal_type == 'fixed_percent' and fixed_earn:
                     calc_lines['fixed'] = {'rate': base, 'earn': fixed_earn}
 
-                entry['calc'] = {'lines': calc_lines, 'norm_days': norm_days}
-                entry['total'] = round(total_pct + fixed_earn, 2)
+                entry['calc']  = {'lines': calc_lines, 'norm_days': norm_days}
+                entry['total'] = round(fixed_earn + total_pct, 2)
 
-            else:
-                entry['total'] = None  # не реализован
+            # ── D: Прочие типы (не реализованы) ──
+            elif sal_type not in ('fixed',):
+                entry['total'] = None
 
-            # Часы из табеля — добавляем для любого типа, если есть
+            # ── E: Часы из табеля для не-фиксированных типов ──
             if sal_type not in ('fixed', 'fixed_percent'):
                 ts = ts_map.get(sid)
                 if ts:
@@ -5262,11 +5334,12 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
 
         # Ставка и норма из staff
         st = await conn.fetchrow(
-            "SELECT salary_type, salary_rate, salary_work_days FROM staff WHERE id=$1", staff_id)
-        sal_type   = (st['salary_type'] or 'fixed') if st else 'fixed'
-        sal_rate   = float((st['salary_rate'] or 0)) if st else 0.0
-        norm_days  = int((st['salary_work_days'] or 26)) if st else 26
-        norm_hours = norm_days * 8.0
+            "SELECT salary_type, salary_rate, salary_work_days, login FROM staff WHERE id=$1", staff_id)
+        sal_type    = (st['salary_type'] or 'fixed') if st else 'fixed'
+        sal_rate    = float((st['salary_rate'] or 0)) if st else 0.0
+        norm_days   = int((st['salary_work_days'] or 26)) if st else 26
+        staff_login = (st['login'] or '') if st else ''
+        norm_hours  = norm_days * 8.0
         hourly_rate = sal_rate / norm_hours if (sal_type in ('fixed','fixed_percent') and norm_hours > 0) else 0.0
 
         # Табель за месяц
@@ -5283,6 +5356,31 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
             WHERE sl.staff_id=$1 AND sl.period=$2 AND sl.type != 'accrual'
             ORDER BY sl.created_at
         """, staff_id, period)
+
+        # Для percent/fixed_percent: посуточный объём мойки
+        washing_daily: dict = {}
+        if sal_type in ('percent', 'fixed_percent') and staff_login:
+            washing_pct_val = await conn.fetchval(
+                "SELECT COALESCE(percent,0) FROM staff_salary_percents WHERE staff_id=$1 AND role='washing'",
+                staff_id)
+            washing_pct = float(washing_pct_val or 0)
+            if washing_pct:
+                day_rows = await conn.fetch("""
+                    SELECT DATE(o.created_at AT TIME ZONE 'Asia/Tashkent') AS day,
+                        COALESCE(SUM(COALESCE(oi.actual_total_sum,
+                            oi.price_per_sqm * COALESCE(oi.actual_sqm, oi.sqm), 0)), 0) AS day_sum
+                    FROM order_items oi
+                    JOIN orders o ON o.id = oi.order_id
+                    WHERE oi.washer_login = $1
+                      AND o.status != 'cancelled'
+                      AND o.created_at >= $2::timestamptz
+                      AND o.created_at <  $3::timestamptz
+                    GROUP BY DATE(o.created_at AT TIME ZONE 'Asia/Tashkent')
+                """, staff_login, period, period_end)
+                washing_daily = {
+                    str(r['day']): round(float(r['day_sum']) * washing_pct / 100, 2)
+                    for r in day_rows
+                }
 
     # Карта табеля {date_str: hours}
     ts_map = {str(r['date']): float(r['hours'] or 0) for r in ts_rows
@@ -5304,15 +5402,16 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
     last_day = days_in_month if (year < today.year or month < today.month) else min(days_in_month, today.day)
 
     result_days = []
-    running = opening_balance
+    running = 0.0  # таблица показывает движения текущего месяца; opening_balance — в шапке
     for d in range(1, last_day + 1):
         date_str = f"{year}-{month:02d}-{d:02d}"
         entries  = ledger_by_date.get(date_str, [])
         op = running
 
-        # Начисление из табеля
+        # Начисление: из табеля (fixed) + мойка по дням (percent)
         hours_today = ts_map.get(date_str, 0.0)
         accrual = round(hourly_rate * hours_today, 2) if hourly_rate > 0 else 0.0
+        accrual = round(accrual + washing_daily.get(date_str, 0.0), 2)
 
         advance = 0.0; salary_payment = 0.0; fine = 0.0; other = 0.0
         for e in entries:
