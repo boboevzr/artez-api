@@ -1294,7 +1294,8 @@ async def get_orders_by_phone(phone: str):
     async with pool.acquire() as conn:
         return await conn.fetch("""
             SELECT order_num, service, branch, city, address, status,
-                   pickup_date, pickup_time, total_price, created_at
+                   pickup_date, pickup_time, total_price, created_at,
+                   (SELECT COUNT(*) FROM order_items WHERE order_id=orders.id)::int AS item_count
             FROM orders
             WHERE client_phone = $1
             ORDER BY created_at DESC
