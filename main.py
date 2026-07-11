@@ -3996,6 +3996,58 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
     return {"ok": True, "order": order}
 
 
+TYPE_LABELS = {"standard": "Стандарт", "express": "Экспресс"}
+
+
+def _substitute_receipt_tokens(text: str, order: dict, grand_total: float) -> str:
+    if not text:
+        return text
+    client_name = " ".join(p for p in [order.get("client_first_name"), order.get("client_last_name")] if p).strip()
+    branch_labels = {"zarafshan": "Зарафшан", "navoi": "Навои"}
+    created_at = order.get("created_at")
+    date_str = created_at.strftime("%d.%m.%Y") if hasattr(created_at, "strftime") else str(created_at or "")
+    replacements = {
+        "{{order_id}}":    str(order.get("order_num") or order.get("id") or ""),
+        "{{client_name}}": client_name,
+        "{{phone}}":       order.get("client_phone") or "",
+        "{{date}}":        date_str,
+        "{{total}}":       f"{int(grand_total):,}".replace(",", " ") + " сум",
+        "{{branch}}":      branch_labels.get(order.get("branch"), order.get("branch") or ""),
+    }
+    for token, value in replacements.items():
+        text = text.replace(token, value)
+    return text
+
+
+async def _render_order_receipt(order_id: int) -> tuple[bytes, dict]:
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    items = await db.get_order_items(order_id)
+    grand_total = sum(float(it.get("total_sum") or 0) for it in items)
+
+    branch = order.get("branch")
+    if branch == "navoi":
+        c1, c2 = await _get_cfg("contact_navoi_1"), await _get_cfg("contact_navoi_2")
+    else:
+        c1, c2 = await _get_cfg("contact_zarafshan_1"), await _get_cfg("contact_zarafshan_2")
+    if not c1 and not c2:
+        c1, c2 = await _get_cfg("contact_short"), await _get_cfg("contact_main")
+    branch_contacts = [c for c in (c1, c2) if c]
+
+    header_text = _substitute_receipt_tokens(await _get_cfg("receipt_header_text"), order, grand_total)
+    slogan      = _substitute_receipt_tokens(await _get_cfg("receipt_slogan"), order, grand_total)
+    footer_note = _substitute_receipt_tokens(await _get_cfg("receipt_footer_note"), order, grand_total)
+
+    service_emojis = await db.get_service_emoji_map()
+    type_label = TYPE_LABELS.get(order.get("service_type"), "Стандарт")
+
+    jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts,
+                                                header_text, slogan, footer_note,
+                                                service_emojis, type_label)
+    return jpeg_bytes, order
+
+
 @app.post("/api/admin/orders/{order_id}/send-receipt")
 async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staff)):
     """Отправляет клиенту JPG-чек заказа в Telegram (для статуса «Готов»)."""
@@ -4007,28 +4059,14 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
 
-    items = await db.get_order_items(order_id)
-
-    branch = order.get("branch")
-    if branch == "navoi":
-        c1, c2 = await _get_cfg("contact_navoi_1"), await _get_cfg("contact_navoi_2")
-    else:
-        c1, c2 = await _get_cfg("contact_zarafshan_1"), await _get_cfg("contact_zarafshan_2")
-    if not c1 and not c2:
-        c1, c2 = await _get_cfg("contact_short"), await _get_cfg("contact_main")
-    branch_contacts = [c for c in (c1, c2) if c]
-
     tg_id = await db.get_receipt_tg_id(order)
     if not tg_id:
         raise HTTPException(status_code=400, detail="У клиента нет Telegram")
 
-    header_text = await _get_cfg("receipt_header_text")
-    slogan      = await _get_cfg("receipt_slogan")
-    footer_note = await _get_cfg("receipt_footer_note")
-
     try:
-        jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts,
-                                                     header_text, slogan, footer_note)
+        jpeg_bytes, order = await _render_order_receipt(order_id)
+    except HTTPException:
+        raise
     except Exception as e:
         logging.error(f"send-receipt render failed order={order_id}: {e}")
         raise HTTPException(status_code=500, detail="Не удалось сформировать чек")
@@ -4057,6 +4095,15 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
     return {"ok": True}
 
 
+@app.get("/api/admin/orders/{order_id}/receipt-image")
+async def get_order_receipt_image(order_id: int, staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    if role != "admin" and "status" not in ROLE_PERMISSIONS.get(role, []):
+        raise HTTPException(status_code=403, detail="Нет прав")
+    jpeg_bytes, _order = await _render_order_receipt(order_id)
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
+
+
 @app.post("/api/admin/receipt/preview")
 async def preview_receipt(body: dict, _=Depends(get_admin)):
     """Рендерит превью JPEG-чека с переданными текстами шапки/слогана/примечания (для настроек сайта)."""
@@ -4066,13 +4113,20 @@ async def preview_receipt(body: dict, _=Depends(get_admin)):
     mock_order = {
         "id": 0, "order_num": "0000", "created_at": datetime.now(),
         "client_first_name": "Иванов", "client_last_name": "Пётр",
+        "client_phone": "+998901234567", "branch": "zarafshan",
     }
     mock_items = [
         {"service": "Ковёр шерстяной", "width_cm": 200, "length_cm": 300, "sqm": 6.0, "price_per_sqm": 25000, "total_sum": 150000},
         {"service": "Диван 3-местный", "width_cm": None, "length_cm": None, "sqm": None, "price_per_sqm": None, "total_sum": 300000},
     ]
+    grand_total = sum(float(it.get("total_sum") or 0) for it in mock_items)
+    header_text = _substitute_receipt_tokens(header_text, mock_order, grand_total)
+    slogan      = _substitute_receipt_tokens(slogan, mock_order, grand_total)
+    footer_note = _substitute_receipt_tokens(footer_note, mock_order, grand_total)
     contacts = [c for c in (await _get_cfg("contact_zarafshan_1"), await _get_cfg("contact_zarafshan_2")) if c]
-    jpeg_bytes = receipt.generate_receipt_jpeg(mock_order, mock_items, contacts, header_text, slogan, footer_note)
+    service_emojis = await db.get_service_emoji_map()
+    jpeg_bytes = receipt.generate_receipt_jpeg(mock_order, mock_items, contacts, header_text, slogan, footer_note,
+                                                service_emojis, "Стандарт")
     return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 

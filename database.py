@@ -1378,6 +1378,13 @@ async def delete_service(key: str):
         r = await conn.execute("DELETE FROM services WHERE key=$1", key)
         return r == "DELETE 1"
 
+async def get_service_emoji_map() -> dict:
+    if not pool:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT name_ru, emoji FROM services")
+        return {r["name_ru"]: r["emoji"] for r in rows if r["emoji"]}
+
 # ══════════════════════════════════════
 #  ЕДИНИЦЫ ИЗМЕРЕНИЯ (общая таблица с ботом)
 # ══════════════════════════════════════

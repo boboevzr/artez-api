@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 BOLD    = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+EMOJI_FONT_PATH = os.path.join(FONT_DIR, "OpenMoji-Black.ttf")
 
 W = 576  # 80mm thermal printer standard raster width
 PAD = 20
@@ -27,6 +28,7 @@ def _fonts():
         "item_sub":  ImageFont.truetype(REGULAR, 19),
         "total":     ImageFont.truetype(BOLD, 28),
         "footer":    ImageFont.truetype(REGULAR, 18),
+        "emoji":     ImageFont.truetype(EMOJI_FONT_PATH, 24),
     }
 
 
@@ -52,10 +54,25 @@ def _dashed_line(draw, y):
         x += 12
 
 
+def _draw_mixed_line(draw, x, y, segments):
+    """segments: list of (text, font) tuples, drawn left-to-right starting at x.
+    Returns (total_width, max_height)."""
+    cur_x = x
+    max_h = 0
+    for text, font in segments:
+        draw.text((cur_x, y), text, font=font, fill=BLACK)
+        w, h = _measure(draw, text, font)
+        cur_x += w
+        max_h = max(max_h, h)
+    return cur_x - x, max_h
+
+
 def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[str],
                            header_text: str = "ARTEZ",
                            slogan: str = "Химчистка ковров, мебели, матрасов и штор",
-                           footer_note: str = "") -> bytes:
+                           footer_note: str = "",
+                           service_emojis: dict | None = None,
+                           type_label: str = "Стандарт") -> bytes:
     """
     Рисует JPEG-чек заказа и возвращает его байты.
 
@@ -67,7 +84,10 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
     header_text: текст шапки-логотипа чека (по умолчанию "ARTEZ").
     slogan: слоган в подвале чека.
     footer_note: доп. строка в подвале чека (не выводится, если пустая).
+    service_emojis: словарь {service_name: emoji}, уже разрешённый вызывающей стороной из БД.
+    type_label: подпись типа услуги (Стандарт/Экспресс), общая для всех позиций чека.
     """
+    service_emojis = service_emojis or {}
     f = _fonts()
 
     order_num = order.get("order_num") or order.get("id") or ""
@@ -81,8 +101,11 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
         p for p in [order.get("client_first_name"), order.get("client_last_name")] if p
     ).strip() or order.get("client_name") or order.get("client_phone") or ""
 
-    # Оверсайз-холст, обрезаем в конце по фактической высоте
-    img = Image.new("RGB", (W, 200 + 150 * max(len(items), 1)), WHITE)
+    # Оверсайз-холст, обрезаем в конце по фактической высоте.
+    # Щедрый фиксированный запас (не пропорциональный числу позиций) — при малом
+    # количестве items с длинным header/footer_note/несколькими контактами
+    # пропорциональная оценка недооценивала высоту, и crop() обрезал подвал чёрной полосой.
+    img = Image.new("RGB", (W, max(1200, 400 + 200 * len(items))), WHITE)
     draw = ImageDraw.Draw(img)
 
     y = PAD
@@ -94,26 +117,41 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
 
     for i, it in enumerate(items, 1):
         name = it.get("service") or "—"
-        line1 = f"{i}. {name}"
-        draw.text((PAD, y), line1, font=f["item_name"], fill=BLACK)
-        y += _measure(draw, line1, f["item_name"])[1] + 6
+        emoji = service_emojis.get(it.get("service"), "🧺")
+        segments = [
+            (f"{i} ", f["item_name"]),
+            (emoji, f["emoji"]),
+            (f" {name} — {type_label}", f["item_name"]),
+        ]
+        _, line1_h = _draw_mixed_line(draw, PAD, y, segments)
+        y += line1_h + 6
 
         w_cm, l_cm, sqm = it.get("width_cm"), it.get("length_cm"), it.get("sqm")
-        if w_cm and l_cm:
-            dim_line = f"{int(w_cm)}×{int(l_cm)} см · {float(sqm or 0):.2f} м²"
-            draw.text((PAD + 14, y), dim_line, font=f["item_sub"], fill=BLACK)
-            y += _measure(draw, dim_line, f["item_sub"])[1] + 4
-
         price, total = it.get("price_per_sqm"), it.get("total_sum")
-        if price and total:
-            price_line = f"{fmt_n(price)} с/м² · {fmt_n(total)} с"
+
+        if w_cm and l_cm:
+            dim_line = f"{int(w_cm)}×{int(l_cm)} см · {float(sqm or 0):.2f} м² | {fmt_n(price)} сум/м²"
+            total_line = f"{fmt_n(total)} сум"
+            dim_w, dim_h = _measure(draw, dim_line, f["item_sub"])
+            total_w, total_h = _measure(draw, total_line, f["total"])
+            available = W - 2 * PAD
+            min_gap = 12
+            if dim_w + total_w + min_gap > available:
+                # не помещаются рядом — переносим на отдельные строки
+                draw.text((PAD + 14, y), dim_line, font=f["item_sub"], fill=BLACK)
+                y += dim_h + 6
+                draw.text((W - PAD - total_w, y), total_line, font=f["total"], fill=BLACK)
+                y += total_h + 4
+            else:
+                bottom = y + dim_h
+                draw.text((PAD + 14, y), dim_line, font=f["item_sub"], fill=BLACK)
+                draw.text((W - PAD - total_w, bottom - total_h), total_line, font=f["total"], fill=BLACK)
+                y += max(dim_h, total_h) + 4
         elif total:
-            price_line = f"{fmt_n(total)} с"
-        else:
-            price_line = ""
-        if price_line:
-            draw.text((PAD + 14, y), price_line, font=f["item_sub"], fill=BLACK)
-            y += _measure(draw, price_line, f["item_sub"])[1] + 4
+            total_line = f"{fmt_n(total)} сум"
+            total_w, total_h = _measure(draw, total_line, f["total"])
+            draw.text((W - PAD - total_w, y), total_line, font=f["total"], fill=BLACK)
+            y += total_h + 4
 
         y += 10
         _dashed_line(draw, y)
