@@ -3172,20 +3172,23 @@ async def search_contacts(q: str, limit: int = 10) -> list[dict]:
     q = q.strip()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT id, first_name, last_name, middle_name, phone, phone2, address, short_address, source
-            FROM contacts
-            WHERE phone ILIKE $1
-               OR phone2 ILIKE $1
-               OR first_name ILIKE $1
-               OR last_name ILIKE $1
-               OR (first_name || ' ' || last_name) ILIKE $1
-               OR (last_name || ' ' || first_name) ILIKE $1
-               OR short_address ILIKE $1
+            SELECT c.id, c.first_name, c.last_name, c.middle_name, c.phone, c.phone2,
+                   c.address, c.short_address, c.source,
+                   cc.discount_category, cc.discount_category_pct
+            FROM contacts c
+            LEFT JOIN crm_clients cc ON cc.phone = c.phone
+            WHERE c.phone ILIKE $1
+               OR c.phone2 ILIKE $1
+               OR c.first_name ILIKE $1
+               OR c.last_name ILIKE $1
+               OR (c.first_name || ' ' || c.last_name) ILIKE $1
+               OR (c.last_name || ' ' || c.first_name) ILIKE $1
+               OR c.short_address ILIKE $1
             ORDER BY
-                CASE WHEN phone ILIKE $2 THEN 0
-                     WHEN phone2 ILIKE $2 THEN 1
+                CASE WHEN c.phone ILIKE $2 THEN 0
+                     WHEN c.phone2 ILIKE $2 THEN 1
                      ELSE 2 END,
-                last_name, first_name
+                c.last_name, c.first_name
             LIMIT $3
         """, f"%{q}%", f"{q}%", limit)
         return [dict(r) for r in rows]
