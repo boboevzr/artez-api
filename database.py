@@ -982,14 +982,23 @@ async def create_tables():
             'aug2026_20pct',
             'Акция: скидка 20%!',
             'Aksiya: 20% chegirma!',
-            'Успей заказать до 31 августа и получи скидку 20% на первый заказ! Действует 48 часов.',
-            '31 avgustgacha ulgurib buyurtma bering va birinchi buyurtmangizga 20% chegirma oling! 48 soat davomida amal qiladi.',
+            'Успей заказать до 31 августа и получи скидку 20%! Действует 48 часов.',
+            '31 avgustgacha ulgurib buyurtma bering va 20% chegirma oling! 48 soat davomida amal qiladi.',
             20,
             '2026-08-31 18:59:00+00',
             48,
-            TRUE, TRUE, TRUE
+            TRUE, FALSE, TRUE
         )
         ON CONFLICT (code) DO NOTHING;
+        """)
+        # Условие "только для клиентов без заказов" убрано — акция теперь доступна
+        # всем зарегистрированным клиентам. Правим уже засеянную строку тоже.
+        await c.execute("""
+        UPDATE promotions SET
+            target_new_only = FALSE,
+            text_ru = 'Успей заказать до 31 августа и получи скидку 20%! Действует 48 часов.',
+            text_uz = '31 avgustgacha ulgurib buyurtma bering va 20% chegirma oling! 48 soat davomida amal qiladi.'
+        WHERE code = 'aug2026_20pct';
         """)
 
     logging.info("✅ API: Tables created/verified")
