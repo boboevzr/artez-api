@@ -2538,6 +2538,103 @@ async def client_orders(client_id: int, _=Depends(_get_admin_or_staff_clients)):
     return {"ok": True, "orders": orders}
 
 
+# ── Постоянная категория скидки (пенсионер / инвалид) ──────────────────────────
+DISCOUNT_CATEGORIES = ("pensioner", "disabled")
+
+def _require_clients_perm(staff: dict):
+    role = staff.get("role") or ""
+    perms = ROLE_PERMISSIONS.get(role, [])
+    if role != "admin" and "clients" not in perms:
+        raise HTTPException(status_code=403, detail="Нет доступа")
+
+class ClientDiscountCategoryRequest(BaseModel):
+    discount_category: str | None = None       # 'pensioner' | 'disabled' | None — снять категорию
+    discount_category_pct: float | None = None  # обязателен при установке категории
+
+@app.put("/api/clients/{client_id}/discount-category")
+async def client_set_discount_category(client_id: int, req: ClientDiscountCategoryRequest,
+                                       staff=Depends(get_current_staff)):
+    _require_clients_perm(staff)
+    existing = await db.get_crm_client_by_id(client_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    category = (req.discount_category or "").strip() or None
+    if category and category not in DISCOUNT_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Некорректная категория скидки")
+    pct = req.discount_category_pct if category else None
+    if category and (pct is None or not (0 < pct <= 100)):
+        raise HTTPException(status_code=400, detail="Укажите корректный процент скидки (0–100)")
+    row = await db.set_crm_client_discount_category(
+        client_id, category, pct, staff.get("id") if category else None
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    return {"ok": True, "client": row}
+
+@app.post("/api/clients/{client_id}/discount-category/photo")
+async def client_upload_discount_photo(client_id: int, file: UploadFile = File(...),
+                                       staff=Depends(get_current_staff)):
+    _require_clients_perm(staff)
+    existing = await db.get_crm_client_by_id(client_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Клиент не найден")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    content_type = file.content_type or "image/jpeg"
+    tg_method = "sendDocument" if not content_type.startswith("image/") else "sendPhoto"
+    tg_field  = "document" if tg_method == "sendDocument" else "photo"
+    tg_type   = "document" if tg_method == "sendDocument" else "photo"
+    staff_name  = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "")
+    client_name = " ".join(filter(None, [existing.get("first_name"), existing.get("last_name")])) or existing.get("phone", "")
+    file_bytes = await file.read()
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field(tg_field, file_bytes, filename=file.filename or "document.jpg", content_type=content_type)
+    form.add_field("caption", f"🪪 Документ льготы\n👤 Клиент: {client_name}\n📞 {existing.get('phone','')}\n✅ Проверил: {staff_name}")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{tg_method}", data=form) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    msg = result["result"]
+    file_id = msg["photo"][-1]["file_id"] if tg_type == "photo" else msg[tg_type]["file_id"]
+    row = await db.save_crm_client_discount_photo(client_id, file_id)
+    return {"ok": True, "client": row}
+
+@app.get("/api/clients/{client_id}/discount-category/photo")
+async def client_get_discount_photo(client_id: int, staff=Depends(get_current_staff)):
+    _require_clients_perm(staff)
+    row = await db.get_crm_client_by_id(client_id)
+    if not row or not row.get("discount_category_photo_file_id"):
+        raise HTTPException(status_code=404, detail="Фото не найдено")
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="Бот не настроен")
+    try:
+        from fastapi.responses import StreamingResponse
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                             params={"file_id": row["discount_category_photo_file_id"]},
+                             timeout=aiohttp.ClientTimeout(total=10)) as r:
+                data = await r.json()
+            if not data.get("ok"):
+                raise HTTPException(status_code=404, detail="Файл не найден в TG")
+            file_path = data["result"]["file_path"]
+            file_url  = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+            ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+            ctype = ("image/jpeg" if ext in ("jpg", "jpeg") else
+                     "image/png"  if ext == "png" else
+                     "application/octet-stream")
+            async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
+                content = await fr.read()
+        return StreamingResponse(iter([content]), media_type=ctype,
+                                 headers={"Content-Disposition": "inline"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # CONTACTS — справочник контактов
 # ══════════════════════════════════════════════════════════════════════════════

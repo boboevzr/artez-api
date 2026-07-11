@@ -1001,6 +1001,16 @@ async def create_tables():
         WHERE code = 'aug2026_20pct';
         """)
 
+    # ── Шаг 21: постоянная категория скидки клиента (пенсионер/инвалид) ──
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category               VARCHAR(20);
+        ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_pct           NUMERIC(5,2);
+        ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_photo_file_id VARCHAR(200);
+        ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_verified_by   INTEGER REFERENCES staff(id) ON DELETE SET NULL;
+        ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_verified_at   TIMESTAMPTZ;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -3079,6 +3089,51 @@ async def update_crm_client(client_id: int, **kwargs) -> dict | None:
         row = await conn.fetchrow(
             f"UPDATE crm_clients SET {set_parts}, updated_at=NOW() WHERE id=$1 RETURNING *",
             *vals
+        )
+        return dict(row) if row else None
+
+
+async def set_crm_client_discount_category(client_id: int, category: str | None,
+                                            pct: float | None, staff_id: int | None) -> dict | None:
+    """Устанавливает/снимает постоянную категорию скидки клиента (пенсионер/инвалид).
+    При установке фиксирует, кто и когда подтвердил документ. При снятии — очищает и фото."""
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        if category:
+            row = await conn.fetchrow("""
+                UPDATE crm_clients SET
+                    discount_category             = $2,
+                    discount_category_pct         = $3,
+                    discount_category_verified_by = $4,
+                    discount_category_verified_at = NOW(),
+                    updated_at                    = NOW()
+                WHERE id = $1
+                RETURNING *
+            """, client_id, category, pct, staff_id)
+        else:
+            row = await conn.fetchrow("""
+                UPDATE crm_clients SET
+                    discount_category               = NULL,
+                    discount_category_pct           = NULL,
+                    discount_category_photo_file_id = NULL,
+                    discount_category_verified_by   = NULL,
+                    discount_category_verified_at   = NULL,
+                    updated_at                       = NOW()
+                WHERE id = $1
+                RETURNING *
+            """, client_id)
+        return dict(row) if row else None
+
+
+async def save_crm_client_discount_photo(client_id: int, file_id: str) -> dict | None:
+    """Сохраняет file_id фото подтверждающего документа (пенсионное/инвалидное удостоверение)."""
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE crm_clients SET discount_category_photo_file_id=$2, updated_at=NOW() WHERE id=$1 RETURNING *",
+            client_id, file_id
         )
         return dict(row) if row else None
 
