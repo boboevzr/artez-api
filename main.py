@@ -907,6 +907,10 @@ ROLE_PERMISSIONS: dict[str, list[str]] = {
     "agent":      ["leads_own"],  # агент видит только свои лиды
 }
 
+# Кто может смотреть/отправлять чек клиенту — шире, чем "status" (право менять
+# статус заказа): все операционные роли кроме внешних агентов-партнёров.
+RECEIPT_ACCESS_ROLES = {"admin", "manager", "logistics", "packer", "washer", "callcenter", "driver"}
+
 # Допустимые переходы статусов для мойщиков
 WASHER_STATUS_FLOW = {
     "received": "washing",
@@ -4074,11 +4078,12 @@ async def _render_order_receipt(order_id: int) -> tuple[bytes, dict]:
 
 
 @app.post("/api/admin/orders/{order_id}/send-receipt")
-async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staff)):
+async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staff),
+                                    note: str = Body("", embed=True)):
     """Отправляет клиенту JPG-чек заказа в Telegram (для статуса «Готов»)."""
     role = staff.get("role", "")
-    if role != "admin" and "status" not in ROLE_PERMISSIONS.get(role, []):
-        raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
+    if role not in RECEIPT_ACCESS_ROLES:
+        raise HTTPException(status_code=403, detail="Нет прав")
 
     order = await db.get_order_by_id(order_id)
     if not order:
@@ -4087,6 +4092,15 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
     tg_id = await db.get_receipt_tg_id(order)
     if not tg_id:
         raise HTTPException(status_code=400, detail="У клиента нет Telegram")
+
+    if not note:
+        prior = await db.get_last_receipt_send(order_id)
+        if prior:
+            sent_at = prior.get("created_at")
+            sent_at_str = sent_at.strftime("%d.%m.%Y %H:%M") if hasattr(sent_at, "strftime") else str(sent_at or "")
+            raise HTTPException(status_code=409,
+                detail=f"Чек уже отправлялся {sent_at_str} ({prior.get('staff_name') or '—'}). "
+                       f"Укажите причину повторной отправки.")
 
     try:
         jpeg_bytes, order = await _render_order_receipt(order_id)
@@ -4117,13 +4131,19 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
         logging.error(f"send-receipt TG request failed order={order_id}: {e}")
         raise HTTPException(status_code=502, detail="Ошибка отправки в Telegram")
 
+    try:
+        actor_name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
+        await db.log_receipt_send(order_id, staff.get("id"), actor_name, note)
+    except Exception as e:
+        logging.warning(f"receipt send log failed order={order_id}: {e}")
+
     return {"ok": True}
 
 
 @app.get("/api/admin/orders/{order_id}/receipt-image")
 async def get_order_receipt_image(order_id: int, staff=Depends(get_current_staff)):
     role = staff.get("role", "")
-    if role != "admin" and "status" not in ROLE_PERMISSIONS.get(role, []):
+    if role not in RECEIPT_ACCESS_ROLES:
         raise HTTPException(status_code=403, detail="Нет прав")
     jpeg_bytes, _order = await _render_order_receipt(order_id)
     return Response(content=jpeg_bytes, media_type="image/jpeg")
@@ -5942,6 +5962,8 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         item = await db.submit_item_measure(item_id)
         if not item:
             raise HTTPException(status_code=400, detail="Ошибка при отправке на проверку")
+        sname = f"{staff.get('last_name','')} {staff.get('first_name','')}".strip() or staff.get('login','')
+        await db.add_order_activity(order_id, staff.get("id"), sname, "measure_submitted", item.get("service",""))
         # Push всем кто может проверять замеры
         try:
             approvers = await db.get_all_approvers()
@@ -6294,6 +6316,9 @@ async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_c
     item = await db.update_item_washer(item_id, washer_login or None)
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
+    sname = f"{staff.get('last_name','')} {staff.get('first_name','')}".strip() or staff.get('login','')
+    action_type = "washer_taken" if washer_login else "washer_released"
+    await db.add_order_activity(order_id, staff.get("id"), sname, action_type, item.get("service",""))
     try:
         await _chat.broadcast_staff({"type": "item_updated", "order_id": order_id, "item_id": item_id},
                                      exclude=staff.get("id"))
