@@ -5697,20 +5697,27 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
     }
 
 async def get_agent_monitoring_stats() -> dict:
-    """Мониторинг активности персонала (эвристика по order_activity/lead_calls/chat_messages,
-    без отдельной колонки last_active в БД)."""
+    """Мониторинг активности персонала: order_activity / lead_calls / chat_messages /
+    staff_attendance_events / cash_shifts + orders_in_work + presence_status."""
     if not pool: return {"agents": [], "order_status_breakdown": {}, "activity_trend_7d": []}
-
-    from datetime import date as _date3
 
     today_tk = datetime.now(_TASHKENT).date()
     yesterday_tk = today_tk - timedelta(days=1)
     week_start_tk = today_tk - timedelta(days=6)
     ts_from, ts_to = _tz_range(str(week_start_tk), str(today_tk))
+    now_utc = datetime.now(timezone.utc)
+
+    def _secs_ago(dt):
+        """Секунд назад от now_utc; поддерживает aware и naive (UTC) datetime."""
+        if dt is None:
+            return float('inf')
+        if dt.tzinfo is None:
+            return (datetime.utcnow() - dt).total_seconds()
+        return (now_utc - dt).total_seconds()
 
     async with pool.acquire() as conn:
         staff_rows = await conn.fetch(
-            "SELECT id, first_name, last_name, role, branch FROM staff WHERE active = true")
+            "SELECT id, login, first_name, last_name, role, branch FROM staff WHERE active = true")
 
         oa_rows = await conn.fetch("""
             SELECT staff_id,
@@ -5742,6 +5749,41 @@ async def get_agent_monitoring_stats() -> dict:
             GROUP BY sender_name
         """, today_tk, yesterday_tk)
 
+        # attendance events: приход/уход
+        ae_rows = await conn.fetch("""
+            SELECT staff_id,
+                   MAX(created_at) AS last_active,
+                   COUNT(*) FILTER (WHERE event_type = 'in'
+                       AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS in_today,
+                   MIN(created_at) FILTER (WHERE event_type = 'in'
+                       AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS first_in_today,
+                   COUNT(*) FILTER (WHERE event_type = 'out'
+                       AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS out_today
+            FROM staff_attendance_events
+            GROUP BY staff_id
+        """, today_tk)
+
+        # смены кассы
+        cs_rows = await conn.fetch("""
+            SELECT opened_by AS staff_id,
+                   MAX(opened_at) AS last_active,
+                   COUNT(*) FILTER (WHERE status = 'open'
+                       AND (opened_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS shift_open_today
+            FROM cash_shifts
+            WHERE opened_by IS NOT NULL
+            GROUP BY opened_by
+        """, today_tk)
+
+        # заказы в работе (linked via login)
+        oiw_rows = await conn.fetch("""
+            SELECT s.id AS staff_id, COUNT(o.*) AS cnt
+            FROM orders o
+            JOIN staff s ON s.login = o.assigned_to
+            WHERE o.status NOT IN ('delivered','cancelled','new')
+              AND o.assigned_to IS NOT NULL
+            GROUP BY s.id
+        """)
+
         status_row = await conn.fetchrow("""
             SELECT
                 COUNT(*) FILTER (WHERE status NOT IN ('delivered','cancelled')) AS in_progress,
@@ -5770,30 +5812,27 @@ async def get_agent_monitoring_stats() -> dict:
             GROUP BY day
         """, ts_from, ts_to)
 
-    # ── merge по staff_id: order_activity + lead_calls ──────────────────
+    # ── вспомогательная merge-функция ─────────────────────────────────────
+    def _merge_id(dest: dict, sid, last_active, at=0, ay=0):
+        cur = dest.get(sid)
+        if cur is None:
+            dest[sid] = {'last_active': last_active, 'actions_today': at, 'actions_yesterday': ay}
+        else:
+            if last_active and (cur['last_active'] is None or last_active > cur['last_active']):
+                cur['last_active'] = last_active
+            cur['actions_today'] += at
+            cur['actions_yesterday'] += ay
+
+    # ── merge order_activity + lead_calls по staff.id ────────────────────
     by_id: dict = {}
     for r in oa_rows:
-        by_id[r['staff_id']] = {
-            'last_active': r['last_active'],
-            'actions_today': r['actions_today'] or 0,
-            'actions_yesterday': r['actions_yesterday'] or 0,
-        }
+        _merge_id(by_id, r['staff_id'], r['last_active'],
+                  r['actions_today'] or 0, r['actions_yesterday'] or 0)
     for r in lc_rows:
-        sid = r['staff_id']
-        cur = by_id.get(sid)
-        if cur is None:
-            by_id[sid] = {
-                'last_active': r['last_active'],
-                'actions_today': r['actions_today'] or 0,
-                'actions_yesterday': r['actions_yesterday'] or 0,
-            }
-        else:
-            if r['last_active'] and (cur['last_active'] is None or r['last_active'] > cur['last_active']):
-                cur['last_active'] = r['last_active']
-            cur['actions_today'] += r['actions_today'] or 0
-            cur['actions_yesterday'] += r['actions_yesterday'] or 0
+        _merge_id(by_id, r['staff_id'], r['last_active'],
+                  r['actions_today'] or 0, r['actions_yesterday'] or 0)
 
-    # ── merge по имени (sender_name) для chat_messages ───────────────────
+    # ── merge chat_messages по имени ──────────────────────────────────────
     by_name: dict = {}
     for r in cm_rows:
         name = (r['sender_name'] or '').strip()
@@ -5805,6 +5844,12 @@ async def get_agent_monitoring_stats() -> dict:
             'actions_yesterday': r['actions_yesterday'] or 0,
         }
 
+    # ── индексы дополнительных источников ────────────────────────────────
+    ae_by_id: dict = {r['staff_id']: r for r in ae_rows}
+    cs_by_id: dict = {r['staff_id']: r for r in cs_rows}
+    oiw_by_id: dict = {r['staff_id']: int(r['cnt'] or 0) for r in oiw_rows}
+
+    # ── сборка agents[] ───────────────────────────────────────────────────
     agents = []
     for s in staff_rows:
         sid = s['id']
@@ -5828,6 +5873,41 @@ async def get_agent_monitoring_stats() -> dict:
             actions_today += m2['actions_today']
             actions_yesterday += m2['actions_yesterday']
 
+        # attendance
+        ae = ae_by_id.get(sid)
+        checked_in_today = bool(ae and (ae['in_today'] or 0) > 0)
+        checked_out_today = bool(ae and (ae['out_today'] or 0) > 0)
+        checked_in_time = None
+        if ae and ae['first_in_today']:
+            t = ae['first_in_today']
+            if t.tzinfo is None:
+                t = t.replace(tzinfo=timezone.utc)
+            checked_in_time = t.astimezone(_TASHKENT).strftime('%H:%M')
+        if ae and ae['last_active']:
+            if last_active is None or ae['last_active'] > last_active:
+                last_active = ae['last_active']
+
+        # cash_shifts
+        cs = cs_by_id.get(sid)
+        shift_open_today = bool(cs and (cs['shift_open_today'] or 0) > 0)
+        if cs and cs['last_active']:
+            if last_active is None or cs['last_active'] > last_active:
+                last_active = cs['last_active']
+
+        # orders in work
+        orders_in_work = oiw_by_id.get(sid, 0)
+
+        # presence_status
+        secs = _secs_ago(last_active)
+        if secs <= 300:
+            presence_status = 'online'
+        elif checked_in_today and checked_out_today:
+            presence_status = 'left'
+        elif checked_in_today:
+            presence_status = 'today'
+        else:
+            presence_status = 'offline'
+
         agents.append({
             'id': sid,
             'name': full_name,
@@ -5836,6 +5916,12 @@ async def get_agent_monitoring_stats() -> dict:
             'last_active': last_active.isoformat() if last_active else None,
             'actions_today': int(actions_today),
             'actions_yesterday': int(actions_yesterday),
+            'checked_in_today': checked_in_today,
+            'checked_in_time': checked_in_time,
+            'checked_out_today': checked_out_today,
+            'shift_open_today': shift_open_today,
+            'orders_in_work': orders_in_work,
+            'presence_status': presence_status,
         })
 
     order_status_breakdown = {
