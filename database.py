@@ -454,6 +454,16 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_attendance_events_staff ON staff_attendance_events(staff_id)",
         "CREATE INDEX IF NOT EXISTS idx_attendance_events_created ON staff_attendance_events(created_at)",
+        # Журнал отправок чека клиенту — для предупреждения о повторной отправке
+        """CREATE TABLE IF NOT EXISTS order_receipt_log (
+            id          SERIAL PRIMARY KEY,
+            order_id    INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+            staff_id    INTEGER REFERENCES staff(id) ON DELETE SET NULL,
+            staff_name  VARCHAR(100) DEFAULT '',
+            note        TEXT DEFAULT '',
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_receipt_log_order ON order_receipt_log(order_id)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1024,6 +1034,23 @@ async def get_receipt_tg_id(order: dict) -> int | None:
     if phone:
         return await get_tg_id_by_phone(phone)
     return None
+
+async def log_receipt_send(order_id: int, staff_id: int, staff_name: str, note: str = "") -> None:
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO order_receipt_log (order_id, staff_id, staff_name, note)
+            VALUES ($1, $2, $3, $4)
+        """, order_id, staff_id, staff_name, note or "")
+
+async def get_last_receipt_send(order_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT staff_name, note, created_at FROM order_receipt_log
+            WHERE order_id=$1 ORDER BY created_at DESC LIMIT 1
+        """, order_id)
+        return dict(row) if row else None
 
 
 async def update_user_name(user_id: int, first_name: str):
