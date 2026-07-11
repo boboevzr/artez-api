@@ -12,6 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 BOLD    = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+ITALIC  = os.path.join(FONT_DIR, "DejaVuSans-Oblique.ttf")
 EMOJI   = os.path.join(FONT_DIR, "OpenMoji-Black.ttf")
 
 W = 576  # 80mm thermal printer standard raster width
@@ -27,8 +28,10 @@ def _fonts():
         "item_name": ImageFont.truetype(BOLD, 19),
         "item_sub":  ImageFont.truetype(REGULAR, 19),
         "total":     ImageFont.truetype(BOLD, 28),
-        "footer":    ImageFont.truetype(REGULAR, 18),
-        "emoji":     ImageFont.truetype(EMOJI, 18),
+        "footer":       ImageFont.truetype(REGULAR, 18),
+        "footer_bold":  ImageFont.truetype(BOLD, 20),
+        "footer_italic":ImageFont.truetype(ITALIC, 18),
+        "emoji":        ImageFont.truetype(EMOJI, 18),
     }
 
 
@@ -66,6 +69,14 @@ def _center_mixed_line(draw, y, segments):
     return max_h
 
 
+def _left_right_line(draw, y, left_text, right_text, font):
+    """Draws left_text at PAD and right_text right-aligned, same row/font."""
+    draw.text((PAD, y), left_text, font=font, fill=BLACK)
+    _, h_l = _measure(draw, left_text, font)
+    h_r = _right_text(draw, y, right_text, font)
+    return max(h_l, h_r)
+
+
 def _dashed_line(draw, y):
     x = PAD
     while x < W - PAD:
@@ -77,7 +88,6 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
                            header_text: str = "ARTEZ",
                            slogan: str = "Химчистка ковров, мебели, матрасов и штор",
                            footer_note: str = "",
-                           type_label: str = "Стандарт",
                            bot_link: str = "",
                            site_link: str = "artez.uz") -> bytes:
     """
@@ -86,13 +96,13 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
     order: словарь заказа (как из db.get_order_by_id) — используются поля
            id/order_num, created_at, имя и телефон клиента.
     items: список позиций заказа (как из db.get_order_items) — service,
-           width_cm, length_cm, sqm, price_per_sqm, total_sum.
+           width_cm, length_cm, sqm, price_per_sqm, total_sum. Тип услуги
+           (Стандарт/Экспресс), если есть, уже входит в текст service.
     branch_contacts: список строк контактов компании (Основной номер + Номер 1
                       филиала) — выводятся в один ряд в подвале.
     header_text: текст шапки-логотипа чека (по умолчанию "ARTEZ").
     slogan: слоган в подвале чека.
-    footer_note: доп. строка в подвале чека (не выводится, если пустая).
-    type_label: подпись типа услуги (Стандарт/Экспресс) — одна на весь чек, в шапке.
+    footer_note: доп. строка в подвале чека (курсивом, не выводится, если пустая).
     bot_link: ссылка/юзернейм Telegram-бота заявок (не выводится, если пусто).
     site_link: ссылка на сайт.
     """
@@ -116,17 +126,9 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
 
     y = PAD
     y += _center_text(draw, y, header_text, f["logo"]) + 10
-    order_line = f"Заказ №{order_num}  ·  {order_date_str}  ·  {type_label}"
-    if _measure(draw, order_line, f["h2"])[0] > W - 2 * PAD:
-        # не помещается в одну строку — переносим тип услуги отдельно
-        y += _center_text(draw, y, f"Заказ №{order_num}  ·  {order_date_str}", f["h2"]) + 4
-        y += _center_text(draw, y, type_label, f["h2"]) + 6
-    else:
-        y += _center_text(draw, y, order_line, f["h2"]) + 6
-    if client_name:
-        y += _center_text(draw, y, client_name, f["h2"]) + 8
-    if client_phone:
-        y += _center_text(draw, y, client_phone, f["h2"]) + 12
+    y += _center_text(draw, y, f"Заказ №{order_num}  ·  {order_date_str}", f["h2"]) + 6
+    if client_name or client_phone:
+        y += _left_right_line(draw, y, client_name, client_phone, f["h2"]) + 12
     _dashed_line(draw, y); y += 18
 
     for i, it in enumerate(items, 1):
@@ -177,7 +179,7 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
 
     if branch_contacts:
         contacts_line = "   ·   ".join(c for c in branch_contacts if c)
-        y += _center_text(draw, y, contacts_line, f["footer"]) + 6
+        y += _center_text(draw, y, contacts_line, f["footer_bold"]) + 6
 
     link_segments = []
     if bot_link:
@@ -189,13 +191,13 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
             link_segments.append(("   ·   ", f["footer"]))
         link_segments += [("🌐 ", f["emoji"]), (site_link, f["footer"])]
     if link_segments:
-        y += _center_mixed_line(draw, y, link_segments) + 10
+        y += _center_mixed_line(draw, y, link_segments) + 16
     else:
         y += 4
 
     y += _center_text(draw, y, slogan, f["footer"]) + 6
     if footer_note:
-        y += _center_text(draw, y, footer_note, f["footer"]) + 6
+        y += _center_text(draw, y, footer_note, f["footer_italic"]) + 6
     y += PAD
 
     final = img.crop((0, 0, W, int(y)))

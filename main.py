@@ -3996,9 +3996,6 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
     return {"ok": True, "order": order}
 
 
-TYPE_LABELS = {"standard": "Стандарт", "express": "Экспресс"}
-
-
 def _substitute_receipt_tokens(text: str, order: dict, grand_total: float) -> str:
     if not text:
         return text
@@ -4036,12 +4033,11 @@ async def _render_order_receipt(order_id: int) -> tuple[bytes, dict]:
     slogan      = _substitute_receipt_tokens(await _get_cfg("receipt_slogan"), order, grand_total)
     footer_note = _substitute_receipt_tokens(await _get_cfg("receipt_footer_note"), order, grand_total)
 
-    type_label = TYPE_LABELS.get(order.get("service_type"), "Стандарт")
     bot_link = (await _get_cfg("social_tg_bot")).replace("https://", "").replace("http://", "")
 
     jpeg_bytes = receipt.generate_receipt_jpeg(order, items, branch_contacts,
                                                 header_text, slogan, footer_note,
-                                                type_label, bot_link)
+                                                bot_link)
     return jpeg_bytes, order
 
 
@@ -4123,7 +4119,7 @@ async def preview_receipt(body: dict, _=Depends(get_admin)):
     contacts = [c for c in (await _get_cfg("contact_main"), await _get_cfg("contact_zarafshan_1")) if c]
     bot_link = (await _get_cfg("social_tg_bot")).replace("https://", "").replace("http://", "")
     jpeg_bytes = receipt.generate_receipt_jpeg(mock_order, mock_items, contacts, header_text, slogan, footer_note,
-                                                "Стандарт", bot_link)
+                                                bot_link)
     return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 
