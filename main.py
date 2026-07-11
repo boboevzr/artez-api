@@ -2898,6 +2898,18 @@ async def me(user = Depends(get_current_user)):
     }
 
 
+@app.get("/api/promo/status")
+async def promo_status(channel: str = "site", user = Depends(get_current_user)):
+    """Статус текущей промо-акции для клиента: показывать ли модалку и с звуком ли.
+    mode: 'full' (первый показ, со звуком), 'silent' (тихое напоминание), 'none' (не показывать)."""
+    try:
+        result = await db.check_promo_eligibility(user["id"], user["phone"], channel)
+    except Exception as e:
+        logging.error(f"promo_status failed: {e}")
+        result = None
+    return result or {"mode": "none"}
+
+
 class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None
@@ -3827,6 +3839,15 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "total_price":   None,
     }, source="staff")
     await db.update_lead_status(lead_id, "converted")
+    # Промо-акция: заказ считается "использованием" одноразового окна только если
+    # лид пришёл с сайта/бота и привязан к зарегистрированному пользователю.
+    if lead.get("source") in ("site", "bot") and lead.get("client_phone"):
+        try:
+            promo_user = await db.get_user_by_phone(lead["client_phone"])
+            if promo_user:
+                await db.apply_promo_to_order(order_num, promo_user["id"])
+        except Exception as e:
+            logging.error(f"convert_lead_to_order: promo apply failed: {e}")
     return {"ok": True, "order_num": order_num}
 
 @app.get("/api/admin/staff/packers")

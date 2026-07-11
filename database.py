@@ -940,6 +940,58 @@ async def create_tables():
     async with pool.acquire() as c:
         await c.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS can_drive BOOLEAN DEFAULT FALSE;")
 
+    # ── Шаг 20: промо-акции (generic-модель, одна кампания засеяна) ──────
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS promotions (
+            id              SERIAL PRIMARY KEY,
+            code            VARCHAR(50) UNIQUE NOT NULL,
+            title_ru        VARCHAR(200) NOT NULL,
+            title_uz        VARCHAR(200) NOT NULL,
+            text_ru         TEXT DEFAULT '',
+            text_uz         TEXT DEFAULT '',
+            discount_pct    NUMERIC(5,2) NOT NULL DEFAULT 0,
+            starts_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ends_at         TIMESTAMPTZ NOT NULL,
+            window_hours    INTEGER NOT NULL DEFAULT 48,
+            sound_enabled   BOOLEAN DEFAULT TRUE,
+            target_new_only BOOLEAN DEFAULT TRUE,
+            is_active       BOOLEAN DEFAULT TRUE,
+            created_at      TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE TABLE IF NOT EXISTS promo_user_state (
+            id              SERIAL PRIMARY KEY,
+            promotion_id    INTEGER NOT NULL REFERENCES promotions(id) ON DELETE CASCADE,
+            user_id         INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            shown_at        TIMESTAMPTZ,
+            expires_at      TIMESTAMPTZ,
+            channel         VARCHAR(10),
+            used_order_id   INTEGER REFERENCES orders(id) ON DELETE SET NULL,
+            created_at      TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(promotion_id, user_id)
+        );
+        ALTER TABLE leads  ADD COLUMN IF NOT EXISTS promo_id INTEGER REFERENCES promotions(id) ON DELETE SET NULL;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS promo_id INTEGER REFERENCES promotions(id) ON DELETE SET NULL;
+        """)
+        # Единственная засеянная кампания: -20% до 31.08.2026 23:59 (Ташкент, UTC+5 → 18:59 UTC)
+        await c.execute("""
+        INSERT INTO promotions (code, title_ru, title_uz, text_ru, text_uz,
+                                 discount_pct, ends_at, window_hours,
+                                 sound_enabled, target_new_only, is_active)
+        VALUES (
+            'aug2026_20pct',
+            'Акция: скидка 20%!',
+            'Aksiya: 20% chegirma!',
+            'Успей заказать до 31 августа и получи скидку 20% на первый заказ! Действует 48 часов.',
+            '31 avgustgacha ulgurib buyurtma bering va birinchi buyurtmangizga 20% chegirma oling! 48 soat davomida amal qiladi.',
+            20,
+            '2026-08-31 18:59:00+00',
+            48,
+            TRUE, TRUE, TRUE
+        )
+        ON CONFLICT (code) DO NOTHING;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1348,6 +1400,114 @@ async def save_site_order(data: dict, source: str = "site") -> str:
             VALUES ($1, 'new', $2)
         """, data.get("order_num"), source_note)
     return data.get("order_num", "")
+
+
+# ══════════════════════════════════════
+#  ПРОМО-АКЦИИ
+# ══════════════════════════════════════
+async def _get_active_promotion(conn):
+    """Текущая активная кампания (is_active=TRUE и сейчас между starts_at и ends_at)."""
+    return await conn.fetchrow("""
+        SELECT * FROM promotions
+        WHERE is_active = TRUE AND NOW() BETWEEN starts_at AND ends_at
+        ORDER BY id DESC LIMIT 1
+    """)
+
+
+def _promo_public_fields(promo, mode: str, expires_at) -> dict:
+    return {
+        "id":            promo["id"],
+        "code":          promo["code"],
+        "title_ru":      promo["title_ru"],
+        "title_uz":      promo["title_uz"],
+        "text_ru":       promo["text_ru"],
+        "text_uz":       promo["text_uz"],
+        "discount_pct":  float(promo["discount_pct"]) if promo["discount_pct"] is not None else 0,
+        "sound_enabled": promo["sound_enabled"],
+        "mode":          mode,
+        "expires_at":    expires_at.isoformat() if expires_at else None,
+    }
+
+
+async def check_promo_eligibility(user_id: int, phone: str, channel: str) -> dict | None:
+    """Единый источник правды по эквайру акции для сайта/бота (см. GET /api/promo/status).
+    Возвращает None если акции нет/клиент не подходит, иначе dict с mode: full|silent|none."""
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        promo = await _get_active_promotion(conn)
+        if not promo:
+            return None
+
+        if promo["target_new_only"]:
+            has_order = await conn.fetchval(
+                "SELECT 1 FROM orders WHERE client_phone=$1 LIMIT 1", phone
+            )
+            if has_order:
+                return None
+
+        state = await conn.fetchrow(
+            "SELECT * FROM promo_user_state WHERE promotion_id=$1 AND user_id=$2",
+            promo["id"], user_id
+        )
+        if not state:
+            state = await conn.fetchrow("""
+                INSERT INTO promo_user_state (promotion_id, user_id, shown_at, expires_at, channel)
+                VALUES ($1, $2, NOW(), NOW() + ($3 * INTERVAL '1 hour'), $4)
+                ON CONFLICT (promotion_id, user_id) DO NOTHING
+                RETURNING *
+            """, promo["id"], user_id, promo["window_hours"], channel)
+            if state:
+                mode = "full"
+            else:
+                # Гонка: параллельный запрос уже вставил строку — перечитываем
+                state = await conn.fetchrow(
+                    "SELECT * FROM promo_user_state WHERE promotion_id=$1 AND user_id=$2",
+                    promo["id"], user_id
+                )
+                if not state:
+                    return None
+                mode = "silent" if (state["used_order_id"] is None and state["expires_at"]
+                                     and state["expires_at"] > datetime.now(timezone.utc)) else "none"
+        else:
+            if state["used_order_id"] is None and state["expires_at"] and state["expires_at"] > datetime.now(timezone.utc):
+                mode = "silent"
+            else:
+                mode = "none"
+
+        return _promo_public_fields(promo, mode, state["expires_at"])
+
+
+async def apply_promo_to_order(order_num: str, user_id: int) -> int | None:
+    """Если у пользователя есть живое (не истёкшее, не использованное) окно акции —
+    привязывает заказ к акции (orders.promo_id) и закрывает окно (used_order_id).
+    Возвращает id акции если применена, иначе None."""
+    if not pool or not user_id:
+        return None
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            state = await conn.fetchrow("""
+                SELECT pus.promotion_id
+                FROM promo_user_state pus
+                JOIN promotions p ON p.id = pus.promotion_id
+                WHERE pus.user_id = $1 AND pus.used_order_id IS NULL
+                  AND pus.expires_at > NOW() AND p.is_active = TRUE
+                ORDER BY pus.created_at DESC LIMIT 1
+            """, user_id)
+            if not state:
+                return None
+            promo_id = state["promotion_id"]
+            order_row = await conn.fetchrow(
+                "UPDATE orders SET promo_id=$1 WHERE order_num=$2 RETURNING id",
+                promo_id, order_num
+            )
+            if not order_row:
+                return None
+            await conn.execute("""
+                UPDATE promo_user_state SET used_order_id=$1
+                WHERE promotion_id=$2 AND user_id=$3 AND used_order_id IS NULL
+            """, order_row["id"], promo_id, user_id)
+            return promo_id
 
 
 # ══════════════════════════════════════
@@ -2355,21 +2515,42 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
 
 async def create_lead(data: dict) -> dict:
     if not pool: return None
+    # Тег акции (только видимость для сотрудников, не расходует окно) — только для
+    # лидов с сайта/бота, привязанных к зарегистрированному пользователю с живым окном
+    promo_id = None
+    source = data.get("source", "staff")
+    if source in ("site", "bot") and data.get("client_phone"):
+        try:
+            async with pool.acquire() as pconn:
+                user = await pconn.fetchrow("SELECT id FROM users WHERE phone=$1", data["client_phone"])
+                if user:
+                    promo_row = await pconn.fetchrow("""
+                        SELECT pus.promotion_id
+                        FROM promo_user_state pus
+                        JOIN promotions p ON p.id = pus.promotion_id
+                        WHERE pus.user_id=$1 AND pus.used_order_id IS NULL
+                          AND pus.expires_at > NOW() AND p.is_active = TRUE
+                        ORDER BY pus.created_at DESC LIMIT 1
+                    """, user["id"])
+                    if promo_row:
+                        promo_id = promo_row["promotion_id"]
+        except Exception as e:
+            logging.error(f"create_lead: promo tag failed: {e}")
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO leads (client_name, client_phone, service, branch,
                                city, address, short_address, note, status, assigned_to,
                                created_by, volunteer_id, location, location_address,
-                               source, client_tg_id, pickup_date, pickup_time)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                               source, client_tg_id, pickup_date, pickup_time, promo_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
             RETURNING *
         """, data.get("client_name"), data["client_phone"],
             data.get("service"), data.get("branch"), data.get("city"),
             data.get("address"), data.get("short_address", ""), data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
             data.get("volunteer_id"), data.get("location"), data.get("location_address"),
-            data.get("source", "staff"), data.get("client_tg_id"),
-            data.get("pickup_date", ""), data.get("pickup_time", ""))
+            source, data.get("client_tg_id"),
+            data.get("pickup_date", ""), data.get("pickup_time", ""), promo_id)
         rid      = row["id"]
         lead_num = f"LEAD-{rid:04d}"
         lead_code = f"L-{rid:04d}"
