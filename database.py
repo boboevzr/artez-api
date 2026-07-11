@@ -5750,39 +5750,48 @@ async def get_agent_monitoring_stats() -> dict:
         """, today_tk, yesterday_tk)
 
         # attendance events: приход/уход
-        ae_rows = await conn.fetch("""
-            SELECT staff_id,
-                   MAX(created_at) AS last_active,
-                   COUNT(*) FILTER (WHERE event_type = 'in'
-                       AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS in_today,
-                   MIN(created_at) FILTER (WHERE event_type = 'in'
-                       AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS first_in_today,
-                   COUNT(*) FILTER (WHERE event_type = 'out'
-                       AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS out_today
-            FROM staff_attendance_events
-            GROUP BY staff_id
-        """, today_tk)
+        try:
+            ae_rows = await conn.fetch("""
+                SELECT staff_id,
+                       MAX(created_at) AS last_active,
+                       COUNT(*) FILTER (WHERE event_type = 'in'
+                           AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS in_today,
+                       MIN(created_at) FILTER (WHERE event_type = 'in'
+                           AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS first_in_today,
+                       COUNT(*) FILTER (WHERE event_type = 'out'
+                           AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS out_today
+                FROM staff_attendance_events
+                GROUP BY staff_id
+            """, today_tk)
+        except Exception:
+            ae_rows = []
 
         # смены кассы
-        cs_rows = await conn.fetch("""
-            SELECT opened_by AS staff_id,
-                   MAX(opened_at) AS last_active,
-                   COUNT(*) FILTER (WHERE status = 'open'
-                       AND (opened_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS shift_open_today
-            FROM cash_shifts
-            WHERE opened_by IS NOT NULL
-            GROUP BY opened_by
-        """, today_tk)
+        try:
+            cs_rows = await conn.fetch("""
+                SELECT opened_by AS staff_id,
+                       MAX(opened_at) AS last_active,
+                       COUNT(*) FILTER (WHERE status = 'open'
+                           AND (opened_at AT TIME ZONE 'Asia/Tashkent')::date = $1) AS shift_open_today
+                FROM cash_shifts
+                WHERE opened_by IS NOT NULL
+                GROUP BY opened_by
+            """, today_tk)
+        except Exception:
+            cs_rows = []
 
         # заказы в работе (linked via login)
-        oiw_rows = await conn.fetch("""
-            SELECT s.id AS staff_id, COUNT(o.*) AS cnt
-            FROM orders o
-            JOIN staff s ON s.login = o.assigned_to
-            WHERE o.status NOT IN ('delivered','cancelled','new')
-              AND o.assigned_to IS NOT NULL
-            GROUP BY s.id
-        """)
+        try:
+            oiw_rows = await conn.fetch("""
+                SELECT s.id AS staff_id, COUNT(*) AS cnt
+                FROM orders o
+                JOIN staff s ON s.login = o.assigned_to
+                WHERE o.status NOT IN ('delivered','cancelled','new')
+                  AND o.assigned_to IS NOT NULL
+                GROUP BY s.id
+            """)
+        except Exception:
+            oiw_rows = []
 
         status_row = await conn.fetchrow("""
             SELECT
