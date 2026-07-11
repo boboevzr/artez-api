@@ -5994,6 +5994,11 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         raise HTTPException(status_code=400, detail="Неверное действие")
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
+    try:
+        await _chat.broadcast_staff({"type": "item_updated", "order_id": order_id, "item_id": item_id},
+                                     exclude=staff.get("id"))
+    except Exception as e:
+        logging.warning(f"item_updated broadcast error: {e}")
     return {"ok": True, "item": item}
 
 @app.post("/api/admin/orders/{order_id}/items/{item_id}/measure/claim")
@@ -6270,6 +6275,11 @@ async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_c
     item = await db.update_item_washer(item_id, washer_login or None)
     if not item:
         raise HTTPException(status_code=404, detail="Позиция не найдена")
+    try:
+        await _chat.broadcast_staff({"type": "item_updated", "order_id": order_id, "item_id": item_id},
+                                     exclude=staff.get("id"))
+    except Exception as e:
+        logging.warning(f"item_updated broadcast error: {e}")
     return {"ok": True, "item": item}
 
 @app.patch("/api/admin/staff/{staff_id}/can-edit-items")
