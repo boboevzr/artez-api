@@ -1534,6 +1534,76 @@ async def apply_promo_to_order(order_num: str, user_id: int) -> int | None:
             return promo_id
 
 
+async def list_promotions() -> list:
+    """Admin: все кампании (новые сверху) + is_currently_active и лёгкая статистика
+    (shown_count/used_count) через LEFT JOIN на promo_user_state."""
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT p.*,
+                   (p.is_active AND NOW() BETWEEN p.starts_at AND p.ends_at) AS is_currently_active,
+                   COUNT(pus.id)                AS shown_count,
+                   COUNT(pus.used_order_id)     AS used_count
+            FROM promotions p
+            LEFT JOIN promo_user_state pus ON pus.promotion_id = p.id
+            GROUP BY p.id
+            ORDER BY p.id DESC
+        """)
+        return [dict(r) for r in rows]
+
+
+async def create_promotion(code: str, title_ru: str, title_uz: str, text_ru: str, text_uz: str,
+                            discount_pct, ends_at, starts_at=None, window_hours: int = 48,
+                            sound_enabled: bool = True, target_new_only: bool = False,
+                            is_active: bool = True) -> dict:
+    """Admin: создаёт новую промо-кампанию. Если is_active=True — деактивирует остальные
+    кампании (правило "не более одной активной одновременно"), чтобы ORDER BY id DESC
+    в _get_active_promotion() никогда не разрешал неоднозначность на практике."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if is_active:
+                await conn.execute("UPDATE promotions SET is_active = FALSE WHERE is_active = TRUE")
+            row = await conn.fetchrow("""
+                INSERT INTO promotions (code, title_ru, title_uz, text_ru, text_uz, discount_pct,
+                                         starts_at, ends_at, window_hours, sound_enabled,
+                                         target_new_only, is_active)
+                VALUES ($1,$2,$3,$4,$5,$6, COALESCE($7, NOW()), $8, $9, $10, $11, $12)
+                RETURNING *
+            """, code, title_ru, title_uz, text_ru, text_uz, discount_pct,
+                 starts_at, ends_at, window_hours, sound_enabled, target_new_only, is_active)
+            return dict(row)
+
+
+async def update_promotion(promo_id: int, **kwargs) -> dict | None:
+    """Admin: частичное обновление кампании. Если is_active=True среди полей — деактивирует
+    остальные кампании перед апдейтом (та же гарантия "не более одной активной одновременно")."""
+    if not pool:
+        return None
+    allowed = {"code", "title_ru", "title_uz", "text_ru", "text_uz", "discount_pct",
+               "starts_at", "ends_at", "window_hours", "sound_enabled",
+               "target_new_only", "is_active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM promotions WHERE id=$1", promo_id)
+            return dict(row) if row else None
+    sets = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    vals = list(fields.values())
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            if fields.get("is_active") is True:
+                await conn.execute(
+                    "UPDATE promotions SET is_active = FALSE WHERE is_active = TRUE AND id != $1",
+                    promo_id
+                )
+            row = await conn.fetchrow(
+                f"UPDATE promotions SET {sets} WHERE id=$1 RETURNING *",
+                promo_id, *vals
+            )
+            return dict(row) if row else None
+
+
 # ══════════════════════════════════════
 #  ЦЕНЫ (общая таблица с ботом)
 # ══════════════════════════════════════

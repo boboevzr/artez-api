@@ -2922,6 +2922,114 @@ async def promo_public():
     return result or {"mode": "none"}
 
 
+_TASHKENT_TZ = timezone(timedelta(hours=5))
+
+def _parse_promo_dt(s: str | None):
+    """ISO-строка → datetime UTC. Без таймзоны в строке — считаем время Ташкентским (UTC+5)."""
+    if not s:
+        return None
+    s2 = str(s).strip().replace("T", " ")
+    if len(s2) == 16:
+        s2 += ":00"
+    dt = datetime.fromisoformat(s2)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_TASHKENT_TZ)
+    return dt.astimezone(timezone.utc)
+
+
+class PromotionCreateRequest(BaseModel):
+    code:            str
+    title_ru:        str
+    title_uz:        str
+    text_ru:         str
+    text_uz:         str
+    discount_pct:    float
+    starts_at:       str | None = None
+    ends_at:         str
+    window_hours:    int = 48
+    sound_enabled:   bool = True
+    target_new_only: bool = False
+    is_active:       bool = True
+
+
+class PromotionUpdateRequest(BaseModel):
+    code:            str | None = None
+    title_ru:        str | None = None
+    title_uz:        str | None = None
+    text_ru:         str | None = None
+    text_uz:         str | None = None
+    discount_pct:    float | None = None
+    starts_at:       str | None = None
+    ends_at:         str | None = None
+    window_hours:    int | None = None
+    sound_enabled:   bool | None = None
+    target_new_only: bool | None = None
+    is_active:       bool | None = None
+
+
+@app.get("/api/admin/promotions")
+async def admin_list_promotions(_=Depends(_get_admin)):
+    """Список всех промо-кампаний (конструктор акций) для админки."""
+    rows = await db.list_promotions()
+    return {"ok": True, "promotions": rows}
+
+
+@app.post("/api/admin/promotions")
+async def admin_create_promotion(body: PromotionCreateRequest, _=Depends(_get_admin)):
+    """Создаёт новую промо-кампанию. При is_active=true остальные кампании деактивируются
+    (правило "не более одной активной одновременно")."""
+    if not (0 < body.discount_pct <= 100):
+        raise HTTPException(status_code=400, detail="Скидка должна быть в диапазоне от 0 до 100%")
+    starts_at = _parse_promo_dt(body.starts_at)
+    ends_at = _parse_promo_dt(body.ends_at)
+    if starts_at and ends_at and ends_at <= starts_at:
+        raise HTTPException(status_code=400, detail="Дата окончания должна быть позже даты начала")
+    try:
+        row = await db.create_promotion(
+            code=body.code.strip(), title_ru=body.title_ru, title_uz=body.title_uz,
+            text_ru=body.text_ru, text_uz=body.text_uz, discount_pct=body.discount_pct,
+            ends_at=ends_at, starts_at=starts_at, window_hours=body.window_hours,
+            sound_enabled=body.sound_enabled, target_new_only=body.target_new_only,
+            is_active=body.is_active,
+        )
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            raise HTTPException(status_code=400, detail="Акция с таким кодом уже существует")
+        logging.error(f"create_promotion error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка БД: {e}")
+    return {"ok": True, "promotion": row}
+
+
+@app.patch("/api/admin/promotions/{promo_id}")
+async def admin_update_promotion(promo_id: int, body: PromotionUpdateRequest, _=Depends(_get_admin)):
+    """Частичное обновление промо-кампании. При is_active=true остальные кампании
+    деактивируются (правило "не более одной активной одновременно")."""
+    data = body.dict(exclude_unset=True)
+    if "discount_pct" in data and data["discount_pct"] is not None:
+        if not (0 < data["discount_pct"] <= 100):
+            raise HTTPException(status_code=400, detail="Скидка должна быть в диапазоне от 0 до 100%")
+    if "starts_at" in data:
+        data["starts_at"] = _parse_promo_dt(data["starts_at"])
+    if "ends_at" in data:
+        data["ends_at"] = _parse_promo_dt(data["ends_at"])
+    if data.get("starts_at") and data.get("ends_at") and data["ends_at"] <= data["starts_at"]:
+        raise HTTPException(status_code=400, detail="Дата окончания должна быть позже даты начала")
+    if "code" in data and data["code"] is not None:
+        data["code"] = data["code"].strip()
+    if not data:
+        raise HTTPException(status_code=400, detail="Нет данных для обновления")
+    try:
+        row = await db.update_promotion(promo_id, **data)
+    except Exception as e:
+        if "unique" in str(e).lower() or "duplicate" in str(e).lower():
+            raise HTTPException(status_code=400, detail="Акция с таким кодом уже существует")
+        logging.error(f"update_promotion error: {e}")
+        raise HTTPException(status_code=500, detail=f"Ошибка БД: {e}")
+    if not row:
+        raise HTTPException(status_code=404, detail="Акция не найдена")
+    return {"ok": True, "promotion": row}
+
+
 class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None
