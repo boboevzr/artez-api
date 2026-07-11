@@ -461,9 +461,13 @@ async def create_tables():
             staff_id    INTEGER REFERENCES staff(id) ON DELETE SET NULL,
             staff_name  VARCHAR(100) DEFAULT '',
             note        TEXT DEFAULT '',
+            tg_chat_id    BIGINT DEFAULT NULL,
+            tg_message_id BIGINT DEFAULT NULL,
             created_at  TIMESTAMPTZ DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS idx_receipt_log_order ON order_receipt_log(order_id)",
+        "ALTER TABLE order_receipt_log ADD COLUMN IF NOT EXISTS tg_chat_id    BIGINT DEFAULT NULL",
+        "ALTER TABLE order_receipt_log ADD COLUMN IF NOT EXISTS tg_message_id BIGINT DEFAULT NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1035,13 +1039,14 @@ async def get_receipt_tg_id(order: dict) -> int | None:
         return await get_tg_id_by_phone(phone)
     return None
 
-async def log_receipt_send(order_id: int, staff_id: int, staff_name: str, note: str = "") -> None:
+async def log_receipt_send(order_id: int, staff_id: int, staff_name: str, note: str = "",
+                            tg_chat_id: int | None = None, tg_message_id: int | None = None) -> None:
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO order_receipt_log (order_id, staff_id, staff_name, note)
-            VALUES ($1, $2, $3, $4)
-        """, order_id, staff_id, staff_name, note or "")
+            INSERT INTO order_receipt_log (order_id, staff_id, staff_name, note, tg_chat_id, tg_message_id)
+            VALUES ($1, $2, $3, $4, $5, $6)
+        """, order_id, staff_id, staff_name, note or "", tg_chat_id, tg_message_id)
 
 async def get_last_receipt_send(order_id: int) -> dict | None:
     if not pool: return None
@@ -1051,6 +1056,16 @@ async def get_last_receipt_send(order_id: int) -> dict | None:
             WHERE order_id=$1 ORDER BY created_at DESC LIMIT 1
         """, order_id)
         return dict(row) if row else None
+
+async def get_prior_receipt_messages(order_id: int) -> list[dict]:
+    """Ранее отправленные в Telegram чеки этого заказа (для удаления при повторной отправке)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT tg_chat_id, tg_message_id FROM order_receipt_log
+            WHERE order_id=$1 AND tg_message_id IS NOT NULL
+        """, order_id)
+        return [dict(r) for r in rows]
 
 
 async def update_user_name(user_id: int, first_name: str):

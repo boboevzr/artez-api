@@ -4125,6 +4125,7 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
         if resp.status != 200 or not resp_json.get("ok"):
             logging.error(f"send-receipt TG error order={order_id}: {resp_json}")
             raise HTTPException(status_code=502, detail=resp_json.get("description") or "Ошибка отправки в Telegram")
+        new_message_id = resp_json.get("result", {}).get("message_id")
     except HTTPException:
         raise
     except Exception as e:
@@ -4132,10 +4133,30 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
         raise HTTPException(status_code=502, detail="Ошибка отправки в Telegram")
 
     try:
+        prior_msgs = await db.get_prior_receipt_messages(order_id)
+    except Exception as e:
+        logging.warning(f"receipt prior lookup failed order={order_id}: {e}")
+        prior_msgs = []
+
+    try:
         actor_name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
-        await db.log_receipt_send(order_id, staff.get("id"), actor_name, note)
+        await db.log_receipt_send(order_id, staff.get("id"), actor_name, note, tg_id, new_message_id)
     except Exception as e:
         logging.warning(f"receipt send log failed order={order_id}: {e}")
+
+    if prior_msgs:
+        try:
+            async with aiohttp.ClientSession() as session:
+                for m in prior_msgs:
+                    try:
+                        await session.post(
+                            f"https://api.telegram.org/bot{BOT_TOKEN}/deleteMessage",
+                            json={"chat_id": m["tg_chat_id"], "message_id": m["tg_message_id"]},
+                            timeout=aiohttp.ClientTimeout(total=8))
+                    except Exception as e:
+                        logging.warning(f"receipt delete failed order={order_id} msg={m}: {e}")
+        except Exception as e:
+            logging.warning(f"receipt cleanup failed order={order_id}: {e}")
 
     return {"ok": True}
 
