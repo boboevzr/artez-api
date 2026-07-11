@@ -2910,6 +2910,18 @@ async def promo_status(channel: str = "site", user = Depends(get_current_user)):
     return result or {"mode": "none"}
 
 
+@app.get("/api/promo/public")
+async def promo_public():
+    """Общая информация об активной акции для НЕзарегистрированных посетителей
+    (реклама без персонального трекинга/окна). mode всегда 'public' или 'none'."""
+    try:
+        result = await db.get_active_promotion_public()
+    except Exception as e:
+        logging.error(f"promo_public failed: {e}")
+        result = None
+    return result or {"mode": "none"}
+
+
 class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None

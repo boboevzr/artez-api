@@ -1478,6 +1478,20 @@ async def check_promo_eligibility(user_id: int, phone: str, channel: str) -> dic
         return _promo_public_fields(promo, mode, state["expires_at"])
 
 
+async def get_active_promotion_public() -> dict | None:
+    """Для незарегистрированных посетителей сайта/бота: общая информация об активной
+    акции без персонального трекинга (нет user_id — нечего писать в promo_user_state).
+    Личное окно 48ч и mode full/silent считаются только после регистрации, см.
+    check_promo_eligibility()."""
+    if not pool:
+        return None
+    async with pool.acquire() as conn:
+        promo = await _get_active_promotion(conn)
+        if not promo:
+            return None
+        return _promo_public_fields(promo, "public", promo["ends_at"])
+
+
 async def apply_promo_to_order(order_num: str, user_id: int) -> int | None:
     """Если у пользователя есть живое (не истёкшее, не использованное) окно акции —
     привязывает заказ к акции (orders.promo_id) и закрывает окно (used_order_id).
