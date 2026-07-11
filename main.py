@@ -4079,7 +4079,8 @@ async def _render_order_receipt(order_id: int) -> tuple[bytes, dict]:
 
 @app.post("/api/admin/orders/{order_id}/send-receipt")
 async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staff),
-                                    note: str = Body("", embed=True)):
+                                    note: str = Body("", embed=True),
+                                    silent: bool = Body(False, embed=True)):
     """Отправляет клиенту JPG-чек заказа в Telegram (для статуса «Готов»)."""
     role = staff.get("role", "")
     if role not in RECEIPT_ACCESS_ROLES:
@@ -4117,6 +4118,7 @@ async def admin_send_order_receipt(order_id: int, staff=Depends(get_current_staf
         form = aiohttp.FormData()
         form.add_field("chat_id", str(tg_id))
         form.add_field("photo", jpeg_bytes, filename="receipt.jpg", content_type="image/jpeg")
+        form.add_field("disable_notification", "true" if silent else "false")
         async with aiohttp.ClientSession() as session:
             resp = await session.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto",
