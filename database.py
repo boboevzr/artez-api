@@ -1452,6 +1452,13 @@ async def get_staff_by_login(login: str):
             "SELECT * FROM staff WHERE login=$1 AND active=TRUE", login
         )
 
+async def get_staff_roles_by_logins(logins: list) -> dict:
+    """Возвращает {login: role} для списка логинов (для проверки, что позицию замерил мойщик)."""
+    if not pool or not logins: return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT login, role FROM staff WHERE login = ANY($1)", list(logins))
+        return {r["login"]: r["role"] for r in rows}
+
 async def get_staff_by_site_user(site_user_id: int):
     if not pool: return None
     async with pool.acquire() as conn:

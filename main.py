@@ -3866,12 +3866,6 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
         allowed = WASHER_STATUS_FLOW.get(order.get("status", ""))
         if status != allowed:
             raise HTTPException(status_code=403, detail=f"Мойщик может изменить статус только на: {allowed}")
-        # Перед началом мойки — все позиции должны быть замерены
-        if status == "washing":
-            items = await db.get_order_items(order_id)
-            pending = [i for i in items if i.get("measure_status", "pending") == "pending"]
-            if pending:
-                raise HTTPException(status_code=400, detail=f"Не все позиции замерены: осталось {len(pending)}")
     elif "status" not in ROLE_PERMISSIONS.get(role, []) and role != "admin":
         # Любой с orders может подтвердить заказ (new → confirmed), если есть can_confirm_order
         perms = ROLE_PERMISSIONS.get(role, [])
@@ -3885,6 +3879,25 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
     if status not in ALL_ORDER_STATUSES:
         raise HTTPException(status_code=400, detail="Неизвестный статус")
+
+    # Перед началом мойки — все позиции должны быть замерены и, если за позицией
+    # уже кто-то закреплён, это должен быть мойщик (а не менеджер/админ, снявший
+    # замер в исключительном порядке) — иначе зарплата за мойку уйдёт не тому.
+    # Незакреплённые позиции — ок, их сможет взять себе мойщик уже в статусе «Мойка».
+    if status == "washing":
+        items = await db.get_order_items(order_id)
+        pending = [i for i in items if i.get("measure_status", "pending") == "pending"]
+        if pending:
+            raise HTTPException(status_code=400, detail=f"Не все позиции замерены: осталось {len(pending)}")
+        logins = {i.get("washer_login") for i in items if i.get("washer_login")}
+        if logins:
+            roles = await db.get_staff_roles_by_logins(list(logins))
+            bad = [i for i in items if i.get("washer_login") and roles.get(i["washer_login"]) != "washer"]
+            if bad:
+                raise HTTPException(status_code=400,
+                    detail=f"У {len(bad)} позиций замер провёл не мойщик — назначьте мойщика "
+                           f"или откройте позицию, чтобы её мог взять мойщик")
+
     order = await db.update_order_status(order_id, status,
                                           note=note or f"Статус изменён сотрудником {staff.get('login','')}")
     if status == 'packing' and packer_login:
