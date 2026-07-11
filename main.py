@@ -4006,6 +4006,25 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
     except Exception as e:
         logging.warning(f"[channel_kb] failed order={order_id}: {e}", exc_info=True)
 
+    try:
+        _status_labels_bc = {
+            "new":"Новый","confirmed":"Подтверждён","pickup":"Вывоз",
+            "received":"В мастерской","washing":"Мойка","drying":"Сушка",
+            "packing":"Упаковка","ready":"Готов","delivery":"Доставка",
+            "delivered":"Доставлен","cancelled":"Отменён",
+        }
+        actor_name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
+        await _chat.broadcast_staff({
+            "type": "order_status_changed",
+            "order_id": order_id,
+            "status": status,
+            "status_label": _status_labels_bc.get(status, status),
+            "changed_by_name": actor_name,
+            "changed_by_role": staff.get("role", ""),
+        }, exclude=staff.get("id"))
+    except Exception as e:
+        logging.warning(f"order_status_changed broadcast error: {e}")
+
     return {"ok": True, "order": order}
 
 
