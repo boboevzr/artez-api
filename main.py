@@ -7559,6 +7559,40 @@ async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
     return {"ok": True}
 
 
+# ── Часовой пояс ────────────────────────────────────────────────────────
+_SUPPORTED_TIMEZONES = [
+    {"name": "Asia/Tashkent",   "label": "Ташкент / Навои / Зарафшан (UTC+5)"},
+    {"name": "Asia/Almaty",     "label": "Алматы / Нур-Султан (UTC+5)"},
+    {"name": "Asia/Bishkek",    "label": "Бишкек (UTC+6)"},
+    {"name": "Asia/Dushanbe",   "label": "Душанбе (UTC+5)"},
+    {"name": "Asia/Ashgabat",   "label": "Ашхабад (UTC+5)"},
+    {"name": "Asia/Baku",       "label": "Баку (UTC+4)"},
+    {"name": "Asia/Yerevan",    "label": "Ереван (UTC+4)"},
+    {"name": "Asia/Tbilisi",    "label": "Тбилиси (UTC+4)"},
+    {"name": "Europe/Moscow",   "label": "Москва (UTC+3)"},
+    {"name": "Europe/Istanbul", "label": "Стамбул (UTC+3)"},
+    {"name": "UTC",             "label": "UTC+0"},
+]
+
+@app.get("/api/timezones")
+async def list_timezones():
+    return {"ok": True, "timezones": _SUPPORTED_TIMEZONES}
+
+@app.get("/api/admin/settings/timezone")
+async def get_timezone_setting(_=Depends(get_admin)):
+    tz = await db.get_timezone_setting()
+    return {"ok": True, "timezone": tz}
+
+@app.put("/api/admin/settings/timezone")
+async def save_timezone_endpoint(body: dict = Body(...), _=Depends(get_admin)):
+    tz_name = body.get("timezone", "")
+    allowed = {t["name"] for t in _SUPPORTED_TIMEZONES}
+    if tz_name not in allowed:
+        raise HTTPException(status_code=400, detail=f"Неизвестный timezone: {tz_name}")
+    await db.save_timezone_setting(tz_name)
+    return {"ok": True, "timezone": tz_name}
+
+
 # ── Telegram: шаблоны уведомлений ──────────────────────────────────────
 @app.get("/api/admin/settings/tg-messages")
 async def get_tg_messages(_=Depends(get_admin)):

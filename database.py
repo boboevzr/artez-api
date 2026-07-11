@@ -2,14 +2,37 @@ import os
 import asyncpg
 import logging
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-_TASHKENT = timezone(timedelta(hours=5))
+_FALLBACK_TZ = timezone(timedelta(hours=5))  # UTC+5 резерв
+DEFAULT_TZ_NAME = "Asia/Tashkent"
 
-def _tz_range(date_from: str, date_to: str):
-    """Преобразует строки дат (Ташкент) в UTC границы для TIMESTAMPTZ-сравнения."""
-    df = datetime.fromisoformat(date_from).replace(tzinfo=_TASHKENT)
-    dt = datetime.fromisoformat(date_to).replace(tzinfo=_TASHKENT) + timedelta(days=1)
+# Кеш timezone из settings (обновляется после init_db и после изменения настроек)
+_cached_tz_name: str = DEFAULT_TZ_NAME
+
+
+def _resolve_tz(tz_name: str):
+    try:
+        return ZoneInfo(tz_name)
+    except (ZoneInfoNotFoundError, Exception):
+        return _FALLBACK_TZ
+
+
+def _tz_range(date_from: str, date_to: str, tz_name: str | None = None):
+    """Преобразует строки дат в UTC-границы для TIMESTAMPTZ-сравнения.
+
+    Если tz_name не передан — берётся из кеша настроек (settings.timezone).
+    """
+    tz = _resolve_tz(tz_name or _cached_tz_name)
+    df = datetime.fromisoformat(date_from).replace(tzinfo=tz)
+    dt = datetime.fromisoformat(date_to).replace(tzinfo=tz) + timedelta(days=1)
     return df, dt
+
+
+def set_cached_tz(tz_name: str):
+    """Обновляет кеш timezone (вызывается при старте и при сохранении настроек)."""
+    global _cached_tz_name
+    _cached_tz_name = tz_name or DEFAULT_TZ_NAME
 
 DB_URL = os.getenv("DATABASE_URL", "")
 
@@ -22,6 +45,11 @@ async def init_db():
         return
     pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=5)
     await create_tables()
+    # Загружаем timezone из settings в кеш
+    try:
+        await get_timezone_setting()
+    except Exception:
+        pass
     logging.info("✅ API: Database connected")
 
 
@@ -5853,6 +5881,8 @@ async def ensure_salary_ledger_table():
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS washed_at TIMESTAMPTZ DEFAULT NULL")
         await conn.execute(
             "ALTER TABLE orders ADD COLUMN IF NOT EXISTS packed_at TIMESTAMPTZ DEFAULT NULL")
+        await conn.execute(
+            "ALTER TABLE settings ADD COLUMN IF NOT EXISTS timezone VARCHAR(50) DEFAULT 'Asia/Tashkent'")
 
 async def get_advance_max_percent() -> float:
     if not pool: return 50.0
@@ -5864,6 +5894,21 @@ async def save_advance_max_percent(pct: float) -> None:
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("UPDATE settings SET advance_max_percent=$1", pct)
+
+async def get_timezone_setting() -> str:
+    """Читает timezone из settings, обновляет кеш и возвращает IANA-имя."""
+    if not pool: return DEFAULT_TZ_NAME
+    async with pool.acquire() as conn:
+        v = await conn.fetchval("SELECT timezone FROM settings LIMIT 1")
+    tz = v or DEFAULT_TZ_NAME
+    set_cached_tz(tz)
+    return tz
+
+async def save_timezone_setting(tz_name: str) -> None:
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE settings SET timezone=$1", tz_name)
+    set_cached_tz(tz_name)
 
 async def get_salary_balance(staff_id: int) -> dict:
     """Баланс сотрудника: общий остаток, разбивка за текущий месяц, лимит аванса."""
