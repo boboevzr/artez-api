@@ -6,8 +6,19 @@
 """
 import io
 import os
+import re
 
 from PIL import Image, ImageDraw, ImageFont
+
+_EMOJI_RE = re.compile(
+    "[⌀-➿]"           # misc technical, symbols, dingbats
+    "|[⬀-⯿]"          # misc symbols and arrows
+    "|[︀-️]"          # variation selectors
+    "|[\U0001F000-\U0001FFFF]"  # emoji, pictographs, symbols
+)
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub('', text).strip()
 
 FONT_DIR = os.path.join(os.path.dirname(__file__), "assets", "fonts")
 REGULAR = os.path.join(FONT_DIR, "DejaVuSans.ttf")
@@ -132,7 +143,7 @@ def generate_receipt_jpeg(order: dict, items: list[dict], branch_contacts: list[
     _dashed_line(draw, y); y += 18
 
     for i, it in enumerate(items, 1):
-        name = it.get("service") or "—"
+        name = _strip_emoji(it.get("service") or "—")
         line1 = f"{i}. {name}"
         draw.text((PAD, y), line1, font=f["item_name"], fill=BLACK)
         y += _measure(draw, line1, f["item_name"])[1] + 8
