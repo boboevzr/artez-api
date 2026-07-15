@@ -17,6 +17,8 @@ def _resolve_tz(tz_name: str):
     except (ZoneInfoNotFoundError, Exception):
         return _FALLBACK_TZ
 
+_TASHKENT = _resolve_tz("Asia/Tashkent")
+
 
 def _tz_range(date_from: str, date_to: str, tz_name: str | None = None):
     """Преобразует строки дат в UTC-границы для TIMESTAMPTZ-сравнения.
