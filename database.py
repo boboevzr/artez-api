@@ -6655,3 +6655,76 @@ async def get_sms_dispatches_for_export(start_date: str, end_date: str) -> list:
             ORDER BY id DESC
         """, s, e)
         return [dict(r) for r in rows]
+
+
+async def archive_old_orders(days: int = 60) -> dict:
+    """Переносит delivered/cancelled заказы старше N дней в orders_archive."""
+    import json as _j
+    if not pool:
+        return {"ok": False, "error": "DB unavailable"}
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS orders_archive (
+                id            BIGINT PRIMARY KEY,
+                order_num     TEXT,
+                status        TEXT,
+                branch        TEXT,
+                archived_at   TIMESTAMPTZ DEFAULT NOW(),
+                order_data    JSONB,
+                items_data    JSONB,
+                payments_data JSONB,
+                history_data  JSONB
+            )
+        """)
+        rows = await conn.fetch("""
+            SELECT id, order_num, status
+            FROM orders
+            WHERE status IN ('delivered', 'cancelled')
+              AND updated_at < NOW() - ($1 || ' days')::INTERVAL
+              AND id NOT IN (SELECT id FROM orders_archive)
+            ORDER BY updated_at
+            LIMIT 200
+        """, str(days))
+
+        if not rows:
+            return {"ok": True, "archived": 0}
+
+        archived = 0
+        for r in rows:
+            oid = r['id']
+            onum = r['order_num'] or ''
+            try:
+                async with conn.transaction():
+                    order_row = await conn.fetchrow(
+                        "SELECT row_to_json(o)::jsonb FROM orders o WHERE id=$1", oid)
+                    if not order_row:
+                        continue
+                    order_data = order_row[0]
+
+                    items  = await conn.fetch("SELECT row_to_json(i)::jsonb FROM order_items i WHERE order_id=$1", oid)
+                    pays   = await conn.fetch("SELECT row_to_json(p)::jsonb FROM order_payments p WHERE order_id=$1", oid)
+                    hist   = await conn.fetch("SELECT row_to_json(h)::jsonb FROM order_status_history h WHERE order_num=$1", onum) if onum else []
+
+                    await conn.execute("""
+                        INSERT INTO orders_archive
+                            (id, order_num, status, branch, order_data, items_data, payments_data, history_data)
+                        VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb)
+                        ON CONFLICT (id) DO NOTHING
+                    """, oid, onum, r['status'], dict(order_data).get('branch',''),
+                        order_data,
+                        _j.dumps([dict(x[0]) for x in items]),
+                        _j.dumps([dict(x[0]) for x in pays]),
+                        _j.dumps([dict(x[0]) for x in hist]))
+
+                    await conn.execute("DELETE FROM order_items          WHERE order_id=$1", oid)
+                    await conn.execute("DELETE FROM order_photos         WHERE order_id=$1", oid)
+                    await conn.execute("DELETE FROM order_payments       WHERE order_id=$1", oid)
+                    await conn.execute("DELETE FROM washer_notifications WHERE order_id=$1", oid)
+                    if onum:
+                        await conn.execute("DELETE FROM order_status_history WHERE order_num=$1", onum)
+                    await conn.execute("DELETE FROM orders WHERE id=$1", oid)
+                    archived += 1
+            except Exception:
+                pass
+
+        return {"ok": True, "archived": archived, "total_checked": len(rows)}

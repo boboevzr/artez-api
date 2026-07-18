@@ -7970,6 +7970,14 @@ async def db_maintenance(op: str = Body(..., embed=True), _=Depends(_get_admin))
             count = result.split()[-1] if result else "0"
             return {"ok": True, "message": f"Удалено {count} старых лидов"}
 
+        elif op == "archive_orders":
+            res = await db.archive_old_orders(days=60)
+            if not res.get("ok"):
+                raise HTTPException(status_code=500, detail=res.get("error","Ошибка"))
+            checked = res.get("total_checked", 0)
+            archived = res.get("archived", 0)
+            return {"ok": True, "message": f"Архивировано {archived} из {checked} заказов (старше 60 дней, статус delivered/cancelled)"}
+
         else:
             raise HTTPException(status_code=400, detail=f"Неизвестная операция: {op}")
 
