@@ -1756,6 +1756,7 @@ async def get_admin_orders(status: str = None, limit: int = 50):
             SELECT o.*,
                    COALESCE(i.cnt, 0)::int AS item_count,
                    COALESCE(i.corr, 0)::int AS corrected_count,
+                   COALESCE(i.pend, 0)::int AS measure_pending_count,
                    COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                               FROM order_items WHERE order_id=o.id), 0) AS items_total,
                    COALESCE((SELECT SUM(amount) FROM order_payments
@@ -1764,7 +1765,8 @@ async def get_admin_orders(status: str = None, limit: int = 50):
             FROM orders o
             LEFT JOIN (
                 SELECT order_id, COUNT(*) AS cnt,
-                       COUNT(*) FILTER (WHERE measure_status='corrected') AS corr
+                       COUNT(*) FILTER (WHERE measure_status='corrected') AS corr,
+                       COUNT(*) FILTER (WHERE measure_status IN ('pending','rejected')) AS pend
                 FROM order_items GROUP BY order_id
             ) i ON i.order_id = o.id
             {where}
