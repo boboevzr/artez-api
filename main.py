@@ -6213,6 +6213,13 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                               actual_width_cm: float = Body(None, embed=True),
                               actual_length_cm: float = Body(None, embed=True),
                               note: str = Body("", embed=True)):
+    is_admin = staff.get("role") == "admin"
+    if action == "submit" and not (staff.get("can_measure") or is_admin):
+        raise HTTPException(status_code=403, detail="Нет прав для проведения замера")
+    if action in ("approve", "reject") and not (staff.get("can_approve_measure") or is_admin):
+        raise HTTPException(status_code=403, detail="Нет прав для проверки замеров")
+    if action == "direct_approve" and not (staff.get("can_override_measure") or is_admin):
+        raise HTTPException(status_code=403, detail="Нет прав для переопределения замера")
     if action == "submit":
         if not actual_width_cm or not actual_length_cm:
             raise HTTPException(status_code=400, detail="Укажите ширину и длину")
