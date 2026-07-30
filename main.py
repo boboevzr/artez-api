@@ -780,6 +780,7 @@ class StaffOrderRequest(BaseModel):
     pickup_time: str = ""
     item_count: int = 0          # водитель на месте — быстрое общее кол-во позиций
     items: dict[str, int] = {}   # или по услугам {service: qty} — если задано, приоритетнее item_count
+    sms_lang: str = "ru"         # "ru" | "uz" — выбирает тот, кто общается с клиентом
 
 
 # ══════════════════════════════════════
@@ -827,20 +828,22 @@ async def _eskiz_get_token() -> str:
     return _eskiz_token
 
 
-async def send_sms(phone: str, message: str):
-    """Отправляет SMS через Eskiz.uz. Если ключи не заданы — пишет в лог."""
+async def send_sms(phone: str, message: str) -> bool:
+    """Отправляет SMS через Eskiz.uz. Если ключи не заданы — пишет в лог.
+    Возвращает True/False — реально ли ушло (используется для истории SMS,
+    см. _send_pickup_sms/manual_send_sms)."""
     logging.info(f"📲 [SMS->{phone}] {message}")
 
     email    = await _get_cfg("eskiz_email")
     password = await _get_cfg("eskiz_password")
     if not email or not password:
         logging.warning("⚠️ eskiz_email/eskiz_password не заданы — SMS не отправлен")
-        return
+        return False
 
     token = await _eskiz_get_token()
     if not token:
         logging.error("❌ Eskiz: не удалось получить токен")
-        return
+        return False
 
     mobile = phone.lstrip("+")  # Eskiz принимает без «+»
 
@@ -853,9 +856,11 @@ async def send_sms(phone: str, message: str):
         if resp.status == 200:
             data = await resp.json()
             logging.info(f"✅ Eskiz SMS отправлен: {data}")
+            return True
         else:
             body = await resp.text()
             logging.error(f"❌ Eskiz SMS error: {resp.status} {body}")
+            return False
 
 
 def generate_code() -> str:
@@ -2417,7 +2422,8 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             if _row:
                 created_items = (await db.create_empty_items_by_service(_row["id"], req.items) if req.items
                                   else await db.create_empty_items(_row["id"], req.item_count))
-                asyncio.create_task(_send_pickup_sms(req.phone, order_num, len(created_items)))
+                asyncio.create_task(_send_pickup_sms(_row["id"], req.phone, order_num, len(created_items),
+                                                      req.sms_lang, staff.get("id"), staff_label))
         return {"ok": True, "order_num": order_num}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
@@ -6863,15 +6869,34 @@ async def _render_pickup_sms(lang: str, order_num: str, count: int) -> str:
     except (KeyError, IndexError):
         return tmpl
 
-async def _send_pickup_sms(phone: str, order_num: str, count: int, lang: str = "ru"):
+async def _send_pickup_sms(order_id: int, phone: str, order_num: str, count: int, lang: str,
+                            staff_id: int | None, staff_name: str):
+    """lang выбирается ЯВНО тем, кто забирает заказ (водитель/менеджер/оператор) —
+    он общается с клиентом и знает, на каком языке тот пишет/говорит, поэтому
+    автоматического определения языка здесь нет. Каждая попытка (успех/провал)
+    пишется в order_activity — это и есть «история SMS» в карточке заказа
+    (уже показывается в существующей вкладке «История», ничего нового строить
+    не пришлось — см. запрос пользователя 2026-07-30)."""
+    lang = lang if lang in ("ru", "uz") else "ru"
     if (await db.get_config("sms_pickup_enabled") or "") != "true":
         return
+    if not phone:
+        return
+    text = await _render_pickup_sms(lang, order_num, count)
+    if not text:
+        return
     try:
-        text = await _render_pickup_sms(lang, order_num, count)
-        if text and phone:
-            await send_sms(phone, text)
+        ok = await send_sms(phone, text)
     except Exception as e:
         logging.warning(f"pickup SMS failed for {phone}: {e}")
+        ok = False
+    action  = "sms_sent" if ok else "sms_failed"
+    prefix  = "📲 SMS" if ok else "❌ SMS не отправлен"
+    details = f"{prefix} ({lang.upper()}) на {phone}: {text[:150]}"
+    try:
+        await db.add_order_activity(order_id, staff_id, staff_name, action, details)
+    except Exception as e:
+        logging.warning(f"add_order_activity (sms) failed: {e}")
 
 
 @app.get("/api/staff/pickup/lookup")
@@ -6888,6 +6913,7 @@ class PickupTakeRequest(BaseModel):
     mode: str = "count"          # "count" | "by_service"
     count: int = 0
     items: dict[str, int] = {}   # {service_name: qty} — режим by_service
+    sms_lang: str = "ru"         # "ru" | "uz" — водитель выбирает по факту общения с клиентом
 
 
 @app.post("/api/staff/pickup/{order_id}/take")
@@ -6909,7 +6935,8 @@ async def driver_pickup_take(order_id: int, req: PickupTakeRequest, staff=Depend
 
     await db.update_order_status(order_id, "pickup",
         note=f"Забрал у клиента: {name} ({len(items)} поз.)")
-    asyncio.create_task(_send_pickup_sms(order.get("client_phone", ""), order.get("order_num", ""), len(items)))
+    asyncio.create_task(_send_pickup_sms(order_id, order.get("client_phone", ""), order.get("order_num", ""),
+                                          len(items), req.sms_lang, staff.get("id"), name))
     return {"ok": True, "items": items, "count": len(items)}
 
 
@@ -6935,6 +6962,26 @@ async def driver_pickup_not_taken(order_id: int, reason: str = Body("", embed=Tr
     name = _driver_name(staff)
     await db.add_order_activity(order_id, staff.get("id"), name, "pickup_not_taken",
                                  f"❌ Не забрал: {reason or 'без причины'}")
+    return {"ok": True}
+
+
+class ManualSmsRequest(BaseModel):
+    lang: str = "ru"   # "ru" | "uz" — выбирает отправитель, зная на каком языке говорит клиент
+
+
+@app.post("/api/admin/orders/{order_id}/send-sms")
+async def manual_send_sms(order_id: int, req: ManualSmsRequest, staff=Depends(require_perm("orders"))):
+    """Кнопка «📲 Отправить SMS» в карточке заказа — тот же шаблон и та же логика,
+    что при автоматической отправке на заборе (_send_pickup_sms), но вручную и с
+    явным выбором языка (для случаев: не отправилось само, нужно повторить,
+    или заказ не через «Забор»). История — во вкладке «История» карточки заказа
+    (order_activity, см. _send_pickup_sms), отдельной таблицы не понадобилось."""
+    order = await db.get_order_by_id(order_id)
+    if not order: raise HTTPException(404, "Заказ не найден")
+    count = len(await db.get_order_items(order_id))
+    name = _driver_name(staff)
+    await _send_pickup_sms(order_id, order.get("client_phone", ""), order.get("order_num", ""),
+                            count, req.lang, staff.get("id"), name)
     return {"ok": True}
 
 
