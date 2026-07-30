@@ -1506,11 +1506,29 @@ _ORDER_STATUS_RU = {
     "delivered": "Доставлен", "cancelled": "Отменён",
 }
 
-def _route_pickup_kb(order_id: int, status: str) -> dict:
+async def _is_route_closed_for_order(order_id: int) -> bool:
+    """Маршрут (целиком), к которому привязан заказ, закрыт (status='done')?
+    Если закрыт — прячем кнопки действий в канале водителей, показываем только
+    статус (запрос пользователя 2026-07-30 — то же самое в staff.html/«Доставка»)."""
+    if not db.pool: return False
+    try:
+        async with db.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT r.status FROM route_orders ro JOIN routes r ON r.id = ro.route_id
+                WHERE ro.order_id = $1 ORDER BY r.id DESC LIMIT 1
+            """, order_id)
+            return bool(row and row["status"] == "done")
+    except Exception:
+        return False
+
+
+def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
     """Inline-клавиатура для сообщения в канале водителей."""
     h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
     r = {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}
     p = {"text": "📦 Позиции", "callback_data": f"rp:{order_id}:items"}
+    if closed:
+        return {"inline_keyboard": [[p, h, r]]}
     if status == "confirmed":
         return {"inline_keyboard": [
             [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
@@ -1702,7 +1720,8 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
             kb_status = "ready"  # ещё не подтвердил «Везу клиенту»
         else:
             kb_status = status
-        kb       = _route_pickup_kb(order_id, kb_status)
+        route_closed = route.get("status") == "done"
+        kb       = _route_pickup_kb(order_id, kb_status, closed=route_closed)
         msg_id   = await _send_tg_with_kb(dest, text, kb, silent=True, protect=True)
         if msg_id:
             sent += 1
@@ -4247,7 +4266,7 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             ch_id_str = await _get_cfg(ch_key)
             logging.info(f"[channel_kb] ch_key={ch_key} ch_id={ch_id_str!r}")
             if ch_id_str:
-                new_kb = _route_pickup_kb(order_id, status)
+                new_kb = _route_pickup_kb(order_id, status, closed=await _is_route_closed_for_order(order_id))
                 async with aiohttp.ClientSession() as _sess:
                     resp = await _sess.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageReplyMarkup",
@@ -4962,7 +4981,7 @@ async def tg_webhook(request: Request):
             await db.update_order_status(order_id, new_status)
 
             # Обновить клавиатуру сообщения
-            new_kb = _route_pickup_kb(order_id, new_status)
+            new_kb = _route_pickup_kb(order_id, new_status, closed=await _is_route_closed_for_order(order_id))
             # Обновить текст: поменять строку статуса
             new_text = orig_text
             for old_s, new_s in _ORDER_STATUS_RU.items():
@@ -5482,7 +5501,7 @@ async def _update_api_channel_stop(order_id: int):
         num = (info.get("sort_order") or 1)
         new_text = _build_stop_text_short(info, num)
         status = info.get("status", "delivery")
-        new_kb = _route_pickup_kb(order_id, status)
+        new_kb = _route_pickup_kb(order_id, status, closed=await _is_route_closed_for_order(order_id))
         async with aiohttp.ClientSession() as _sess:
             resp = await _sess.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
@@ -7415,7 +7434,7 @@ async def reject_debt_approval_ep(
                     ch_info = await db.get_order_channel_info(order_id)
                     if ch_info and ch_info.get("channel_id") and ch_info.get("msg_id"):
                         new_text = _fmt_stop_text_api(ch_info, ch_info["stop_num"])
-                        kb = _route_pickup_kb(order_id, "delivery")
+                        kb = _route_pickup_kb(order_id, "delivery", closed=await _is_route_closed_for_order(order_id))
                         await s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
                                      json={"chat_id": ch_info["channel_id"], "message_id": ch_info["msg_id"],
                                            "text": new_text, "parse_mode": "HTML",
