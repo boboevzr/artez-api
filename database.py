@@ -3954,6 +3954,20 @@ async def get_order_payments(order_id: int) -> list:
 async def add_order_payment(order_id: int, amount: float, method: str, purpose: str, note: str, created_by: str, handed_to_staff_id: int = None, created_by_staff_id: int = None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
+        # Долг ДО этого платежа — та же формула, что в get_orders_with_debt (items_total
+        # минус все скидки минус уже подтверждённые платежи). Нужно ДО INSERT, чтобы
+        # понять, именно ЭТОТ платёж закрыл долг (для записи в историю ниже).
+        debt_before_row = await conn.fetchrow("""
+            SELECT o.debt_responsible_id, GREATEST(0,
+                COALESCE(NULLIF((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
+                                  FROM order_items WHERE order_id=o.id), 0),
+                         COALESCE(o.total_price,0), 0)
+                - COALESCE(o.discount_sum,0) - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                - COALESCE((SELECT SUM(amount) FROM order_payments
+                             WHERE order_id=o.id AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)),0)
+            ) AS debt_before
+            FROM orders o WHERE o.id=$1
+        """, order_id)
         row = await conn.fetchrow("""
             INSERT INTO order_payments (order_id, amount, method, purpose, note, created_by, handed_to_staff_id, created_by_staff_id)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
@@ -3968,6 +3982,16 @@ async def add_order_payment(order_id: int, amount: float, method: str, purpose: 
             status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
             await conn.execute(
                 "UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
+        # Долг закрыт ИМЕННО этим платежом — фиксируем в истории, иначе «Долг погашен»
+        # в карточке долга никогда не появлялся (см. фикс 2026-07-30). Новый платёж
+        # сразу считается в сумме (та же логика, что в get_orders_with_debt — карта/
+        # перевод исключаются из суммы только когда явно ОТКЛОНЕНЫ, не по умолчанию).
+        if debt_before_row and debt_before_row["debt_responsible_id"] and float(debt_before_row["debt_before"]) > 0:
+            if float(debt_before_row["debt_before"]) - amount <= 0:
+                await conn.execute(
+                    "INSERT INTO order_status_history(order_num, new_status, note) "
+                    "SELECT order_num, 'debt_paid', $2 FROM orders WHERE id=$1",
+                    order_id, f"Долг погашен: {created_by}")
         return dict(row) if row else {}
 
 async def _recalc_payment_status(conn, order_id: int):
