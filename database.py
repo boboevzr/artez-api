@@ -1452,6 +1452,18 @@ async def save_site_order(data: dict, source: str = "site") -> str:
     return data.get("order_num", "")
 
 
+async def get_order_by_phone_pending(phone: str) -> dict | None:
+    """Ищет заказ, ожидающий забора у клиента (new/confirmed), по номеру телефона —
+    для водителя на месте: менеджер/колл-центр уже мог создать заказ заранее."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT * FROM orders WHERE client_phone=$1 AND status IN ('new','confirmed')
+            ORDER BY created_at DESC LIMIT 1
+        """, phone)
+        return dict(row) if row else None
+
+
 # ══════════════════════════════════════
 #  ПРОМО-АКЦИИ
 # ══════════════════════════════════════
@@ -3422,6 +3434,23 @@ async def create_empty_items(order_id: int, count: int) -> list:
             """, order_id)
             if row:
                 result.append(dict(row))
+    return result
+
+async def create_empty_items_by_service(order_id: int, service_counts: dict[str, int]) -> list:
+    """Как create_empty_items, но с указанием названия услуги на каждую позицию —
+    для водителя, который забирает несколько РАЗНЫХ услуг у клиента и хочет
+    сразу пометить что есть что (мойщик потом доизмерит и проставит цену)."""
+    if not pool: return []
+    result = []
+    async with pool.acquire() as conn:
+        for service, qty in service_counts.items():
+            for _ in range(max(0, int(qty))):
+                row = await conn.fetchrow("""
+                    INSERT INTO order_items (order_id, service, sqm, price_per_sqm)
+                    VALUES ($1, $2, 0, 0) RETURNING *
+                """, order_id, service)
+                if row:
+                    result.append(dict(row))
     return result
 
 async def update_order_item(item_id: int, **kwargs) -> dict:

@@ -778,6 +778,8 @@ class StaffOrderRequest(BaseModel):
     note: str = ""
     pickup_date: str = ""
     pickup_time: str = ""
+    item_count: int = 0          # водитель на месте — быстрое общее кол-во позиций
+    items: dict[str, int] = {}   # или по услугам {service: qty} — если задано, приоритетнее item_count
 
 
 # ══════════════════════════════════════
@@ -2387,6 +2389,16 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             source="staff",
         )
         await db.refresh_crm_client_stats(req.phone)
+        # Позиции сразу на месте (обычно — водитель, забирающий заказ у клиента без
+        # предварительной заявки) — сигнал того же рода, что и триггер SMS ниже:
+        # обычный call-центр эти поля не передаёт, поведение для него не меняется.
+        if req.items or req.item_count:
+            async with db.pool.acquire() as _c:
+                _row = await _c.fetchrow("SELECT id FROM orders WHERE order_num=$1", order_num)
+            if _row:
+                created_items = (await db.create_empty_items_by_service(_row["id"], req.items) if req.items
+                                  else await db.create_empty_items(_row["id"], req.item_count))
+                asyncio.create_task(_send_pickup_sms(req.phone, order_num, len(created_items)))
         return {"ok": True, "order_num": order_num}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
@@ -6816,6 +6828,97 @@ def _driver_name(staff: dict) -> str:
 def _can_drive(staff: dict) -> bool:
     return bool(staff.get("can_drive")) or staff.get("role") == "driver"
 
+# ══════════════════════════════════════
+#  SMS клиенту при заборе (водитель забрал вещи — новый заказ или существующий).
+#  Шаблон — латиница RU/UZ, ≤170 символов (один SMS-сегмент по GSM-7), редактируется
+#  в админке (см. /api/admin/settings/sms-pickup-template). Пока не задан — SMS не шлём.
+# ══════════════════════════════════════
+async def _render_pickup_sms(lang: str, order_num: str, count: int) -> str:
+    tmpl = await db.get_config(f"sms_pickup_template_{lang}") or await db.get_config("sms_pickup_template_ru") or ""
+    if not tmpl:
+        return ""
+    phones   = " / ".join(c for c in (await _get_cfg("contact_short"), await _get_cfg("contact_main")) if c)
+    bot_link = (await _get_cfg("social_tg_bot") or "").replace("https://", "").replace("http://", "")
+    try:
+        return tmpl.format(order_num=order_num, count=count, phones=phones, bot_link=bot_link, site_link="artez.uz")
+    except (KeyError, IndexError):
+        return tmpl
+
+async def _send_pickup_sms(phone: str, order_num: str, count: int, lang: str = "ru"):
+    if (await db.get_config("sms_pickup_enabled") or "") != "true":
+        return
+    try:
+        text = await _render_pickup_sms(lang, order_num, count)
+        if text and phone:
+            await send_sms(phone, text)
+    except Exception as e:
+        logging.warning(f"pickup SMS failed for {phone}: {e}")
+
+
+@app.get("/api/staff/pickup/lookup")
+async def pickup_lookup_by_phone(phone: str, staff=Depends(get_current_staff)):
+    """Водитель на месте у клиента — есть ли уже заказ (создан менеджером/колл-центром),
+    ожидающий забора (new/confirmed)? Если нет — водитель создаст заказ сам."""
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    normalized = normalize_phone(phone)
+    order = await db.get_order_by_phone_pending(normalized)
+    return {"ok": True, "order": order}
+
+
+class PickupTakeRequest(BaseModel):
+    mode: str = "count"          # "count" | "by_service"
+    count: int = 0
+    items: dict[str, int] = {}   # {service_name: qty} — режим by_service
+
+
+@app.post("/api/staff/pickup/{order_id}/take")
+async def driver_pickup_take(order_id: int, req: PickupTakeRequest, staff=Depends(get_current_staff)):
+    """«Забрал» — new/confirmed → pickup, создаёт пустые позиции (доизмерит мойщик),
+    шлёт клиенту SMS. Отдельный эндпоинт (не общий /admin/orders/{id}/status) —
+    роль driver не имеет права "status" в ROLE_PERMISSIONS, как и на плече доставки."""
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order: raise HTTPException(404, "Заказ не найден")
+    if order.get("status") not in ("new", "confirmed"):
+        raise HTTPException(400, f"Статус заказа: {order.get('status')}")
+    name = _driver_name(staff)
+
+    if req.mode == "by_service" and req.items:
+        items = await db.create_empty_items_by_service(order_id, req.items)
+    else:
+        items = await db.create_empty_items(order_id, max(1, req.count or 1))
+
+    await db.update_order_status(order_id, "pickup",
+        note=f"Забрал у клиента: {name} ({len(items)} поз.)")
+    asyncio.create_task(_send_pickup_sms(order.get("client_phone", ""), order.get("order_num", ""), len(items)))
+    return {"ok": True, "items": items, "count": len(items)}
+
+
+@app.post("/api/staff/pickup/{order_id}/handoff")
+async def driver_pickup_handoff(order_id: int, staff=Depends(get_current_staff)):
+    """«Сдал в мастерскую» — pickup → received."""
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order: raise HTTPException(404, "Заказ не найден")
+    if order.get("status") != "pickup":
+        raise HTTPException(400, f"Статус заказа: {order.get('status')}")
+    name = _driver_name(staff)
+    await db.update_order_status(order_id, "received", note=f"Сдал в мастерскую: {name}")
+    return {"ok": True}
+
+
+@app.post("/api/staff/pickup/{order_id}/not-taken")
+async def driver_pickup_not_taken(order_id: int, reason: str = Body("", embed=True), staff=Depends(get_current_staff)):
+    """«Не забрал» — оставляет заказ как есть (new/confirmed), просто фиксирует причину."""
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    order = await db.get_order_by_id(order_id)
+    if not order: raise HTTPException(404, "Заказ не найден")
+    name = _driver_name(staff)
+    await db.add_order_activity(order_id, staff.get("id"), name, "pickup_not_taken",
+                                 f"❌ Не забрал: {reason or 'без причины'}")
+    return {"ok": True}
+
+
 @app.get("/api/staff/my-route")
 async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
@@ -7428,6 +7531,11 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_text_register":   "Kod podtverzhdeniya dlya registracii na sayte ARTEZ.uz: {code}",
     "sms_text_login":      "Kod podtverzhdeniya dlya vhoda na sayt ARTEZ.uz: {code}",
     "sms_text_reset":      "Kod vosstanovleniya parolya dlya vhoda na sayt ARTEZ.uz: {code}",
+    # SMS клиенту при заборе водителем — черновик, латиница, ≤170 симв. (см. плейсхолдеры
+    # {order_num}/{count}/{phones}/{bot_link}/{site_link}), редактируется в админке.
+    "sms_pickup_enabled":       "false",
+    "sms_pickup_template_ru":  "ARTEZ: zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
+    "sms_pickup_template_uz":  "ARTEZ: {order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
     # ОСАГО партнёр
     "osago_partner_phone": "+998936121300",
     "osago_partner_promo": "ARTEZ",
@@ -7537,6 +7645,9 @@ class SiteSettings(BaseModel):
     sms_text_register:   str | None = None
     sms_text_login:      str | None = None
     sms_text_reset:      str | None = None
+    sms_pickup_enabled:      str | None = None
+    sms_pickup_template_ru: str | None = None
+    sms_pickup_template_uz: str | None = None
     osago_partner_phone: str | None = None
     osago_partner_promo: str | None = None
     sheets_url:          str | None = None
