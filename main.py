@@ -7635,12 +7635,12 @@ SITE_SETTINGS_DEFAULTS = {
     # SMS клиенту при заборе водителем — черновик, латиница, ≤170 симв. (см. плейсхолдеры
     # {order_num}/{count}/{phones}/{bot_link}/{site_link}), редактируется в админке.
     "sms_pickup_enabled":       "false",
-    "sms_pickup_template_ru":  "ARTEZ: zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
-    "sms_pickup_template_uz":  "ARTEZ: {order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
+    "sms_pickup_template_ru":  "ARTEZ: zakaz {order_num} prinyat kurerom ({count} poz.). Voprosy: {phones} bot {bot_link} Status na sayte {site_link}",
+    "sms_pickup_template_uz":  "ARTEZ: {order_num} buyurtma kuryer tomonidan qabul qilindi ({count} dona). Savollar: {phones} bot {bot_link} Holat: {site_link}",
     # SMS клиенту, когда заказ готов к выдаче/доставке — тот же формат/лимит.
     "sms_ready_enabled":       "false",
-    "sms_ready_template_ru":   "ARTEZ: zakaz {order_num} gotov. Voprosy: {phones}, bot {bot_link}. Status na sayte {site_link}",
-    "sms_ready_template_uz":   "ARTEZ: {order_num} buyurtma tayyor. Savollar: {phones}, bot {bot_link}. Holat: {site_link}",
+    "sms_ready_template_ru":   "ARTEZ: zakaz {order_num} gotov. Voprosy: {phones} bot {bot_link} Status na sayte {site_link}",
+    "sms_ready_template_uz":   "ARTEZ: {order_num} buyurtma tayyor. Savollar: {phones} bot {bot_link} Holat: {site_link}",
     # ОСАГО партнёр
     "osago_partner_phone": "+998936121300",
     "osago_partner_promo": "ARTEZ",
