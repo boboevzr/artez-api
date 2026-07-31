@@ -6893,7 +6893,7 @@ async def _render_sms_notification(kind: str, lang: str, order_num: str, count: 
     bot_link = (await _get_cfg("social_tg_bot") or "").replace("https://", "").replace("http://", "")
     try:
         return tmpl.format(order_num=_order_num_short(order_num), count=count, phones=phones,
-                            bot_link=bot_link, site_link="artez.uz")
+                            bot_link=bot_link, site_link="https://artez.uz")
     except (KeyError, IndexError):
         return tmpl
 
