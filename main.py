@@ -6891,15 +6891,13 @@ async def _render_sms_notification(kind: str, lang: str, order_num: str, count: 
         return ""
     phones   = " / ".join(c for c in (await _get_cfg("contact_short"), await _get_cfg("contact_main")) if c)
     bot_link = (await _get_cfg("social_tg_bot") or "").replace("https://", "").replace("http://", "")
+    # Текст шаблона отправляется КАК ЕСТЬ (без авто-схлопывания переносов строк/пробелов) —
+    # пользователь сам контролирует форматирование под то, что одобрено в Eskiz.
     try:
-        text = tmpl.format(order_num=_order_num_short(order_num), count=count, phones=phones,
+        return tmpl.format(order_num=_order_num_short(order_num), count=count, phones=phones,
                             bot_link=bot_link, site_link="https://artez.uz")
     except (KeyError, IndexError):
-        text = tmpl
-    # Схлопываем случайные переводы строк/лишние пробелы (напр. Enter при редактировании
-    # шаблона в админке) в один пробел — многострочный текст не совпадает с одобренным
-    # у Eskiz шаблоном и отклоняется модерацией ("текст ещё не прошёл модерацию").
-    return " ".join(text.split())
+        return tmpl
 
 async def _send_sms_notification(kind: str, order_id: int, phone: str, order_num: str, count: int, lang: str,
                                   staff_id: int | None, staff_name: str) -> tuple[bool, str]:
