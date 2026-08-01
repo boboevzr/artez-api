@@ -7681,6 +7681,9 @@ SITE_SETTINGS_DEFAULTS = {
     "receipt_header_text": "ARTEZ",
     "receipt_slogan":      "Химчистка ковров, мебели, матрасов и штор",
     "receipt_footer_note": "",
+    # Видео-карточка на главной странице сайта
+    "site_video_enabled":      "false",
+    "site_video_placement":    "hero",  # hero | how_it_works | reviews | floating
 }
 
 async def _get_cfg(key: str) -> str:
@@ -7701,6 +7704,7 @@ async def get_site_settings():
         "yandex_maps_key",
         "branch_zarafshan_location", "branch_navoi_location",
         "osago_partner_phone", "osago_partner_promo",
+        "site_video_enabled", "site_video_placement",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -7769,6 +7773,8 @@ class SiteSettings(BaseModel):
     receipt_header_text: str | None = None
     receipt_slogan:      str | None = None
     receipt_footer_note: str | None = None
+    site_video_enabled:      str | None = None
+    site_video_placement:    str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
@@ -7781,6 +7787,66 @@ async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
     for key, val in data.items():
         await db.set_config(key, val)
     return {"ok": True}
+
+
+# ── Видео-карточка на главной странице сайта ─────────────────────────────
+MAX_SITE_VIDEO_BYTES = 19_000_000  # запас под лимит Telegram getFile (20 МБ)
+
+@app.post("/api/admin/site-video")
+async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_admin)):
+    if not (file.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть видео")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_SITE_VIDEO_BYTES:
+        raise HTTPException(status_code=400, detail=f"Видео слишком большое (макс. {MAX_SITE_VIDEO_BYTES//1_000_000} МБ)")
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("video", file_bytes, filename=file.filename or "site-video.mp4", content_type=file.content_type)
+    form.add_field("caption", "Site video card")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=form,
+                           timeout=aiohttp.ClientTimeout(total=60)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    file_id = result["result"]["video"]["file_id"]
+    await db.set_config("site_video_file_id", file_id)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/site-video")
+async def admin_delete_site_video(_=Depends(get_admin)):
+    await db.set_config("site_video_file_id", "")
+    return {"ok": True}
+
+
+@app.get("/api/admin/site-video-status")
+async def admin_site_video_status(_=Depends(get_admin)):
+    return {"ok": True, "has_video": bool(await db.get_config("site_video_file_id"))}
+
+
+@app.get("/api/site-video")
+async def public_site_video():
+    """Публичная раздача видео-карточки сайта — без авторизации."""
+    from fastapi.responses import StreamingResponse
+    file_id = await db.get_config("site_video_file_id")
+    if not file_id or not BOT_TOKEN:
+        raise HTTPException(status_code=404, detail="Видео не загружено")
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                          params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=502, detail="Файл не найден в Telegram")
+        file_path = data["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=60)) as fr:
+            content = await fr.read()
+    return StreamingResponse(iter([content]), media_type="video/mp4",
+                              headers={"Cache-Control": "public, max-age=3600", "Content-Disposition": "inline"})
 
 
 # ── Часовой пояс ────────────────────────────────────────────────────────
