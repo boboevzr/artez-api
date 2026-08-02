@@ -7831,10 +7831,41 @@ async def admin_site_video_status(_=Depends(get_admin)):
     return {"ok": True, "ru": bool(ru), "uz": bool(uz)}
 
 
+def _video_range_response(content: bytes, request: Request, media_type: str = "video/mp4"):
+    """Отдаёт видео с поддержкой HTTP Range. Без этого iOS Safari (и любой браузер
+    на iOS, включая Chrome/Telegram-webview — там тот же WebKit) не проигрывает
+    видео: он всегда шлёт Range-запрос в самом начале и ждёт 206, а получив 200 —
+    рвёт воспроизведение через 1-2 секунды. Desktop-браузеры Range не требуют,
+    поэтому баг был незаметен там."""
+    file_size = len(content)
+    range_header = request.headers.get("range")
+    if range_header:
+        try:
+            range_value = range_header.strip().lower().replace("bytes=", "")
+            start_str, _, end_str = range_value.partition("-")
+            start = int(start_str) if start_str else 0
+            end = int(end_str) if end_str else file_size - 1
+            end = min(end, file_size - 1)
+        except ValueError:
+            start, end = 0, file_size - 1
+        chunk = content[start:end + 1]
+        return Response(content=chunk, status_code=206, media_type=media_type, headers={
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(len(chunk)),
+            "Cache-Control": "public, max-age=3600",
+        })
+    return Response(content=content, media_type=media_type, headers={
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(file_size),
+        "Cache-Control": "public, max-age=3600",
+        "Content-Disposition": "inline",
+    })
+
+
 @app.get("/api/site-video/{lang}")
-async def public_site_video(lang: str):
+async def public_site_video(lang: str, request: Request):
     """Публичная раздача видео-карточки сайта — без авторизации."""
-    from fastapi.responses import StreamingResponse
     if lang not in ("ru", "uz"):
         raise HTTPException(status_code=404)
     file_id = await db.get_config(f"site_video_file_id_{lang}")
@@ -7850,8 +7881,7 @@ async def public_site_video(lang: str):
         file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=60)) as fr:
             content = await fr.read()
-    return StreamingResponse(iter([content]), media_type="video/mp4",
-                              headers={"Cache-Control": "public, max-age=3600", "Content-Disposition": "inline"})
+    return _video_range_response(content, request)
 
 
 # ── Часовой пояс ────────────────────────────────────────────────────────
