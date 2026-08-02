@@ -4159,15 +4159,12 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
     if status not in ALL_ORDER_STATUSES:
         raise HTTPException(status_code=400, detail="Неизвестный статус")
 
-    # Перед началом мойки — все позиции должны быть замерены и, если за позицией
-    # уже кто-то закреплён, это должен быть мойщик (а не менеджер/админ, снявший
-    # замер в исключительном порядке) — иначе зарплата за мойку уйдёт не тому.
-    # Незакреплённые позиции — ок, их сможет взять себе мойщик уже в статусе «Мойка».
+    # Замер больше НЕ блокирует переход в «Мойка» — незамеренные позиции домеряются
+    # уже мойщиком в статусе «Мойка». Но если за позицией уже кто-то закреплён, это
+    # должен быть мойщик (а не менеджер/админ, снявший замер в исключительном
+    # порядке) — иначе зарплата за мойку уйдёт не тому.
     if status == "washing":
         items = await db.get_order_items(order_id)
-        pending = [i for i in items if i.get("measure_status", "pending") == "pending"]
-        if pending:
-            raise HTTPException(status_code=400, detail=f"Не все позиции замерены: осталось {len(pending)}")
         logins = {i.get("washer_login") for i in items if i.get("washer_login")}
         if logins:
             roles = await db.get_staff_roles_by_logins(list(logins))
