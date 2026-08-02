@@ -7792,8 +7792,10 @@ async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
 # ── Видео-карточка на главной странице сайта ─────────────────────────────
 MAX_SITE_VIDEO_BYTES = 19_000_000  # запас под лимит Telegram getFile (20 МБ)
 
-@app.post("/api/admin/site-video")
-async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_admin)):
+@app.post("/api/admin/site-video/{lang}")
+async def admin_upload_site_video(lang: str, file: UploadFile = File(...), _=Depends(get_admin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
     if not (file.content_type or "").startswith("video/"):
         raise HTTPException(status_code=400, detail="Файл должен быть видео")
     media_ch = await _get_media_channel()
@@ -7804,8 +7806,8 @@ async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_ad
         raise HTTPException(status_code=400, detail=f"Видео слишком большое (макс. {MAX_SITE_VIDEO_BYTES//1_000_000} МБ)")
     form = aiohttp.FormData()
     form.add_field("chat_id", str(media_ch))
-    form.add_field("video", file_bytes, filename=file.filename or "site-video.mp4", content_type=file.content_type)
-    form.add_field("caption", "Site video card")
+    form.add_field("video", file_bytes, filename=file.filename or f"site-video-{lang}.mp4", content_type=file.content_type)
+    form.add_field("caption", f"Site video card ({lang})")
     async with aiohttp.ClientSession() as s:
         async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=form,
                            timeout=aiohttp.ClientTimeout(total=60)) as r:
@@ -7813,26 +7815,32 @@ async def admin_upload_site_video(file: UploadFile = File(...), _=Depends(get_ad
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
     file_id = result["result"]["video"]["file_id"]
-    await db.set_config("site_video_file_id", file_id)
+    await db.set_config(f"site_video_file_id_{lang}", file_id)
     return {"ok": True}
 
 
-@app.delete("/api/admin/site-video")
-async def admin_delete_site_video(_=Depends(get_admin)):
-    await db.set_config("site_video_file_id", "")
+@app.delete("/api/admin/site-video/{lang}")
+async def admin_delete_site_video(lang: str, _=Depends(get_admin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
+    await db.set_config(f"site_video_file_id_{lang}", "")
     return {"ok": True}
 
 
 @app.get("/api/admin/site-video-status")
 async def admin_site_video_status(_=Depends(get_admin)):
-    return {"ok": True, "has_video": bool(await db.get_config("site_video_file_id"))}
+    ru = await db.get_config("site_video_file_id_ru")
+    uz = await db.get_config("site_video_file_id_uz")
+    return {"ok": True, "ru": bool(ru), "uz": bool(uz)}
 
 
-@app.get("/api/site-video")
-async def public_site_video():
+@app.get("/api/site-video/{lang}")
+async def public_site_video(lang: str):
     """Публичная раздача видео-карточки сайта — без авторизации."""
     from fastapi.responses import StreamingResponse
-    file_id = await db.get_config("site_video_file_id")
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=404)
+    file_id = await db.get_config(f"site_video_file_id_{lang}")
     if not file_id or not BOT_TOKEN:
         raise HTTPException(status_code=404, detail="Видео не загружено")
     async with aiohttp.ClientSession() as s:
