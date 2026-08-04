@@ -3276,14 +3276,17 @@ async def upsert_active_contact(phone: str, first_name: str = "", last_name: str
 
 
 async def import_answered_autodial_calls(campaign_id: int) -> int:
-    """Импортирует дозвонившихся (answered_at IS NOT NULL) из кампании автодозвона
-    в active_contacts. Возвращает кол-во импортированных (новых+обновлённых) номеров."""
+    """Импортирует дозвонившихся из кампании автодозвона в active_contacts.
+    ВАЖНО: agent (autodial_agent.py) пишет результат звонка в status='answered',
+    поле answered_at в autodial_calls никогда не заполняется — фильтровать надо
+    по status, не по answered_at (это была реальная причина "кнопка не находит
+    номеров" — нашли по логам 04.08). Возвращает кол-во импортированных номеров."""
     if not pool:
         return 0
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT DISTINCT ON (phone) phone, name FROM autodial_calls "
-            "WHERE campaign_id=$1 AND answered_at IS NOT NULL",
+            "WHERE campaign_id=$1 AND status='answered'",
             campaign_id
         )
         count = 0
