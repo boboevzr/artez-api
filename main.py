@@ -2321,6 +2321,9 @@ async def staff_orders(status: str = None, branch: str = None,
         result = [o for o in result if o.get("status") in visible]
     if branch:
         result = [o for o in result if o.get("branch") == branch]
+    if staff.get("hide_client_phone"):
+        for o in result:
+            o["client_phone"] = ""
     return {"ok": True, "orders": result}
 
 @app.get("/api/staff/orders/own")
@@ -2328,6 +2331,9 @@ async def staff_own_orders(staff=Depends(get_current_staff)):
     rows = await db.get_admin_orders(limit=200)
     result = [dict(r) for r in rows
               if dict(r).get("branch") == staff.get("branch")]
+    if staff.get("hide_client_phone"):
+        for o in result:
+            o["client_phone"] = ""
     return {"ok": True, "orders": result}
 
 @app.post("/api/staff/orders/create")
@@ -4029,10 +4035,13 @@ async def get_debt_orders(_=Depends(_get_admin)):
     return {"ok": True, "debts": rows}
 
 @app.get("/api/admin/orders/{order_id}")
-async def admin_get_order(order_id: int, _=Depends(get_current_staff)):
+async def admin_get_order(order_id: int, staff=Depends(get_current_staff)):
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
+    if staff.get("hide_client_phone"):
+        order = dict(order)
+        order["client_phone"] = ""
     return {"ok": True, "order": order}
 
 _ORDER_EDITABLE_STATUSES = {"new","confirmed","pickup","received","washing","drying","packing","ready"}
@@ -6700,6 +6709,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_approve_debt:     bool = Body(False, embed=True),
     can_drive:            bool = Body(False, embed=True),
     can_view_timesheet:   bool = Body(False, embed=True),
+    hide_client_phone:    bool = Body(False, embed=True),
     order_stages:         str  = Body(None,  embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -6710,20 +6720,21 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_create_order=$6, can_confirm_order=$7, order_stages=$8,
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
-                   can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17
+                   can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17,
+                   hide_client_phone=$18
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users,
-                         can_approve_debt, can_drive, can_view_timesheet""",
+                         can_approve_debt, can_drive, can_view_timesheet, hide_client_phone""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
             can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt,
-            can_drive, can_view_timesheet)
+            can_drive, can_view_timesheet, hide_client_phone)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
