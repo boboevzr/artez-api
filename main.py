@@ -1067,6 +1067,7 @@ def _staff_public(s: dict) -> dict:
         "plain_password":       s.get("plain_password"),
         "fired":                bool(s.get("fired", False)),
         "can_view_timesheet":   bool(s.get("can_view_timesheet", False)),
+        "hide_client_phone":    bool(s.get("hide_client_phone", False)),
         "salary_type":          s.get("salary_type"),
     }
 
