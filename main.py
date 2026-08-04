@@ -1888,6 +1888,11 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
                     "UPDATE leads SET assigned_to=$1 WHERE id=$2", creator_id, lead["id"])
             await db.add_lead_call(lead["id"], creator_id, action="note",
                                    note="Лид взят создателем")
+        # Самый частый способ создания лида (страница «Лиды») раньше не попадал
+        # в единую базу контактов вообще — закрываем дыру.
+        await db.upsert_crm_client(phone=normalize_phone(req.client_phone),
+                                    first_name=req.client_name or "", source=lead_source)
+        await db.refresh_crm_client_stats(normalize_phone(req.client_phone))
     return {"ok": True, "lead": lead}
 
 @app.get("/api/staff/leads")
@@ -2544,6 +2549,24 @@ async def client_create(req: ClientCreateRequest, _=Depends(_get_admin_or_staff_
     return {"ok": True, "client": row}
 
 
+# ── Единая база "актуальных" контактов (реальные клиенты + дозвонившиеся из
+# автодозвона) — источник для будущей массовой SMS-рассылки/автодозвона ──────
+@app.get("/api/admin/active-contacts")
+async def active_contacts_list(search: str = "", limit: int = 50, offset: int = 0,
+                                _=Depends(_get_admin_or_staff_clients)):
+    rows = await db.get_active_contacts_list(search=search, limit=limit, offset=offset)
+    count = await db.get_active_contacts_count()
+    return {"ok": True, "contacts": rows, "count": count}
+
+
+@app.post("/api/admin/active-contacts/backfill")
+async def active_contacts_backfill(_=Depends(_get_admin)):
+    """Разовый импорт исторических контактов (crm_clients + лиды + подтверждённые
+    пользователи сайта) в единую базу актуальных контактов."""
+    stats = await db.backfill_active_contacts()
+    return {"ok": True, "stats": stats}
+
+
 @app.put("/api/clients/{client_id}")
 async def client_update(client_id: int, req: ClientUpdateRequest,
                         _=Depends(_get_admin_or_staff_clients)):
@@ -2952,6 +2975,9 @@ async def verify(req: VerifyRequest):
     user = await db.get_user_by_phone(req.phone)
     asyncio.create_task(db.update_user_last_login(user["id"]))
     asyncio.create_task(_notify_new_site_user(user.get("first_name") or "", user["phone"], "sms"))
+    # Регистрация на сайте раньше не попадала в единую базу контактов — закрываем дыру.
+    asyncio.create_task(db.upsert_crm_client(phone=user["phone"], first_name=user.get("first_name") or "",
+                                              source="site_register"))
     token = create_token(user["id"], user["phone"])
 
     return {
@@ -9158,6 +9184,13 @@ async def autodial_delete(cid: int, _=Depends(_get_admin)):
     async with db.pool.acquire() as conn:
         await conn.execute("DELETE FROM autodial_campaigns WHERE id=$1", cid)
     return {"ok": True}
+
+@app.post("/api/admin/autodial/campaigns/{cid}/import-active")
+async def autodial_import_active(cid: int, _=Depends(_get_admin)):
+    """Импортирует дозвонившихся (answered_at не пусто) из кампании в единую базу
+    актуальных контактов (active_contacts)."""
+    imported = await db.import_answered_autodial_calls(cid)
+    return {"ok": True, "imported": imported}
 
 @app.post("/api/admin/autodial/test")
 async def autodial_test(body: dict = Body(...), _=Depends(_get_admin)):

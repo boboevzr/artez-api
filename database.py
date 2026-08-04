@@ -1041,6 +1041,26 @@ async def create_tables():
         ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS discount_category_verified_at   TIMESTAMPTZ;
         """)
 
+    # ── Шаг 22: единая база "актуальных" контактов (реальные клиенты crm_clients +
+    # дозвонившиеся из автодозвона) — источник для будущей массовой SMS-рассылки
+    # и автодозвона. НЕ путать с crm_clients (карточка клиента) или contacts
+    # (справочник для ручного импорта Excel-списков под автодозвон).
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS active_contacts (
+            id            SERIAL PRIMARY KEY,
+            phone         VARCHAR(20) UNIQUE NOT NULL,
+            first_name    VARCHAR(100) DEFAULT '',
+            last_name     VARCHAR(100) DEFAULT '',
+            source        VARCHAR(20) DEFAULT 'crm' CHECK (source IN ('crm','autodial','both')),
+            crm_client_id INTEGER REFERENCES crm_clients(id) ON DELETE SET NULL,
+            note          TEXT DEFAULT '',
+            created_at    TIMESTAMPTZ DEFAULT NOW(),
+            updated_at    TIMESTAMPTZ DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_active_contacts_phone ON active_contacts(phone);
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -3061,7 +3081,16 @@ async def upsert_crm_client(phone: str, first_name: str = "", last_name: str = "
             RETURNING *
         """, phone, first_name or "", last_name or "", tg_id, tg_username, source,
              address or "", short_address or "")
-        return dict(row) if row else {}
+        result = dict(row) if row else {}
+    if result:
+        # Реальный клиент — автоматически зеркалим в active_contacts (см. Шаг 22).
+        try:
+            await upsert_active_contact(phone, first_name=result.get("first_name") or "",
+                                         last_name=result.get("last_name") or "",
+                                         source="crm", crm_client_id=result.get("id"))
+        except Exception:
+            logging.warning("upsert_active_contact failed for %s", phone, exc_info=True)
+    return result
 
 
 async def refresh_crm_client_stats(phone: str):
@@ -3203,6 +3232,146 @@ async def get_crm_clients_count() -> dict:
             "SELECT status, COUNT(*) as cnt FROM crm_clients GROUP BY status"
         )
         return {r["status"]: r["cnt"] for r in rows}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ACTIVE CONTACTS ("актуальные" — реальные клиенты + дозвонившиеся из автодозвона).
+# Единственный источник для будущей массовой SMS-рассылки/автодозвона. Дедуп по
+# телефону в формате +998XXXXXXXXX (тот же, что crm_clients/leads/users) — НЕ
+# путать с 9-значным AMI-форматом без 998 в autodial_calls.phone.
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _autodial_phone_to_e164(phone: str) -> str:
+    """9-значный AMI-номер (без 998) → +998XXXXXXXXX. Устойчиво и к уже нормальным номерам."""
+    import re as _re
+    digits = _re.sub(r"\D", "", phone or "")
+    if len(digits) == 9:
+        return f"+998{digits}"
+    if digits.startswith("998"):
+        return f"+{digits}"
+    return f"+{digits}" if digits else ""
+
+
+async def upsert_active_contact(phone: str, first_name: str = "", last_name: str = "",
+                                 source: str = "crm", crm_client_id: int = None,
+                                 note: str = "") -> dict:
+    """Добавляет/обновляет номер в базе актуальных контактов. Источник накапливается
+    (crm+autodial → 'both'), не понижается."""
+    if not pool or not phone:
+        return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO active_contacts (phone, first_name, last_name, source, crm_client_id, note)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (phone) DO UPDATE SET
+                first_name    = CASE WHEN $2 != '' THEN $2 ELSE active_contacts.first_name END,
+                last_name     = CASE WHEN $3 != '' THEN $3 ELSE active_contacts.last_name END,
+                source        = CASE WHEN active_contacts.source = $4 THEN active_contacts.source ELSE 'both' END,
+                crm_client_id = COALESCE($5, active_contacts.crm_client_id),
+                note          = CASE WHEN $6 != '' THEN $6 ELSE active_contacts.note END,
+                updated_at    = NOW()
+            RETURNING *
+        """, phone, first_name or "", last_name or "", source, crm_client_id, note or "")
+        return dict(row) if row else {}
+
+
+async def import_answered_autodial_calls(campaign_id: int) -> int:
+    """Импортирует дозвонившихся (answered_at IS NOT NULL) из кампании автодозвона
+    в active_contacts. Возвращает кол-во импортированных (новых+обновлённых) номеров."""
+    if not pool:
+        return 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT ON (phone) phone, name FROM autodial_calls "
+            "WHERE campaign_id=$1 AND answered_at IS NOT NULL",
+            campaign_id
+        )
+        count = 0
+        for r in rows:
+            phone = _autodial_phone_to_e164(r["phone"])
+            if not phone:
+                continue
+            await upsert_active_contact(phone, first_name=r["name"] or "", source="autodial")
+            count += 1
+        return count
+
+
+def _normalize_phone_local(phone: str) -> str:
+    """Локальная копия normalize_phone() из main.py — без кросс-модульного импорта."""
+    p = (phone or "").strip().replace(" ", "").replace("-", "")
+    if not p:
+        return ""
+    if not p.startswith("+"):
+        p = "+" + p
+    return p
+
+
+async def backfill_active_contacts() -> dict:
+    """Разовый импорт ИСТОРИЧЕСКИХ контактов, накопленных ДО того как автосинк был
+    подключён везде: сами crm_clients (может быть не все ещё в active_contacts),
+    лиды и подтверждённые пользователи сайта, которых нет в crm_clients. Таблицу
+    contacts (справочник Excel-списков) намеренно НЕ трогаем — по дизайну это
+    отдельная, не обязательно "живая" база."""
+    if not pool:
+        return {}
+    stats = {"crm_clients": 0, "leads": 0, "site_users": 0}
+
+    async with pool.acquire() as conn:
+        crm_rows = await conn.fetch("SELECT * FROM crm_clients")
+    for r in crm_rows:
+        await upsert_active_contact(r["phone"], first_name=r["first_name"] or "",
+                                     last_name=r["last_name"] or "", source="crm",
+                                     crm_client_id=r["id"])
+        stats["crm_clients"] += 1
+
+    async with pool.acquire() as conn:
+        lead_rows = await conn.fetch("""
+            SELECT DISTINCT ON (client_phone) client_phone, client_name FROM leads
+            WHERE client_phone IS NOT NULL AND client_phone != ''
+        """)
+    for r in lead_rows:
+        phone = _normalize_phone_local(r["client_phone"])
+        if not phone:
+            continue
+        row = await upsert_crm_client(phone=phone, first_name=r["client_name"] or "", source="lead_backfill")
+        if row:
+            stats["leads"] += 1
+
+    async with pool.acquire() as conn:
+        user_rows = await conn.fetch("SELECT phone, first_name FROM users WHERE is_verified = TRUE")
+    for r in user_rows:
+        phone = _normalize_phone_local(r["phone"])
+        if not phone:
+            continue
+        row = await upsert_crm_client(phone=phone, first_name=r["first_name"] or "", source="site_backfill")
+        if row:
+            stats["site_users"] += 1
+
+    return stats
+
+
+async def get_active_contacts_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch("""
+                SELECT * FROM active_contacts
+                WHERE phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
+                ORDER BY updated_at DESC LIMIT $2 OFFSET $3
+            """, f"%{search}%", limit, offset)
+        else:
+            rows = await conn.fetch("""
+                SELECT * FROM active_contacts ORDER BY updated_at DESC LIMIT $1 OFFSET $2
+            """, limit, offset)
+        return [dict(r) for r in rows]
+
+
+async def get_active_contacts_count() -> int:
+    if not pool:
+        return 0
+    async with pool.acquire() as conn:
+        return await conn.fetchval("SELECT COUNT(*) FROM active_contacts")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
