@@ -4051,13 +4051,17 @@ _ORDER_EDITABLE_STATUSES = {"new","confirmed","pickup","received","washing","dry
 async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends(get_current_staff)):
     role = staff.get("role", "")
     perms = ROLE_PERMISSIONS.get(role, [])
-    if "orders" not in perms and staff.get("sub") != "admin":
+    if "orders" not in perms and role != "admin":
         raise HTTPException(status_code=403, detail="Нет доступа")
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     can_edit_delivery = staff.get("can_edit_delivery", False)
-    if (staff.get("sub") != "admin"
+    # staff.get("sub") никогда не совпадает с "admin" для staff-логина (это поле JWT,
+    # не колонка БД — get_current_staff() возвращает dict(staff), где такого ключа нет).
+    # Из-за этого сотрудник с role="admin" ошибочно попадал под то же ограничение
+    # по статусу, что и остальные роли — не мог редактировать заказ в "Доставлено".
+    if (role != "admin"
             and order.get("status") not in _ORDER_EDITABLE_STATUSES
             and not (order.get("status") == "delivery" and can_edit_delivery)):
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
