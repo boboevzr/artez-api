@@ -3354,18 +3354,25 @@ async def backfill_active_contacts() -> dict:
 
 
 async def get_active_contacts_list(search: str = "", limit: int = 50, offset: int = 0) -> list[dict]:
+    """address подтягивается из связанного crm_clients (если есть) — самой
+    active_contacts адрес не хранит, для экспорта "телефонной книги"."""
     if not pool:
         return []
     async with pool.acquire() as conn:
         if search:
             rows = await conn.fetch("""
-                SELECT * FROM active_contacts
-                WHERE phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
-                ORDER BY updated_at DESC LIMIT $2 OFFSET $3
+                SELECT ac.*, cc.address AS address
+                FROM active_contacts ac
+                LEFT JOIN crm_clients cc ON cc.id = ac.crm_client_id
+                WHERE ac.phone ILIKE $1 OR ac.first_name ILIKE $1 OR ac.last_name ILIKE $1
+                ORDER BY ac.updated_at DESC LIMIT $2 OFFSET $3
             """, f"%{search}%", limit, offset)
         else:
             rows = await conn.fetch("""
-                SELECT * FROM active_contacts ORDER BY updated_at DESC LIMIT $1 OFFSET $2
+                SELECT ac.*, cc.address AS address
+                FROM active_contacts ac
+                LEFT JOIN crm_clients cc ON cc.id = ac.crm_client_id
+                ORDER BY ac.updated_at DESC LIMIT $1 OFFSET $2
             """, limit, offset)
         return [dict(r) for r in rows]
 
