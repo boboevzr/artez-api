@@ -516,6 +516,7 @@ async def create_tables():
         # clients — таблица бота (📱 Telegram · Клиенты), не crm_clients; может не
         # существовать на свежей БД (создаётся ботом) — тогда просто no-op ниже.
         "ALTER TABLE clients         ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE crm_clients     ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -3407,7 +3408,7 @@ async def get_active_contacts_count() -> int:
 # здесь; в contacts/active_contacts/users/crm_clients — только флаг blacklisted.
 # ══════════════════════════════════════════════════════════════════════════════
 
-_BLACKLIST_SOURCE_TABLES = ("contacts", "active_contacts", "users", "clients")
+_BLACKLIST_SOURCE_TABLES = ("contacts", "active_contacts", "users", "clients", "crm_clients")
 
 async def _mark_blacklisted_everywhere(conn, phone: str, value: bool):
     for table in _BLACKLIST_SOURCE_TABLES:
