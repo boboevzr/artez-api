@@ -7909,6 +7909,49 @@ async def admin_site_video_status(_=Depends(get_admin)):
     return {"ok": True, "ru": bool(ru), "uz": bool(uz)}
 
 
+# ── Видео-инструкция при первом входе в Telegram-бот (отдельное от видео-карточки сайта) ──
+@app.post("/api/admin/bot-welcome-video/{lang}")
+async def admin_upload_bot_welcome_video(lang: str, file: UploadFile = File(...), _=Depends(get_admin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
+    if not (file.content_type or "").startswith("video/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть видео")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_SITE_VIDEO_BYTES:
+        raise HTTPException(status_code=400, detail=f"Видео слишком большое (макс. {MAX_SITE_VIDEO_BYTES//1_000_000} МБ)")
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("video", file_bytes, filename=file.filename or f"bot-welcome-{lang}.mp4", content_type=file.content_type)
+    form.add_field("caption", f"Bot welcome video ({lang})")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendVideo", data=form,
+                           timeout=aiohttp.ClientTimeout(total=60)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
+    file_id = result["result"]["video"]["file_id"]
+    await db.set_config(f"bot_welcome_video_file_id_{lang}", file_id)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/bot-welcome-video/{lang}")
+async def admin_delete_bot_welcome_video(lang: str, _=Depends(get_admin)):
+    if lang not in ("ru", "uz"):
+        raise HTTPException(status_code=400, detail="lang должен быть ru или uz")
+    await db.set_config(f"bot_welcome_video_file_id_{lang}", "")
+    return {"ok": True}
+
+
+@app.get("/api/admin/bot-welcome-video-status")
+async def admin_bot_welcome_video_status(_=Depends(get_admin)):
+    ru = await db.get_config("bot_welcome_video_file_id_ru")
+    uz = await db.get_config("bot_welcome_video_file_id_uz")
+    return {"ok": True, "ru": bool(ru), "uz": bool(uz)}
+
+
 def _video_range_response(content: bytes, request: Request, media_type: str = "video/mp4"):
     """Отдаёт видео с поддержкой HTTP Range. Без этого iOS Safari (и любой браузер
     на iOS, включая Chrome/Telegram-webview — там тот же WebKit) не проигрывает
