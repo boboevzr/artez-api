@@ -2574,6 +2574,40 @@ async def active_contacts_backfill(_=Depends(_get_admin)):
     return {"ok": True, "stats": stats}
 
 
+@app.get("/api/admin/blacklist")
+async def blacklist_list(search: str = "", limit: int = 50, offset: int = 0,
+                          _=Depends(_get_admin_or_staff_clients)):
+    rows = await db.get_blacklist_list(search=search, limit=limit, offset=offset)
+    count = await db.get_blacklist_count(search=search)
+    return {"ok": True, "entries": rows, "count": count}
+
+
+@app.post("/api/admin/blacklist/toggle")
+async def blacklist_toggle(body: dict = Body(...), staff=Depends(get_current_staff)):
+    role = staff.get("role", "")
+    perms = ROLE_PERMISSIONS.get(role, [])
+    if "clients" not in perms and role != "admin":
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    phone = normalize_phone(body.get("phone", ""))
+    if not phone:
+        raise HTTPException(status_code=400, detail="Не указан телефон")
+    if body.get("blacklisted", True):
+        added_by = staff.get("login") or staff.get("first_name") or ""
+        entry = await db.upsert_blacklist_entry(phone, note=body.get("note", ""), added_by=added_by)
+        return {"ok": True, "entry": entry}
+    else:
+        await db.remove_from_blacklist(phone)
+        return {"ok": True}
+
+
+@app.post("/api/admin/blacklist/sync")
+async def blacklist_sync(_=Depends(_get_admin)):
+    """Кнопка «Обновить» — досвежа проставляет флаг blacklisted во всех
+    таблицах (справочник/актуальные/пользователи сайта/TG-клиенты)."""
+    stats = await db.sync_blacklist_flags()
+    return {"ok": True, "stats": stats}
+
+
 @app.put("/api/clients/{client_id}")
 async def client_update(client_id: int, req: ClientUpdateRequest,
                         _=Depends(_get_admin_or_staff_clients)):
@@ -2764,7 +2798,7 @@ async def contacts_export(
 ):
     """Экспорт контактов без лимита с фильтрами."""
     async with db.pool.acquire() as conn:
-        conditions = ["1=1"]
+        conditions = ["NOT COALESCE(blacklisted, FALSE)"]
         params: list = []
         i = 1
         if search:
@@ -9004,6 +9038,10 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
         phones_seen = set()
         rows_to_insert = []
 
+        # Чёрный список — номера отсюда не должны попадать в автодозвон.
+        async with db.pool.acquire() as conn:
+            blacklisted_phones = {r["phone"] for r in await conn.fetch("SELECT phone FROM blacklist")}
+
         group_ids = []
         try:
             gids = campaign["group_ids"]
@@ -9019,6 +9057,8 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
                     group_ids
                 )
             for m in members:
+                if normalize_phone(m["phone"] or "") in blacklisted_phones:
+                    continue
                 p = _ami_phone((m["phone"] or "").strip())
                 if p and p not in phones_seen:
                     phones_seen.add(p)
@@ -9030,6 +9070,8 @@ async def autodial_start(cid: int, _=Depends(_get_admin)):
                     "SELECT id, phone, first_name, last_name FROM crm_clients WHERE phone IS NOT NULL AND phone != '' ORDER BY id"
                 )
             for r in crows:
+                if normalize_phone(r["phone"] or "") in blacklisted_phones:
+                    continue
                 p = _ami_phone((r["phone"] or "").strip())
                 if p and p not in phones_seen:
                     phones_seen.add(p)
