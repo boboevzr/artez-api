@@ -3901,8 +3901,9 @@ async def register_via_tg(body: dict):
 
     # Пароль всегда генерируется сервером (не вводится вручную) — клиент
     # обязан сменить его при первом входе (must_change_password).
-    import random, string
-    password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
+    # secrets, а не random — пароль должен быть криптографически непредсказуем.
+    import secrets, string
+    password = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(10))
 
     tg_id = await db.get_tg_id_by_phone(phone)
     if not tg_id:
