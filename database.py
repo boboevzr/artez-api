@@ -509,6 +509,7 @@ async def create_tables():
             created_at TIMESTAMPTZ DEFAULT NOW(),
             updated_at TIMESTAMPTZ DEFAULT NOW()
         )""",
+        "ALTER TABLE blacklist ADD COLUMN IF NOT EXISTS name VARCHAR(150) DEFAULT ''",
         "ALTER TABLE contacts        ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
         "ALTER TABLE active_contacts ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
         "ALTER TABLE users           ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
@@ -3415,20 +3416,21 @@ async def _mark_blacklisted_everywhere(conn, phone: str, value: bool):
         except Exception:
             pass  # clients (таблица бота) может не существовать на этой БД
 
-async def upsert_blacklist_entry(phone: str, note: str = "", added_by: str = "") -> dict:
-    """Добавляет номер в ЧС (или обновляет причину, если уже есть) и сразу
+async def upsert_blacklist_entry(phone: str, note: str = "", added_by: str = "", name: str = "") -> dict:
+    """Добавляет номер в ЧС (или обновляет причину/имя, если уже есть) и сразу
     проставляет флаг blacklisted во всех таблицах, где нашёлся этот телефон."""
     if not pool or not phone:
         return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO blacklist (phone, note, added_by)
-            VALUES ($1, $2, $3)
+            INSERT INTO blacklist (phone, note, added_by, name)
+            VALUES ($1, $2, $3, $4)
             ON CONFLICT (phone) DO UPDATE SET
                 note = CASE WHEN $2 != '' THEN $2 ELSE blacklist.note END,
+                name = CASE WHEN $4 != '' THEN $4 ELSE blacklist.name END,
                 updated_at = NOW()
             RETURNING *
-        """, phone, note or "", added_by or "")
+        """, phone, note or "", added_by or "", name or "")
         await _mark_blacklisted_everywhere(conn, phone, True)
         return dict(row) if row else {}
 

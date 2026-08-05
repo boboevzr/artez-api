@@ -2593,7 +2593,8 @@ async def blacklist_toggle(body: dict = Body(...), staff=Depends(get_current_sta
         raise HTTPException(status_code=400, detail="Не указан телефон")
     if body.get("blacklisted", True):
         added_by = staff.get("login") or staff.get("first_name") or ""
-        entry = await db.upsert_blacklist_entry(phone, note=body.get("note", ""), added_by=added_by)
+        entry = await db.upsert_blacklist_entry(phone, note=body.get("note", ""), added_by=added_by,
+                                                 name=body.get("name", ""))
         return {"ok": True, "entry": entry}
     else:
         await db.remove_from_blacklist(phone)
