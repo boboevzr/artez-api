@@ -517,6 +517,7 @@ async def create_tables():
         # существовать на свежей БД (создаётся ботом) — тогда просто no-op ниже.
         "ALTER TABLE clients         ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
         "ALTER TABLE crm_clients     ADD COLUMN IF NOT EXISTS blacklisted BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE users           ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN DEFAULT FALSE",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1220,8 +1221,16 @@ async def update_user_password(user_id: int, password_hash: str):
     if not pool: return
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE users SET password_hash=$2, updated_at=NOW() WHERE id=$1
+            UPDATE users SET password_hash=$2, must_change_password=FALSE, updated_at=NOW() WHERE id=$1
         """, user_id, password_hash)
+
+
+async def set_user_must_change_password(user_id: int, value: bool):
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            UPDATE users SET must_change_password=$2, updated_at=NOW() WHERE id=$1
+        """, user_id, value)
 
 async def get_all_site_users(search: str = "", limit: int = 500):
     if not pool: return []

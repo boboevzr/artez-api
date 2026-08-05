@@ -2972,6 +2972,10 @@ async def tg_phone_link(body: dict):
 @app.post("/api/register")
 async def register(req: RegisterRequest):
     uz = req.lang == "uz"
+    if not req.via_tg and await _get_cfg("sms_registration_enabled") == "false":
+        raise HTTPException(status_code=403, detail=(
+            "Ro'yxatdan o'tish faqat Telegram orqali mavjud" if uz
+            else "Регистрация доступна только через Telegram"))
     existing = await db.get_user_by_phone(req.phone)
     if existing and existing["is_verified"]:
         raise HTTPException(status_code=400, detail=(
@@ -3082,6 +3086,7 @@ async def login(req: LoginRequest):
             "address": user["address"],
             "car_plate": user["car_plate"],
             "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
+            "must_change_password": bool(user.get("must_change_password")),
         }
     }
 
@@ -3098,7 +3103,20 @@ async def me(user = Depends(get_current_user)):
         "car_plate": user["car_plate"],
         "osago_expiry": expiry.isoformat() if expiry else None,
         "tg_id": user.get("tg_id"),
+        "must_change_password": bool(user.get("must_change_password")),
     }
+
+
+@app.post("/api/change-password")
+async def change_password(body: dict, user = Depends(get_current_user)):
+    """Смена пароля клиентом сайта — обязательна, если must_change_password=True
+    (пароль был сгенерирован автоматически при регистрации через бота)."""
+    new_pw = (body.get("password") or "").strip()
+    if len(new_pw) < 6:
+        raise HTTPException(status_code=400, detail="Пароль минимум 6 символов")
+    hashed = pwd_context.hash(new_pw[:72])
+    await db.update_user_password(user["id"], hashed)
+    return {"ok": True}
 
 
 @app.get("/api/promo/status")
@@ -3865,17 +3883,26 @@ async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_ge
     return {"ok": True, "tg_sent": send_tg and bool(body.get("send_tg"))}
 
 
+@app.get("/api/tg-registration-status/{tg_id}")
+async def tg_registration_status(tg_id: int):
+    """Для бота: есть ли у этого tg_id подтверждённый аккаунт на сайте."""
+    user = await db.get_user_by_tg_id(tg_id)
+    return {"registered": bool(user and user.get("is_verified"))}
+
+
 @app.post("/api/register-via-tg")
 async def register_via_tg(body: dict):
     phone      = (body.get("phone") or "").strip()
     first_name = (body.get("first_name") or "").strip()
-    password   = (body.get("password") or "").strip()
     uz = (body.get("lang") or "ru") == "uz"
 
-    if not phone or not first_name or not password:
+    if not phone or not first_name:
         raise HTTPException(400, "Yetishmayotgan maydonlar" if uz else "Заполните все поля")
-    if len(password) < 6:
-        raise HTTPException(400, "Parol kamida 6 ta belgi" if uz else "Пароль минимум 6 символов")
+
+    # Пароль всегда генерируется сервером (не вводится вручную) — клиент
+    # обязан сменить его при первом входе (must_change_password).
+    import random, string
+    password = ''.join(random.choices(string.ascii_letters + string.digits, k=10))
 
     tg_id = await db.get_tg_id_by_phone(phone)
     if not tg_id:
@@ -3896,6 +3923,7 @@ async def register_via_tg(body: dict):
     await db.set_user_tg_id(phone, tg_id)
 
     user = await db.get_user_by_phone(phone)
+    await db.set_user_must_change_password(user["id"], True)
     asyncio.create_task(db.update_user_last_login(user["id"]))
     token = create_token(user["id"], user["phone"])
 
@@ -3906,13 +3934,13 @@ async def register_via_tg(body: dict):
             f"👤 Имя: <b>{first_name}</b>\n"
             f"📱 Номер / Логин: <code>{phone}</code>\n"
             f"🔑 Пароль: <code>{password}</code>\n\n"
-            f"Используйте эти данные для входа на сайте artez.uz"
+            f"⚠️ При первом входе на сайте нужно будет сменить пароль."
         ) if not uz else (
             f"🎉 <b>ARTEZ</b> — ro'yxatdan o'tdingiz!\n\n"
             f"👤 Ism: <b>{first_name}</b>\n"
             f"📱 Raqam / Login: <code>{phone}</code>\n"
             f"🔑 Parol: <code>{password}</code>\n\n"
-            f"artez.uz saytiga kirish uchun ushbu ma'lumotlardan foydalaning."
+            f"⚠️ Saytga birinchi marta kirganda parolni almashtirish kerak bo'ladi."
         )
         asyncio.create_task(_send_tg_safe(tg_id, text))
 
@@ -3928,6 +3956,7 @@ async def register_via_tg(body: dict):
             "address": user.get("address"),
             "car_plate": user.get("car_plate"),
             "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
+            "must_change_password": True,
         }
     }
 
@@ -7759,6 +7788,7 @@ SITE_SETTINGS_DEFAULTS = {
     # Видео-карточка на главной странице сайта
     "site_video_enabled":      "false",
     "site_video_placement":    "hero",  # hero | how_it_works | reviews | floating
+    "sms_registration_enabled": "true",
 }
 
 async def _get_cfg(key: str) -> str:
@@ -7780,6 +7810,7 @@ async def get_site_settings():
         "branch_zarafshan_location", "branch_navoi_location",
         "osago_partner_phone", "osago_partner_promo",
         "site_video_enabled", "site_video_placement",
+        "sms_registration_enabled",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -7850,6 +7881,7 @@ class SiteSettings(BaseModel):
     receipt_footer_note: str | None = None
     site_video_enabled:      str | None = None
     site_video_placement:    str | None = None
+    sms_registration_enabled: str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
