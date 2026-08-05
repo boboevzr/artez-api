@@ -37,6 +37,7 @@ VAPID_PRIVATE  = os.getenv("VAPID_PRIVATE", "")
 VAPID_PUBLIC   = os.getenv("VAPID_PUBLIC", "")
 
 BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
+BOT_INTERNAL_SECRET = os.getenv("BOT_INTERNAL_SECRET", "")
 GROUP_ID              = os.getenv("GROUP_ID", "")
 GROUP_ID_ZARAFSHAN    = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID        = os.getenv("LEADS_GROUP_ID", "-1004486597965")
@@ -3883,18 +3884,72 @@ async def admin_reset_site_user_password(user_id: int, body: dict, _=Depends(_ge
     return {"ok": True, "tg_sent": send_tg and bool(body.get("send_tg"))}
 
 
+def _is_trusted_bot_call(x_internal_secret: str | None) -> bool:
+    """True если вызов пришёл от нашего же бота (см. BOT_INTERNAL_SECRET в bot.py).
+    Если секрет не настроен в env — считаем незащищённым (как было раньше),
+    чтобы не заблокировать бота при забытой настройке на Railway."""
+    if not BOT_INTERNAL_SECRET:
+        return False
+    return x_internal_secret == BOT_INTERNAL_SECRET
+
+
 @app.get("/api/tg-registration-status/{tg_id}")
-async def tg_registration_status(tg_id: int):
-    """Для бота: есть ли у этого tg_id подтверждённый аккаунт на сайте."""
+async def tg_registration_status(tg_id: int, x_internal_secret: str | None = Header(None)):
+    """Только для бота: есть ли у этого tg_id подтверждённый аккаунт на сайте."""
+    if BOT_INTERNAL_SECRET and not _is_trusted_bot_call(x_internal_secret):
+        raise HTTPException(status_code=403, detail="Forbidden")
     user = await db.get_user_by_tg_id(tg_id)
     return {"registered": bool(user and user.get("is_verified"))}
 
 
-@app.post("/api/register-via-tg")
-async def register_via_tg(body: dict):
-    phone      = (body.get("phone") or "").strip()
-    first_name = (body.get("first_name") or "").strip()
+@app.post("/api/tg-register-request-code")
+async def tg_register_request_code(body: dict):
+    """Сайтовый флоу «Регистрация через Telegram»: перед созданием аккаунта
+    отправляем одноразовый код в Telegram — иначе кто угодно, кто знает чужой
+    номер (когда-либо привязанный к боту), мог бы завершить регистрацию за
+    другого человека и сразу получить токен сессии (нашли на code review)."""
+    phone = normalize_phone((body.get("phone") or "").strip())
     uz = (body.get("lang") or "ru") == "uz"
+    if not phone:
+        raise HTTPException(400, "Telefon raqami kerak" if uz else "Укажите номер телефона")
+
+    tg_id = await db.get_tg_id_by_phone(phone)
+    if not tg_id:
+        raise HTTPException(400,
+            "Bu raqam botda topilmadi. Avval bot bilan telefon raqamingizni ulashing."
+            if uz else
+            "Телефон не найден в боте. Сначала поделитесь номером через бота.")
+
+    existing = await db.get_user_by_phone(phone)
+    if existing and existing["is_verified"]:
+        raise HTTPException(400,
+            "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
+            else "Этот номер уже зарегистрирован")
+
+    ok, err = await db.check_sms_rate_limit(phone, "tg_register")
+    if not ok:
+        raise HTTPException(status_code=429, detail=err)
+
+    code = generate_code()
+    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
+    await db.save_sms_code(phone, code, "tg_register", expires_at)
+
+    text = (
+        f"🔐 <b>ARTEZ</b> — код подтверждения регистрации:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут."
+        if not uz else
+        f"🔐 <b>ARTEZ</b> — ro'yxatdan o'tish tasdiqlash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi."
+    )
+    await _send_tg_safe(tg_id, text)
+    return {"ok": True}
+
+
+@app.post("/api/register-via-tg")
+async def register_via_tg(body: dict, x_internal_secret: str | None = Header(None)):
+    phone      = normalize_phone((body.get("phone") or "").strip())
+    first_name = (body.get("first_name") or "").strip()
+    code       = (body.get("code") or "").strip()
+    uz = (body.get("lang") or "ru") == "uz"
+    trusted_bot = _is_trusted_bot_call(x_internal_secret)
 
     if not phone or not first_name:
         raise HTTPException(400, "Yetishmayotgan maydonlar" if uz else "Заполните все поля")
@@ -3917,6 +3972,15 @@ async def register_via_tg(body: dict):
         raise HTTPException(400,
             "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
             else "Этот номер уже зарегистрирован")
+
+    # Бот уже подтвердил владение номером в реальном времени (Telegram contact
+    # share) и аутентифицирован секретом — коду подтверждения взяться неоткуда
+    # и незачем. Любой другой вызывающий (браузер) обязан пройти /api/tg-register-request-code.
+    if not trusted_bot:
+        if not code:
+            raise HTTPException(400, "Kod kerak" if uz else "Введите код подтверждения")
+        if not await db.check_sms_code(phone, code, "tg_register"):
+            raise HTTPException(400, "Kod noto'g'ri yoki eskirgan" if uz else "Неверный или просроченный код")
 
     password_hash = pwd_context.hash(password[:72])
     await db.create_user(phone, password_hash, first_name)
