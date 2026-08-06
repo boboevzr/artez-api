@@ -2951,10 +2951,12 @@ async def get_prices():
 
 @app.get("/api/check-tg-link")
 async def check_tg_link(phone: str):
-    """Проверяет, привязан ли телефон к Telegram боту."""
+    """Проверяет, привязан ли телефон к Telegram боту, и есть ли уже аккаунт на сайте."""
     normalized = normalize_phone(phone)
     tg_id = await db.get_tg_id_by_phone(normalized)
-    return {"has_tg": tg_id is not None}
+    existing = await db.get_user_by_phone(normalized)
+    already_registered = bool(existing and existing.get("is_verified"))
+    return {"has_tg": tg_id is not None, "already_registered": already_registered}
 
 
 @app.post("/api/tg-phone-link")
@@ -3064,6 +3066,78 @@ async def resend_code(req: ResendCodeRequest):
             return {"ok": True, "message": "Код отправлен в Telegram"}
     await send_sms(req.phone, await sms_text(code, req.purpose))
     return {"ok": True, "message": "Код отправлен повторно"}
+
+
+@app.post("/api/forgot-password/request")
+async def forgot_password_request(body: dict):
+    """Отправляет код сброса пароля — в Telegram, если номер к нему привязан,
+    иначе по SMS (тот же принцип, что и в register-via-tg / уведомлениях)."""
+    phone = normalize_phone((body.get("phone") or "").strip())
+    uz = (body.get("lang") or "ru") == "uz"
+    if not phone:
+        raise HTTPException(400, "Telefon raqami kerak" if uz else "Укажите номер телефона")
+
+    user = await db.get_user_by_phone(phone)
+    if not user or not user.get("is_verified"):
+        raise HTTPException(400, "Bu raqamda akkaunt topilmadi" if uz else "Аккаунт с этим номером не найден")
+
+    ok, err = await db.check_sms_rate_limit(phone, "reset")
+    if not ok:
+        raise HTTPException(status_code=429, detail=err)
+
+    code = generate_code()
+    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
+    await db.save_sms_code(phone, code, "reset", expires_at)
+
+    tg_id = user.get("tg_id")
+    if tg_id:
+        text = (
+            f"🔐 <b>ARTEZ</b> — код для сброса пароля:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут."
+            if not uz else
+            f"🔐 <b>ARTEZ</b> — parolni tiklash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi."
+        )
+        await send_tg(tg_id, text)
+        return {"ok": True, "channel": "tg"}
+
+    await send_sms(phone, await sms_text(code, "reset"))
+    return {"ok": True, "channel": "sms"}
+
+
+@app.post("/api/forgot-password/confirm")
+async def forgot_password_confirm(body: dict):
+    phone = normalize_phone((body.get("phone") or "").strip())
+    code = (body.get("code") or "").strip()
+    new_password = (body.get("password") or "").strip()
+    uz = (body.get("lang") or "ru") == "uz"
+
+    if not phone or not code or not new_password:
+        raise HTTPException(400, "Yetishmayotgan maydonlar" if uz else "Заполните все поля")
+    if len(new_password) < 6:
+        raise HTTPException(400, "Parol kamida 6 ta belgi" if uz else "Пароль минимум 6 символов")
+    if not await db.check_sms_code(phone, code, "reset"):
+        raise HTTPException(400, "Kod noto'g'ri yoki eskirgan" if uz else "Неверный или просроченный код")
+
+    user = await db.get_user_by_phone(phone)
+    if not user:
+        raise HTTPException(400, "Foydalanuvchi topilmadi" if uz else "Пользователь не найден")
+
+    password_hash = pwd_context.hash(new_password[:72])
+    await db.update_user_password(user["id"], password_hash)
+    asyncio.create_task(db.update_user_last_login(user["id"]))
+    token = create_token(user["id"], user["phone"])
+    return {
+        "ok": True,
+        "token": token,
+        "user": {
+            "id": user["id"],
+            "phone": user["phone"],
+            "first_name": user["first_name"],
+            "address": user["address"],
+            "car_plate": user["car_plate"],
+            "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
+            "must_change_password": False,
+        }
+    }
 
 
 @app.post("/api/login")
