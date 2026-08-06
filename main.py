@@ -4000,7 +4000,10 @@ async def register_via_tg(body: dict, x_internal_secret: str | None = Header(Non
             f"⚠️ Saytga birinchi marta kirganda parolni almashtirish kerak bo'ladi.\n\n"
             f"🌐 Kirish va buyurtmalar holatini kuzatish: artez.uz"
         )
-        asyncio.create_task(_send_tg_safe(tg_id, text))
+        menu_kb = {"inline_keyboard": [[
+            {"text": "🏠 Menyu" if uz else "🏠 Меню", "callback_data": "go_menu"}
+        ]]}
+        asyncio.create_task(_send_tg_safe(tg_id, text, reply_markup=menu_kb))
 
     asyncio.create_task(_notify_new_site_user(first_name, phone, "tg"))
 
@@ -4019,12 +4022,15 @@ async def register_via_tg(body: dict, x_internal_secret: str | None = Header(Non
     }
 
 
-async def _send_tg_safe(tg_id: int, text: str):
+async def _send_tg_safe(tg_id: int, text: str, reply_markup: dict | None = None):
     try:
+        payload = {"chat_id": str(tg_id), "text": text, "parse_mode": "HTML"}
+        if reply_markup:
+            payload["reply_markup"] = reply_markup
         async with aiohttp.ClientSession() as s:
             await s.post(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                json={"chat_id": str(tg_id), "text": text, "parse_mode": "HTML"},
+                json=payload,
                 timeout=aiohttp.ClientTimeout(total=5))
     except Exception:
         pass
