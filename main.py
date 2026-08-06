@@ -3990,13 +3990,15 @@ async def register_via_tg(body: dict, x_internal_secret: str | None = Header(Non
             f"👤 Имя: <b>{first_name}</b>\n"
             f"📱 Номер / Логин: <code>{phone}</code>\n"
             f"🔑 Пароль: <code>{password}</code>\n\n"
-            f"⚠️ При первом входе на сайте нужно будет сменить пароль."
+            f"⚠️ При первом входе на сайте нужно будет сменить пароль.\n\n"
+            f"🌐 Вход и отслеживание статуса заказов: artez.uz"
         ) if not uz else (
             f"🎉 <b>ARTEZ</b> — ro'yxatdan o'tdingiz!\n\n"
             f"👤 Ism: <b>{first_name}</b>\n"
             f"📱 Raqam / Login: <code>{phone}</code>\n"
             f"🔑 Parol: <code>{password}</code>\n\n"
-            f"⚠️ Saytga birinchi marta kirganda parolni almashtirish kerak bo'ladi."
+            f"⚠️ Saytga birinchi marta kirganda parolni almashtirish kerak bo'ladi.\n\n"
+            f"🌐 Kirish va buyurtmalar holatini kuzatish: artez.uz"
         )
         asyncio.create_task(_send_tg_safe(tg_id, text))
 
