@@ -3010,10 +3010,12 @@ async def register(req: RegisterRequest):
                 "Telegram не привязан. Сначала напишите боту /start и поделитесь номером."
                 if not uz else
                 "Telegram bog'lanmagan. Botga /start yozing va raqamingizni ulashing."))
+        from zoneinfo import ZoneInfo
+        expires_str = (datetime.now(ZoneInfo("Asia/Tashkent")) + timedelta(minutes=SMS_CODE_TTL_MIN)).strftime("%d.%m.%Y %H:%M")
         code_text = (
-            f"🔐 <b>ARTEZ</b> — код подтверждения регистрации:\n\n<code>{code}</code>\n\n⏱ Действителен 5 минут."
+            f"🔐 <b>ARTEZ</b> — код подтверждения регистрации:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут (до {expires_str})."
             if not uz else
-            f"🔐 <b>ARTEZ</b> — ro'yxatdan o'tish tasdiqlash kodi:\n\n<code>{code}</code>\n\n⏱ 5 daqiqa davomida amal qiladi."
+            f"🔐 <b>ARTEZ</b> — ro'yxatdan o'tish tasdiqlash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi ({expires_str} gacha)."
         )
         await _send_tg_safe(tg_id, code_text)
         return {"ok": True, "via_tg": True, "message": "Код отправлен в Telegram", "phone": req.phone}
@@ -3068,8 +3070,10 @@ async def resend_code(req: ResendCodeRequest):
     if req.via_tg:
         tg_id = await db.get_tg_id_by_phone(req.phone)
         if tg_id:
+            from zoneinfo import ZoneInfo
+            expires_str = (datetime.now(ZoneInfo("Asia/Tashkent")) + timedelta(minutes=SMS_CODE_TTL_MIN)).strftime("%d.%m.%Y %H:%M")
             await _send_tg_safe(tg_id,
-                f"🔐 <b>ARTEZ</b> — код подтверждения:\n\n<code>{code}</code>\n\n⏱ Действителен 5 минут.")
+                f"🔐 <b>ARTEZ</b> — код подтверждения:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут (до {expires_str}).")
             return {"ok": True, "message": "Код отправлен в Telegram"}
     await send_sms(req.phone, await sms_text(code, req.purpose))
     return {"ok": True, "message": "Код отправлен повторно"}
@@ -3100,10 +3104,13 @@ async def forgot_password_request(body: dict):
 
     tg_id = user.get("tg_id")
     if tg_id:
+        from zoneinfo import ZoneInfo
+        expires_local = datetime.now(ZoneInfo("Asia/Tashkent")) + timedelta(minutes=SMS_CODE_TTL_MIN)
+        expires_str = expires_local.strftime("%d.%m.%Y %H:%M")
         text = (
-            f"🔐 <b>ARTEZ</b> — код для сброса пароля:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут."
+            f"🔐 <b>ARTEZ</b> — код для сброса пароля:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут (до {expires_str})."
             if not uz else
-            f"🔐 <b>ARTEZ</b> — parolni tiklash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi."
+            f"🔐 <b>ARTEZ</b> — parolni tiklash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi ({expires_str} gacha)."
         )
         await _send_tg_safe(tg_id, text)
         return {"ok": True}
