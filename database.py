@@ -1368,6 +1368,25 @@ async def check_sms_rate_limit(phone: str, purpose: str) -> tuple[bool, str]:
     return True, ""
 
 
+async def check_lookup_rate_limit(phone: str, purpose: str, max_per_hour: int = 20) -> bool:
+    """Лёгкий лимит для read-only проверок (не отправка кода) — против массового
+    перебора номеров (user enumeration), но без 60-сек паузы: такие проверки
+    легитимно случаются по 2-3 раза подряд в рамках одного флоу."""
+    if not pool: return True
+    async with pool.acquire() as conn:
+        count = await conn.fetchval("""
+            SELECT COUNT(*) FROM sms_codes
+            WHERE phone=$1 AND purpose=$2 AND created_at > NOW() - INTERVAL '1 hour'
+        """, phone, purpose)
+        if count and count >= max_per_hour:
+            return False
+        await conn.execute("""
+            INSERT INTO sms_codes (phone, code, purpose, expires_at)
+            VALUES ($1, 'lookup', $2, NOW() + INTERVAL '1 hour')
+        """, phone, purpose)
+    return True
+
+
 async def get_config(key: str) -> str | None:
     if not pool: return None
     async with pool.acquire() as conn:

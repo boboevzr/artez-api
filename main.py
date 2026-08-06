@@ -2951,8 +2951,11 @@ async def get_prices():
 
 @app.get("/api/check-tg-link")
 async def check_tg_link(phone: str):
-    """Проверяет, привязан ли телефон к Telegram боту, и есть ли уже аккаунт на сайте."""
+    """Проверяет, привязан ли телефон к Telegram боту, и есть ли уже аккаунт на сайте.
+    Лёгкий rate-limit против массового перебора номеров (user enumeration)."""
     normalized = normalize_phone(phone)
+    if not await db.check_lookup_rate_limit(normalized, "check_tg_link"):
+        raise HTTPException(status_code=429, detail="Слишком много попыток, подождите")
     tg_id = await db.get_tg_id_by_phone(normalized)
     existing = await db.get_user_by_phone(normalized)
     already_registered = bool(existing and existing.get("is_verified"))
@@ -3079,7 +3082,9 @@ async def forgot_password_request(body: dict):
 
     user = await db.get_user_by_phone(phone)
     if not user or not user.get("is_verified"):
-        raise HTTPException(400, "Bu raqamda akkaunt topilmadi" if uz else "Аккаунт с этим номером не найден")
+        # Не палим существование аккаунта — единый ответ для любого номера
+        # (иначе эндпоинт превращается в оракул для перебора чужих номеров).
+        return {"ok": True}
 
     ok, err = await db.check_sms_rate_limit(phone, "reset")
     if not ok:
@@ -3097,10 +3102,10 @@ async def forgot_password_request(body: dict):
             f"🔐 <b>ARTEZ</b> — parolni tiklash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi."
         )
         await send_tg(tg_id, text)
-        return {"ok": True, "channel": "tg"}
+        return {"ok": True}
 
     await send_sms(phone, await sms_text(code, "reset"))
-    return {"ok": True, "channel": "sms"}
+    return {"ok": True}
 
 
 @app.post("/api/forgot-password/confirm")
@@ -3114,6 +3119,14 @@ async def forgot_password_confirm(body: dict):
         raise HTTPException(400, "Yetishmayotgan maydonlar" if uz else "Заполните все поля")
     if len(new_password) < 6:
         raise HTTPException(400, "Parol kamida 6 ta belgi" if uz else "Пароль минимум 6 символов")
+
+    # Ограничиваем число попыток подбора кода (не только частоту его запроса) —
+    # без этого 6-значный код можно перебирать неограниченно в пределах TTL.
+    ok, err = await db.check_sms_rate_limit(phone, "reset_attempt")
+    if not ok:
+        raise HTTPException(status_code=429, detail=err)
+    await db.save_sms_code(phone, "attempt", "reset_attempt", datetime.utcnow() + timedelta(minutes=1))
+
     if not await db.check_sms_code(phone, code, "reset"):
         raise HTTPException(400, "Kod noto'g'ri yoki eskirgan" if uz else "Неверный или просроченный код")
 
