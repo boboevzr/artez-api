@@ -295,6 +295,10 @@ async def _measure_review_worker():
 
 
 async def send_tg(chat_id, text: str):
+    """Обычный текст, БЕЗ parse_mode — большинство вызовов подставляют свободный
+    текст из CRM (имена, заметки), где может случайно быть "<"/">"; включить HTML
+    здесь сломало бы отправку таких сообщений (Telegram отклоняет невалидную
+    разметку). Для сообщений с реальным HTML-форматированием — _send_tg_safe()."""
     if not BOT_TOKEN or not chat_id:
         return
     try:
@@ -3011,7 +3015,7 @@ async def register(req: RegisterRequest):
             if not uz else
             f"🔐 <b>ARTEZ</b> — ro'yxatdan o'tish tasdiqlash kodi:\n\n<code>{code}</code>\n\n⏱ 5 daqiqa davomida amal qiladi."
         )
-        await send_tg(tg_id, code_text)
+        await _send_tg_safe(tg_id, code_text)
         return {"ok": True, "via_tg": True, "message": "Код отправлен в Telegram", "phone": req.phone}
 
     await send_sms(req.phone, await sms_text(code, "register"))
@@ -3064,7 +3068,7 @@ async def resend_code(req: ResendCodeRequest):
     if req.via_tg:
         tg_id = await db.get_tg_id_by_phone(req.phone)
         if tg_id:
-            await send_tg(tg_id,
+            await _send_tg_safe(tg_id,
                 f"🔐 <b>ARTEZ</b> — код подтверждения:\n\n<code>{code}</code>\n\n⏱ Действителен 5 минут.")
             return {"ok": True, "message": "Код отправлен в Telegram"}
     await send_sms(req.phone, await sms_text(code, req.purpose))
@@ -3101,7 +3105,7 @@ async def forgot_password_request(body: dict):
             if not uz else
             f"🔐 <b>ARTEZ</b> — parolni tiklash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi."
         )
-        await send_tg(tg_id, text)
+        await _send_tg_safe(tg_id, text)
         return {"ok": True}
 
     await send_sms(phone, await sms_text(code, "reset"))
