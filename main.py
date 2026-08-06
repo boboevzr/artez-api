@@ -3893,15 +3893,6 @@ def _is_trusted_bot_call(x_internal_secret: str | None) -> bool:
     return x_internal_secret == BOT_INTERNAL_SECRET
 
 
-@app.get("/api/tg-registration-status/{tg_id}")
-async def tg_registration_status(tg_id: int, x_internal_secret: str | None = Header(None)):
-    """Только для бота: есть ли у этого tg_id подтверждённый аккаунт на сайте."""
-    if BOT_INTERNAL_SECRET and not _is_trusted_bot_call(x_internal_secret):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    user = await db.get_user_by_tg_id(tg_id)
-    return {"registered": bool(user and user.get("is_verified"))}
-
-
 @app.post("/api/tg-register-request-code")
 async def tg_register_request_code(body: dict):
     """Сайтовый флоу «Регистрация через Telegram»: перед созданием аккаунта
