@@ -2953,19 +2953,6 @@ async def get_prices():
     return {"ok": True, "prices": prices, "units": units_dict}
 
 
-@app.get("/api/check-tg-link")
-async def check_tg_link(phone: str):
-    """Проверяет, привязан ли телефон к Telegram боту, и есть ли уже аккаунт на сайте.
-    Лёгкий rate-limit против массового перебора номеров (user enumeration)."""
-    normalized = normalize_phone(phone)
-    if not await db.check_lookup_rate_limit(normalized, "check_tg_link"):
-        raise HTTPException(status_code=429, detail="Слишком много попыток, подождите")
-    tg_id = await db.get_tg_id_by_phone(normalized)
-    existing = await db.get_user_by_phone(normalized)
-    already_registered = bool(existing and existing.get("is_verified"))
-    return {"has_tg": tg_id is not None, "already_registered": already_registered}
-
-
 @app.post("/api/tg-phone-link")
 async def tg_phone_link(body: dict):
     """Бот вызывает этот endpoint когда клиент делится номером для привязки к сайту."""
@@ -3989,47 +3976,6 @@ def _is_trusted_bot_call(x_internal_secret: str | None) -> bool:
     if not BOT_INTERNAL_SECRET:
         return False
     return x_internal_secret == BOT_INTERNAL_SECRET
-
-
-@app.post("/api/tg-register-request-code")
-async def tg_register_request_code(body: dict):
-    """Сайтовый флоу «Регистрация через Telegram»: перед созданием аккаунта
-    отправляем одноразовый код в Telegram — иначе кто угодно, кто знает чужой
-    номер (когда-либо привязанный к боту), мог бы завершить регистрацию за
-    другого человека и сразу получить токен сессии (нашли на code review)."""
-    phone = normalize_phone((body.get("phone") or "").strip())
-    uz = (body.get("lang") or "ru") == "uz"
-    if not phone:
-        raise HTTPException(400, "Telefon raqami kerak" if uz else "Укажите номер телефона")
-
-    tg_id = await db.get_tg_id_by_phone(phone)
-    if not tg_id:
-        raise HTTPException(400,
-            "Bu raqam botda topilmadi. Avval bot bilan telefon raqamingizni ulashing."
-            if uz else
-            "Телефон не найден в боте. Сначала поделитесь номером через бота.")
-
-    existing = await db.get_user_by_phone(phone)
-    if existing and existing["is_verified"]:
-        raise HTTPException(400,
-            "Bu raqam allaqachon ro'yxatdan o'tgan" if uz
-            else "Этот номер уже зарегистрирован")
-
-    ok, err = await db.check_sms_rate_limit(phone, "tg_register")
-    if not ok:
-        raise HTTPException(status_code=429, detail=err)
-
-    code = generate_code()
-    expires_at = datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN)
-    await db.save_sms_code(phone, code, "tg_register", expires_at)
-
-    text = (
-        f"🔐 <b>ARTEZ</b> — код подтверждения регистрации:\n\n<code>{code}</code>\n\n⏱ Действителен {SMS_CODE_TTL_MIN} минут."
-        if not uz else
-        f"🔐 <b>ARTEZ</b> — ro'yxatdan o'tish tasdiqlash kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi."
-    )
-    await _send_tg_safe(tg_id, text)
-    return {"ok": True}
 
 
 @app.post("/api/register-via-tg")
