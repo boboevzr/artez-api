@@ -1563,10 +1563,7 @@ def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
             [p, h, r],
         ]}
     elif status == "delivered":
-        return {"inline_keyboard": [
-            [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
-            [p, h, r],
-        ]}
+        return {"inline_keyboard": [[p, h, r]]}
     elif status == "skipped":
         return {"inline_keyboard": [
             [{"text": "↩️ Отменить пропуск", "callback_data": f"rp:{order_id}:unskip"}],
@@ -7195,6 +7192,21 @@ async def staff_sms_toggles(staff=Depends(require_perm("orders"))):
         "sms_pickup_enabled": (await _get_cfg("sms_pickup_enabled")) == "true",
         "sms_ready_enabled":  (await _get_cfg("sms_ready_enabled"))  == "true",
     }
+
+
+@app.get("/api/staff/orders/{order_id}/sms-sent")
+async def staff_order_sms_sent(order_id: int, kind: str = "pickup", staff=Depends(require_perm("orders"))):
+    """Отправляли ли уже SMS этого вида (pickup/ready) по заказу хотя бы раз —
+    чтобы не спрашивать повторно модалкой при смене статуса, если уже отправили
+    (например, при создании заявки с позициями). Повтор — только вручную из
+    вкладки «Уведомления» (см. запрос пользователя 2026-08-08)."""
+    kind = kind if kind in ("pickup", "ready") else "pickup"
+    label = _SMS_KIND_LABEL.get(kind, "📲 SMS")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT 1 FROM order_activity WHERE order_id=$1 AND action='sms_sent' AND details LIKE $2 LIMIT 1",
+            order_id, f"{label}%")
+    return {"sent": row is not None}
 
 
 @app.get("/api/staff/my-route")
