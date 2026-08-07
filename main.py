@@ -4081,8 +4081,11 @@ async def _send_tg_safe(tg_id: int, text: str, reply_markup: dict | None = None)
 
 
 async def _notify_new_site_user(first_name: str, phone: str, method: str):
-    """Уведомляет группу и персональных сотрудников о новой регистрации."""
+    """Уведомляет группу новых клиентов о новой регистрации."""
     if not BOT_TOKEN:
+        return
+    group_id = await _get_cfg("new_clients_group_id")
+    if not group_id:
         return
     from datetime import datetime
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
@@ -4091,24 +4094,14 @@ async def _notify_new_site_user(first_name: str, phone: str, method: str):
         f"👤 {first_name}, 📞 <code>{phone}</code>, 🔐 {method_icon}, 🌐\n"
         f"📅 {now}"
     )
-    targets = []
-    group_id = await _get_cfg("new_clients_group_id")
-    if group_id:
-        targets.append(group_id)
     try:
-        staff_ids = await db.get_staff_notify_new_users()
-        targets.extend(str(tid) for tid in staff_ids)
+        async with aiohttp.ClientSession() as s:
+            await s.post(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+                json={"chat_id": str(group_id), "text": text, "parse_mode": "HTML"},
+                timeout=aiohttp.ClientTimeout(total=5))
     except Exception:
         pass
-    async with aiohttp.ClientSession() as s:
-        for chat_id in targets:
-            try:
-                await s.post(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                    json={"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"},
-                    timeout=aiohttp.ClientTimeout(total=5))
-            except Exception:
-                pass
 
 
 @app.delete("/api/admin/site-users/{user_id}")

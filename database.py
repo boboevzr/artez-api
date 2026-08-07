@@ -1264,15 +1264,6 @@ async def update_user_profile(user_id: int, first_name: str, address: str = None
         """, user_id, first_name, address, car_plate, osago_expiry)
 
 
-async def get_staff_notify_new_users():
-    """Возвращает tg_id сотрудников с включённым notify_new_users."""
-    if not pool: return []
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT tg_id FROM staff WHERE notify_new_users=TRUE AND tg_id IS NOT NULL AND active=TRUE")
-    return [r["tg_id"] for r in rows]
-
-
 async def update_tg_client(tg_id: int, data: dict):
     if not pool: return
     allowed = {"first_name", "last_name", "phone"}
