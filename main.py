@@ -4387,8 +4387,6 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                     detail=f"У {len(bad)} позиций замер провёл не мойщик — назначьте мойщика "
                            f"или откройте позицию, чтобы её мог взять мойщик")
 
-    _prev_order = await db.get_order_by_id(order_id)
-    _prev_status = _prev_order.get("status") if _prev_order else None
     order = await db.update_order_status(order_id, status,
                                           note=note or f"Статус изменён сотрудником {staff.get('login','')}")
     if status == 'packing' and packer_login:
@@ -4451,15 +4449,9 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
         except Exception as e:
             logging.warning(f"TG notify failed for order {order_id}: {e}")
 
-    # ── SMS клиенту при переходе в «Готов» (если включено в Тексты SMS) ──────
-    if status == "ready" and _prev_status != "ready":
-        try:
-            count = len(await db.get_order_items(order_id))
-            asyncio.create_task(_send_sms_notification(
-                "ready", order_id, order.get("client_phone", ""), order.get("order_num", ""),
-                count, "ru", staff.get("id"), staff.get("login", "")))
-        except Exception as e:
-            logging.warning(f"ready SMS trigger failed order={order_id}: {e}")
+    # SMS клиенту при переходе в «Готов» больше не шлётся молча отсюда — staff.html
+    # после успешной смены статуса сам спрашивает язык и шлёт через /send-sms
+    # (тот же паттерн, что при создании заявки с позициями, см. запрос 2026-08-08).
 
     # ── Синхронизировать stop_status в маршруте ──────────────────────────────
     # ── Комиссия агента при доставке ─────────────────────────────────────────
