@@ -7223,6 +7223,17 @@ async def manual_send_sms(order_id: int, req: ManualSmsRequest, staff=Depends(re
     return {"ok": True, "sent": sent, "reason": reason}
 
 
+@app.get("/api/staff/settings/sms-toggles")
+async def staff_sms_toggles(staff=Depends(require_perm("orders"))):
+    """Токены сотрудников (staff.html) не проходят get_admin (там sub=="admin" —
+    только суперадмин-логин), поэтому /admin/settings/site им недоступен. Отдельный
+    лёгкий staff-эндпоинт — только два тоглера, нужных модалке подтверждения SMS."""
+    return {
+        "sms_pickup_enabled": (await _get_cfg("sms_pickup_enabled")) == "true",
+        "sms_ready_enabled":  (await _get_cfg("sms_ready_enabled"))  == "true",
+    }
+
+
 @app.get("/api/staff/my-route")
 async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
