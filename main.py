@@ -7437,14 +7437,17 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
             FROM orders o WHERE o.id=$1
         """, order_id)
     if not row: raise HTTPException(404)
-    debt = max(0.0, float(row["items_total"]) - float(row["disc"]) - float(row["paid"]))
+    # Сумма к оплате всегда округляется вниз до 1000 (остаток < 1000 не входит в
+    # долг) — та же формула, что в staff.html/admin.html (_orderNet).
+    net_raw = max(0.0, float(row["items_total"]) - float(row["disc"]))
+    total = net_raw - (net_raw % 1000)
+    paid = float(row["paid"])
+    debt = max(0.0, total - paid)
     if debt <= 0: raise HTTPException(400, "Нет долга")
     order_num = row["order_num"] or str(order_id)
     client = " ".join(filter(None,[row["client_first_name"], row["client_last_name"]])) or "—"
     phone = row["client_phone"] or ""
     addr = row["short_address"] or row["address"] or "—"
-    total = max(0, float(row["items_total"]) - float(row["disc"]))
-    paid = float(row["paid"])
     driver_name = _driver_name(staff)
 
     def _fmtd(v): return f"{int(v):,}".replace(",", " ")
