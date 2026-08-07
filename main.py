@@ -2412,14 +2412,13 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
                     f"👷 {staff_name}\n"
                     f"━━━━━━━━━━"
                 )
-                keyboard = {"inline_keyboard": [[
-                    {"text": "✅ Принять", "callback_data": f"accept_{order_num}_0"},
-                    {"text": "❌ Отклонить", "callback_data": f"reject_{order_num}_0"},
-                ]]}
+                # Без кнопок Принять/Отклонить — заявка уже создана сотрудником в staff.html,
+                # группа только для быстрого просмотра админами/руководителями
+                # (см. запрос пользователя 2026-08-08).
                 async with aiohttp.ClientSession() as session:
                     await session.post(
                         f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                        json={"chat_id": staff_chat_id, "text": text, "reply_markup": keyboard,
+                        json={"chat_id": staff_chat_id, "text": text,
                               "parse_mode": "HTML", "disable_web_page_preview": True},
                         timeout=aiohttp.ClientTimeout(total=8),
                     )
