@@ -3381,6 +3381,49 @@ async def cancel_order(order_num: str, user = Depends(get_current_user)):
     return {"ok": True}
 
 
+@app.get("/api/orders/{order_num}/items")
+async def my_order_items(order_num: str, user = Depends(get_current_user)):
+    order = await db.get_order_by_num_and_phone(order_num, user["phone"])
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    items = await db.get_order_items(order["id"])
+    safe = [{
+        "id": it["id"], "service": it["service"],
+        "width_cm": it.get("width_cm"), "length_cm": it.get("length_cm"),
+        "sqm": it.get("sqm"), "price_per_sqm": it.get("price_per_sqm"),
+        "total_sum": it.get("total_sum"), "measure_status": it.get("measure_status"),
+    } for it in items]
+    return {"ok": True, "items": safe}
+
+
+@app.get("/api/orders/{order_num}/photos")
+async def my_order_photos(order_num: str, user = Depends(get_current_user)):
+    order = await db.get_order_by_num_and_phone(order_num, user["phone"])
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    photos = await db.get_order_photos(order["id"])
+    safe = [{
+        "id": p["id"], "photo_type": p.get("photo_type"),
+        "note": p.get("note"), "created_at": p.get("created_at"),
+    } for p in photos]
+    return {"ok": True, "photos": safe}
+
+
+@app.get("/api/orders/{order_num}/items/{item_id}/media")
+async def my_order_item_media(order_num: str, item_id: int, user = Depends(get_current_user)):
+    order = await db.get_order_by_num_and_phone(order_num, user["phone"])
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    items = await db.get_order_items(order["id"])
+    if not any(it["id"] == item_id for it in items):
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
+    media = await db.get_item_media(item_id)
+    safe = [{
+        "id": m["id"], "tg_file_type": m.get("tg_file_type"), "created_at": m.get("created_at"),
+    } for m in media]
+    return {"ok": True, "media": safe}
+
+
 async def notify_group_client_cancel(order: dict):
     if not BOT_TOKEN or not GROUP_ID:
         return
@@ -6366,13 +6409,18 @@ async def serve_order_photo(
     if not token:
         raise HTTPException(status_code=401)
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         raise HTTPException(status_code=401)
 
     row = await db.get_photo_by_id(photo_id)
     if not row:
         raise HTTPException(status_code=404)
+
+    if payload.get("type") != "staff":
+        order = await db.get_order_by_id(row["order_id"])
+        if not order or order.get("client_phone") != payload.get("phone"):
+            raise HTTPException(status_code=403)
 
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={row['tg_file_id']}") as r:
@@ -6394,13 +6442,18 @@ async def serve_item_media(
     if not token:
         raise HTTPException(status_code=401)
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
         raise HTTPException(status_code=401)
 
     row = await db.get_item_media_by_id(media_id)
     if not row:
         raise HTTPException(status_code=404)
+
+    if payload.get("type") != "staff":
+        order = await db.get_order_by_id(row["order_id"])
+        if not order or order.get("client_phone") != payload.get("phone"):
+            raise HTTPException(status_code=403)
 
     async with aiohttp.ClientSession() as s:
         async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={row['tg_file_id']}") as r:

@@ -1391,6 +1391,16 @@ async def get_orders_by_phone(phone: str):
         """, phone)
 
 
+async def get_order_by_num_and_phone(order_num: str, phone: str) -> dict:
+    """Заказ по номеру, только если принадлежит этому телефону — для проверки
+    владения перед выдачей клиенту позиций/фото/видео заказа."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM orders WHERE order_num=$1 AND client_phone=$2", order_num, phone)
+        return dict(row) if row else {}
+
+
 async def cancel_order_by_phone(order_num: str, phone: str):
     """Отменяет заказ со статусом 'new', принадлежащий этому номеру.
     Возвращает dict с данными заказа или None если не найден/нельзя отменить."""
