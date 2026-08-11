@@ -3403,7 +3403,7 @@ async def my_order_photos(order_num: str, user = Depends(get_current_user)):
         raise HTTPException(status_code=404, detail="Заказ не найден")
     photos = await db.get_order_photos(order["id"])
     safe = [{
-        "id": p["id"], "photo_type": p.get("photo_type"),
+        "id": p["id"], "photo_type": p.get("photo_type"), "tg_file_type": p.get("tg_file_type"),
         "note": p.get("note"), "created_at": p.get("created_at"),
     } for p in photos]
     return {"ok": True, "photos": safe}
