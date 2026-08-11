@@ -3419,7 +3419,8 @@ async def my_order_item_media(order_num: str, item_id: int, user = Depends(get_c
         raise HTTPException(status_code=404, detail="Позиция не найдена")
     media = await db.get_item_media(item_id)
     safe = [{
-        "id": m["id"], "tg_file_type": m.get("tg_file_type"), "created_at": m.get("created_at"),
+        "id": m["id"], "tg_file_type": m.get("tg_file_type"),
+        "created_at": m.get("created_at"), "created_by": m.get("created_by"),
     } for m in media]
     return {"ok": True, "media": safe}
 
