@@ -244,6 +244,11 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS deadline DATE DEFAULT NULL",
         # Замеры: причина отклонения
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS reject_note TEXT DEFAULT NULL",
+        # Название услуги на обоих языках (заполняется при сохранении из справочника —
+        # раньше service хранил готовую строку на языке интерфейса сотрудника в момент
+        # сохранения, из-за чего позиции показывались вперемешку RU/UZ клиенту)
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS service_ru TEXT DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS service_uz TEXT DEFAULT NULL",
         # Маршруты: хранить TG message_id отправленных сообщений водителям
         "ALTER TABLE routes ADD COLUMN IF NOT EXISTS tg_delivery_msg_ids JSONB DEFAULT NULL",
         # Маршруты логистики
@@ -3763,7 +3768,7 @@ async def create_empty_items_by_service(order_id: int, service_counts: dict[str,
 
 async def update_order_item(item_id: int, **kwargs) -> dict:
     if not pool: return {}
-    allowed = {"service", "width_cm", "length_cm", "sqm", "price_per_sqm"}
+    allowed = {"service", "service_ru", "service_uz", "width_cm", "length_cm", "sqm", "price_per_sqm"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
