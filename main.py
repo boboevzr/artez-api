@@ -632,7 +632,7 @@ async def _notify_new_lead(lead: dict, staff: dict):
     if role == "agent":
         source_full = f"🤝 {creator}" if creator and creator != "—" else "🤝 Агент"
     elif role == "site":
-        source_full = "🌐 Сайт"
+        source_full = "🌐 artez.uz"
     elif role == "bot":
         source_full = "✈️ Telegram"
     else:
