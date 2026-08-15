@@ -101,6 +101,7 @@ async def create_tables():
             unit            VARCHAR(20) DEFAULT 'sum/m2',
             unit_key        VARCHAR(20) DEFAULT 'm2',
             min_order       NUMERIC(10,2) DEFAULT NULL,
+            min_order_total NUMERIC(10,2) DEFAULT NULL,
             updated_at      TIMESTAMP DEFAULT NOW(),
             UNIQUE(service_key, type_key)
         );
@@ -136,6 +137,10 @@ async def create_tables():
         "ALTER TABLE orders ADD CONSTRAINT orders_source_check CHECK (source IN ('bot','site','staff'))",
         "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS unit_key  VARCHAR(20)   DEFAULT 'm2'",
         "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order NUMERIC(10,2) DEFAULT NULL",
+        # Мин. по заказу — порог по услуге, суммарно по ВСЕМ её позициям в заказе
+        # (отдельно от min_order — того, что применяется к ОДНОЙ позиции). См. запрос
+        # пользователя 2026-08-14.
+        "ALTER TABLE prices  ADD COLUMN IF NOT EXISTS min_order_total NUMERIC(10,2) DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS address    VARCHAR(200)  DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS car_plate  VARCHAR(20)   DEFAULT NULL",
         "ALTER TABLE users   ADD COLUMN IF NOT EXISTS osago_expiry DATE        DEFAULT NULL",
@@ -1719,12 +1724,12 @@ async def update_promotion(promo_id: int, **kwargs) -> dict | None:
 #  ЦЕНЫ (общая таблица с ботом)
 # ══════════════════════════════════════
 async def get_all_prices() -> dict:
-    """Возвращает все цены из таблицы prices: {service_key: {type_key: {price, unit_key, min_order}}}"""
+    """Возвращает все цены из таблицы prices: {service_key: {type_key: {price, unit_key, min_order, min_order_total}}}"""
     if not pool:
         return {}
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT service_key, type_key, price, unit_key, min_order FROM prices ORDER BY service_key, type_key"
+            "SELECT service_key, type_key, price, unit_key, min_order, min_order_total FROM prices ORDER BY service_key, type_key"
         )
     result = {}
     for r in rows:
@@ -1732,24 +1737,26 @@ async def get_all_prices() -> dict:
             "price": r["price"],
             "unit_key": r["unit_key"],
             "min_order": float(r["min_order"]) if r["min_order"] is not None else None,
+            "min_order_total": float(r["min_order_total"]) if r["min_order_total"] is not None else None,
         }
     return result
 
 
 async def set_price(service_key: str, type_key: str, price: int,
-                     unit_key: str = None, min_order=None) -> bool:
+                     unit_key: str = None, min_order=None, min_order_total=None) -> bool:
     if not pool:
         return False
     async with pool.acquire() as conn:
         await conn.execute("""
-            INSERT INTO prices (service_key, type_key, price, unit_key, min_order, updated_at)
-            VALUES ($1, $2, $3, COALESCE($4, 'm2'), $5, NOW())
+            INSERT INTO prices (service_key, type_key, price, unit_key, min_order, min_order_total, updated_at)
+            VALUES ($1, $2, $3, COALESCE($4, 'm2'), $5, $6, NOW())
             ON CONFLICT (service_key, type_key) DO UPDATE SET
-                price      = EXCLUDED.price,
-                unit_key   = COALESCE($4, prices.unit_key),
-                min_order  = $5,
-                updated_at = NOW()
-        """, service_key, type_key, price, unit_key, min_order)
+                price           = EXCLUDED.price,
+                unit_key        = COALESCE($4, prices.unit_key),
+                min_order       = $5,
+                min_order_total = $6,
+                updated_at      = NOW()
+        """, service_key, type_key, price, unit_key, min_order, min_order_total)
     return True
 
 

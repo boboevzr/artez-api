@@ -3645,6 +3645,8 @@ class SetPriceRequest(BaseModel):
     price: int
     unit_key: str = None
     min_order: float = None
+    min_order_total: float = None  # мин. по заказу — порог по услуге суммарно по всем
+                                    # её позициям в заказе (см. запрос пользователя 2026-08-14)
 
 class ServiceRequest(BaseModel):
     key: str
@@ -4187,7 +4189,10 @@ async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
         raise HTTPException(status_code=400, detail="Цена должна быть > 0")
     if req.min_order is not None and req.min_order <= 0:
         raise HTTPException(status_code=400, detail="Минимальный заказ должен быть > 0")
-    await db.set_price(req.service_key, req.type_key, req.price, unit_key=req.unit_key, min_order=req.min_order)
+    if req.min_order_total is not None and req.min_order_total <= 0:
+        raise HTTPException(status_code=400, detail="Минимальный заказ по услуге должен быть > 0")
+    await db.set_price(req.service_key, req.type_key, req.price, unit_key=req.unit_key,
+                        min_order=req.min_order, min_order_total=req.min_order_total)
     return {"ok": True}
 
 @app.get("/api/services")
@@ -4778,18 +4783,12 @@ class OrderItemRequest(BaseModel):
     width_cm: float | None = None
     length_cm: float | None = None
     price_per_sqm: float = 0
-    min_order: float | None = None  # мин. площадь позиции из прайса (см. запрос пользователя 2026-08-14) —
-                                     # фронт присылает это значение, когда услуга выбрана из справочника;
-                                     # если реально измеренная площадь меньше — оплачиваемая площадь (sqm,
-                                     # от которой считается total_sum) не может быть меньше этого порога.
 
 @app.post("/api/admin/orders/{order_id}/items")
 async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depends(get_current_staff)):
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
-    if req.min_order and sqm and sqm < req.min_order:
-        sqm = req.min_order
     item = await db.create_order_item(
         order_id=order_id, service=req.service, sqm=sqm or 0,
         price_per_sqm=req.price_per_sqm,
@@ -4810,8 +4809,6 @@ async def admin_update_order_item(order_id: int, item_id: int,
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
-    if req.min_order and sqm and sqm < req.min_order:
-        sqm = req.min_order
     # Fetch old values + position number for diff logging
     old = {}
     item_pos = None
