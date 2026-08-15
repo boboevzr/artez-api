@@ -6563,6 +6563,7 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                               action: str = Body(..., embed=True),
                               actual_width_cm: float = Body(None, embed=True),
                               actual_length_cm: float = Body(None, embed=True),
+                              quantity: float = Body(None, embed=True),
                               note: str = Body("", embed=True)):
     is_admin = staff.get("role") == "admin"
     if action == "submit" and not (staff.get("can_measure") or is_admin):
@@ -6572,9 +6573,12 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
     if action == "direct_approve" and not (staff.get("can_override_measure") or is_admin):
         raise HTTPException(status_code=403, detail="Нет прав для переопределения замера")
     if action == "submit":
-        if not actual_width_cm or not actual_length_cm:
-            raise HTTPException(status_code=400, detail="Укажите ширину и длину")
-        await db.save_measure_dims(item_id, actual_width_cm, actual_length_cm)
+        if quantity:
+            await db.save_measure_qty(item_id, quantity)
+        elif actual_width_cm and actual_length_cm:
+            await db.save_measure_dims(item_id, actual_width_cm, actual_length_cm)
+        else:
+            raise HTTPException(status_code=400, detail="Укажите ширину и длину или количество")
         media = await db.get_item_media(item_id)
         if not media:
             raise HTTPException(status_code=400, detail="Добавьте фото или видео замера")
@@ -6622,9 +6626,12 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         except Exception as _pe:
             logging.warning(f"measure approved push error: {_pe}")
     elif action == "direct_approve":
-        if not actual_width_cm or not actual_length_cm:
-            raise HTTPException(status_code=400, detail="Укажите ширину и длину")
-        item = await db.direct_approve_measure(item_id, actual_width_cm, actual_length_cm)
+        if quantity:
+            item = await db.direct_approve_measure_qty(item_id, quantity)
+        elif actual_width_cm and actual_length_cm:
+            item = await db.direct_approve_measure(item_id, actual_width_cm, actual_length_cm)
+        else:
+            raise HTTPException(status_code=400, detail="Укажите ширину и длину или количество")
     elif action == "reject":
         if not note:
             raise HTTPException(status_code=400, detail="Укажите причину отклонения")

@@ -3908,6 +3908,17 @@ async def save_measure_dims(item_id: int, width_cm: float, length_cm: float) -> 
         """, item_id, width_cm, length_cm, sqm)
         return dict(row) if row else {}
 
+async def save_measure_qty(item_id: int, quantity: float) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items
+            SET width_cm=NULL, length_cm=NULL, sqm=$2
+            WHERE id=$1 AND measure_status != 'approved'
+            RETURNING *
+        """, item_id, round(quantity, 3))
+        return dict(row) if row else {}
+
 async def update_item_washer(item_id: int, washer_login: str) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
@@ -4553,6 +4564,17 @@ async def direct_approve_measure(item_id: int, width_cm: float, length_cm: float
                    measure_status='approved', reject_note=NULL
              WHERE id=$1 RETURNING *
         """, item_id, width_cm, length_cm, sqm)
+        return dict(row) if row else {}
+
+async def direct_approve_measure_qty(item_id: int, quantity: float) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE order_items
+               SET width_cm=NULL, length_cm=NULL, sqm=$2,
+                   measure_status='approved', reject_note=NULL
+             WHERE id=$1 RETURNING *
+        """, item_id, round(quantity, 3))
         return dict(row) if row else {}
 
 async def reject_item_measure(item_id: int, note: str) -> dict:
