@@ -4179,7 +4179,7 @@ async def admin_get_prices(_=Depends(get_admin)):
 
 @app.put("/api/admin/prices")
 async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
-    SERVICE_KEYS = ["carpet","carpet_home","sofa","mattress","curtains"]
+    SERVICE_KEYS = [s["key"] for s in await db.get_services()]
     TYPE_KEYS    = ["standard","express"]
     if req.service_key not in SERVICE_KEYS:
         raise HTTPException(status_code=400, detail=f"Неверная услуга: {req.service_key}")
