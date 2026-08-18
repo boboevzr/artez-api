@@ -4540,7 +4540,7 @@ async def submit_item_measure(item_id: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_items SET measure_status='submitted', reject_note=NULL
-            WHERE id=$1 AND width_cm IS NOT NULL AND length_cm IS NOT NULL
+            WHERE id=$1 AND sqm IS NOT NULL
             RETURNING *
         """, item_id)
         return dict(row) if row else {}
