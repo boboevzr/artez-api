@@ -1914,7 +1914,10 @@ async def get_admin_orders(status: str = None, statuses: list = None, branch: st
     async with pool.acquire() as conn:
         conditions = []
         params = []
-        if statuses:
+        # statuses=[] (не None) значит «есть ограничение по этапам, но ни один не
+        # распознан» — должно скрывать ВСЁ (fail-closed), а не пропускать
+        # ограничение целиком, поэтому проверяем "is not None", а не truthiness.
+        if statuses is not None:
             allowed = set(statuses) & {status} if status else set(statuses)
             conditions.append(f"o.status = ANY(${len(params)+1}::text[])")
             params.append(list(allowed) if allowed else ["__none__"])
