@@ -1826,6 +1826,76 @@ async def delete_unit(key: str) -> bool:
     return result != "DELETE 0"
 
 
+_TYPE_NAMES_RU = {"standard": "Стандарт", "express": "Экспресс"}
+_TYPE_NAMES_UZ = {"standard": "Standart", "express": "Ekspress"}
+
+async def _price_match_maps() -> tuple[dict, dict]:
+    """{service_ru_label: (svcKey, typeKey)} и то же для UZ — реконструирует те же
+    подписи, что staff.html пишет в order_items.service_ru/service_uz при выборе
+    услуги из справочника (см. sifFindPriceMatch в staff.html)."""
+    prices   = await get_all_prices()
+    services = await get_services()
+    ru_map, uz_map = {}, {}
+    for s in services:
+        svc_key = s["key"]
+        if svc_key not in prices:
+            continue
+        for type_key in prices[svc_key]:
+            emoji = (s.get("emoji") or "").strip()
+            ru_label = f"{emoji} {s['name_ru']}".strip() + f" — {_TYPE_NAMES_RU.get(type_key, type_key)}"
+            uz_label = f"{emoji} {s['name_uz']}".strip() + f" — {_TYPE_NAMES_UZ.get(type_key, type_key)}"
+            ru_map[ru_label] = (svc_key, type_key)
+            uz_map[uz_label] = (svc_key, type_key)
+    return ru_map, uz_map
+
+async def get_orders_items_totals(order_ids: list[int]) -> dict[int, float]:
+    """Order-level 'Итого' с учётом мин.по.позиции/мин.по.заказу — та же логика,
+    что staffRenderItems() в staff.html (группировка по услуге, floor по каталогу).
+    Используется, чтобы список заказов не расходился с карточкой заказа."""
+    if not order_ids or not pool:
+        return {}
+    async with pool.acquire() as conn:
+        items = await conn.fetch(
+            "SELECT order_id, service, service_ru, service_uz, sqm, price_per_sqm, total_sum "
+            "FROM order_items WHERE order_id = ANY($1::int[])", order_ids)
+    prices = await get_all_prices()
+    ru_map, uz_map = await _price_match_maps()
+
+    def find_match(it):
+        return (ru_map.get(it["service_ru"]) or uz_map.get(it["service_uz"])
+                or ru_map.get(it["service"]) or uz_map.get(it["service"]))
+
+    groups: dict[tuple, dict] = {}
+    no_service_totals: dict[int, float] = {}
+    for it in items:
+        oid = it["order_id"]
+        if not it["service"]:
+            no_service_totals[oid] = no_service_totals.get(oid, 0.0) + float(it["total_sum"] or 0)
+            continue
+        m = find_match(it)
+        gkey = it["service_ru"] or (f"{m[0]}::{m[1]}" if m else it["service"])
+        g = groups.setdefault((oid, gkey), {"sqm": 0.0, "count": 0, "clamped": 0.0, "match": m})
+        sqm   = float(it["sqm"] or 0)
+        price = float(it["price_per_sqm"] or 0)
+        total = float(it["total_sum"] or 0)
+        g["sqm"]   += sqm
+        g["count"] += 1
+        catalog  = prices.get(m[0], {}).get(m[1]) if m else None
+        pos_min  = catalog.get("min_order") if catalog else None
+        g["clamped"] += (pos_min * price) if (pos_min and sqm and sqm < pos_min and price) else total
+
+    totals: dict[int, float] = dict(no_service_totals)
+    for (oid, _gkey), g in groups.items():
+        m = g["match"]
+        catalog   = prices.get(m[0], {}).get(m[1]) if m else None
+        group_min = catalog.get("min_order_total") if catalog else None
+        price     = catalog.get("price") if catalog else None
+        qty       = g["sqm"] if g["sqm"] > 0 else g["count"]
+        contribution = (group_min * price) if (group_min and qty < group_min and price) else g["clamped"]
+        totals[oid] = totals.get(oid, 0.0) + contribution
+    return totals
+
+
 async def get_admin_orders(status: str = None, limit: int = 50):
     if not pool:
         return []
@@ -1855,7 +1925,12 @@ async def get_admin_orders(status: str = None, limit: int = 50):
                 q.format(where="WHERE o.status=$2"), limit, status)
         else:
             rows = await conn.fetch(q.format(where=""), limit)
-        return rows
+        result = [dict(r) for r in rows]
+        totals = await get_orders_items_totals([r["id"] for r in result])
+        for r in result:
+            if r["id"] in totals:
+                r["items_total"] = totals[r["id"]]
+        return result
 
 
 # ══════════════════════════════════════
