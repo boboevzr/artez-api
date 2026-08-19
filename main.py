@@ -7957,6 +7957,55 @@ async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depe
 
 # ── Настройки сайта ──────────────────────────────────────────
 # Fallback: если в БД пусто — берём env-переменную, затем хардкод
+
+# Правила приёма и выдачи заказов — редактируется в админке (admin.html →
+# Настройки сайта), хранится как JSON-массив [{emoji,title_ru,text_ru,title_uz,text_uz}]
+# в config под ключом order_rules. Это дефолт для первого запуска / отсутствия записи в БД.
+_DEFAULT_ORDER_RULES = [
+    {
+        "emoji": "💰",
+        "title_ru": "ИНФОРМАЦИЯ О СТОИМОСТИ И РАЗМЕРАХ",
+        "text_ru": "Точные замеры изделий (в квадратных метрах), финальная стоимость услуг, действующие скидки и текущий статус выполнения заказа отображаются в Личном кабинете клиента на официальном сайте компании artez.uz, а также дублируются в Telegram-боте @artez_orders_bot после автоматической регистрации по номеру телефона заказчика.",
+        "title_uz": "NARX VA O'LCHAMLAR HAQIDA MA'LUMOT",
+        "text_uz": "Mahsulotlarning aniq o'lchamlari (kvadrat metrda), xizmatlarning yakuniy qiymati, amaldagi chegirmalar va buyurtmaning bajarilish holati mijozning telefon raqami orqali avtomatik ro'yxatdan o'tgandan so'ng artez.uz rasmiy saytadagi shaxsiy kabinetida hamda @artez_orders_bot Telegram-botida ko'rsatiladi."
+    },
+    {
+        "emoji": "📐",
+        "title_ru": "УСЛОВИЯ МИНИМАЛЬНОГО ЗАКАЗА",
+        "text_ru": "Компания принимает заказы на профессиональную стирку ковровых покрытий объемом не менее 10 м². Если суммарный объем (общая площадь) всех ковров в заказе составляет менее 10 м², оплата все равно взимается клиентом в полном объеме как за 10 м². (Например: при тарифе 13 000 сум за 1 м² минимальная стоимость любого заказа составит 130 000 сум, даже если фактическая площадь изделия меньше). Если площадь отдельного ковра составляет менее 1 кв.м, при расчете стоимости она округляется и учитывается как 1 кв.м.",
+        "title_uz": "MINIMAL BUYURTMA SHARTLARI",
+        "text_uz": "Kompaniya gilamlarni professional yuvish uchun kamida 10 m² hajmdagi buyurtmalarni qabul qiladi. Agar buyurtmadagi barcha gilamlarning umumiy maydoni 10 m² dan kam bo'lsa, to'lov baribir 10 m² uchun to'liq miqdorda undiriladi."
+    },
+    {
+        "emoji": "🩹",
+        "title_ru": "ОГРАНИЧЕНИЕ ГАРАНТИИ НА ВЫВЕДЕНИЕ ПЯТЕН",
+        "text_ru": "Исполнитель делает все возможное для удаления загрязнений, однако ПРИНИМАЮТСЯ БЕЗ ГАРАНТИИ полного выведения следующие виды пятен: застарелые пятна (находящиеся на изделии длительное время), а также пятна неизвестного происхождения; следы крови, мазута, автомобильных масел, зеленки, йода, парафина, воска, пластилина, жира; следы жевательной резинки, детских слаймов, рвотных масс, красного вина, ягод и натуральных соков; следы мочи и меток животных (пятна могут не уйти полностью, на светлых тканях возможны желтые разводы и остаточный запах); пятна ржавчины и плесени (после их удаления возможно истончение ткани или появление дыр); следы бытового или строительного клея, лакокрасочных материалов, маркеров и краски для волос; любые пятна на изделиях, которые заказчик пытался вывести самостоятельно с помощью бытовой химии.",
+        "title_uz": "DOG'LARNI KETKAZISHGA KAFOLAT CHEKLANISHI",
+        "text_uz": "Ijrochi ifloslanishlarni olib tashlash uchun barcha choralarni ko'radi, biroq quyidagi turdagi dog'lar to'liq ketishiga KAFOLATSIZ qabul qilinadi: eski dog'lar, qon, mazut, avtomobil moylari, zelenka, yod, parafin, mum, plastilin, yog' izlari; saqich, bolalar slaymlari, qusuq moddalari, qizil vino, rezavor mevalar va tabiiy sharbatlar izlari; hayvonlarning siydigi; zang va mog'or dog'lari; maishiy yoki qurilish yelimlarining izlari, lak-bo'yoq materiallari, markerlar va soch bo'yoqlari; shuningdek mijoz tomonidan mustaqil ravishda ketkazishga urinib ko'rilgan har qanday dog'lar."
+    },
+    {
+        "emoji": "⚠️",
+        "title_ru": "ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ ЗА ДЕФЕКТЫ И ЕСТЕСТВЕННЫЙ ИЗНОС",
+        "text_ru": "Химчистка полностью снимает с себя ответственность за результат оказания услуг и проявление негативных последствий в следующих случаях: отсутствие фабричной маркировки производителя, неправильная или недостаточная информация по разрешенной технологии чистки на ярлыке изделия; деформация, поломка или разрушение несъемной фурнитуры, декоративных элементов или клеевой основы; проявление скрытых дефектов, которые невозможно было обнаружить при визуальном осмотре в момент приема (например, ветхость нитей, гниение основы от сырости, заводской брак); проявление дефектов, вызванных естественным эксплуатационным износом изделия (потертости ворса, выцветание от солнца, расхождение старых, ветхих или ослабленных швов).",
+        "title_uz": "NUQSONLAR VA TABIIY ESKIRISH UCHUN JAVOBGARLIKDAN VOZ KECHISH",
+        "text_uz": "Kimyoviy tozalash quyidagi hollarda javobgarlikni to'liq o'zidan soqit qiladi: ishlab chiqaruvchining zavod yorlig'i bo'lmaganda; yechib olinmaydigan furnitura, dekorativ elementlar yoki yelim asosining deformatsiyasi, sinishi yoki parchalanishida; qabul qilish paytida aniqlash imkoni bo'lmagan yashirin nuqsonlar namoyon bo'lganda; mahsulotning tabiiy eskirishi natijasida yuzaga kelgan nuqsonlar namoyon bo'lganda (patlarning siyraklashishi, quyoshda rangning o'chishi, choklarning so'kilishi)."
+    },
+    {
+        "emoji": "⏱️",
+        "title_ru": "СРОКИ ВЫПОЛНЕНИЯ И ОТВЕТСТВЕННОЕ ХРАНЕНИЕ",
+        "text_ru": "Все заказы выполняются в стандартной форме в порядке общей очереди. Срочные заказы выполняются вне очереди в срок от 2 до 3 дней, при этом применяется наценка в размере 30% от базовой стоимости заказа. Срок бесплатного ответственного хранения готового изделия составляет 15 календарных дней с момента отправки клиенту уведомления о выполнении заказа (SMS, сайт или Telegram-бот).",
+        "title_uz": "BAJARISH MUDDATLARI VA JAVOBGARLIKKA SAQLASH",
+        "text_uz": "Barcha buyurtmalar standart shaklda, umumiy navbat tartibida bajariladi. Shoshilinch buyurtmalar navbatsiz 2 kundan 3 kungacha bo'lgan muddatda bajariladi, bunda buyurtmaning asosiy qiymatiga 30% miqdorida ustama narx qo'llaniladi. Tayyor mahsulotni bepul saqlash muddati bildirishnoma yuborilgan vaqtdan boshlab 15 kalendar kunini tashkil etadi."
+    },
+    {
+        "emoji": "📋",
+        "title_ru": "ПОРЯДОК ПРЕДЪЯВЛЕНИЯ ПРЕТЕНЗИЙ",
+        "text_ru": "Претензии по качеству оказанных услуг (выполненных работ) должны быть предъявлены заказчиком в момент приема-передачи готового заказа. Если по объективной причине заказчик не смог сразу осмотреть принимаемое готовое изделие, он имеет право предъявить мотивированные претензии к качеству в течение 10 календарных дней. По пошествии 3 дней с момента выдачи химчистка полностью снимает с себя всякую ответственность, и заказ считается выполненным качественно.",
+        "title_uz": "E'TIROZLARNI BILDIRISH TARTIBI",
+        "text_uz": "Ko'rsatilgan xizmatlar sifati bo'yicha e'tirozlar mijoz tomonidan tayyor buyurtmani qabul qilib olish vaqtida bildirilishi kerak. Agar obyektiv sabablarga ko'ra mijoz tayyor mahsulotni darhol ko'zdan kechira olmagan bo'lsa, u 10 kalendar kuni ichida sifat bo'yicha asoslantirilgan e'tirozlarni bildirish huquqiga ega. Mahsulot topshirilgan vaqtdan boshlab 10 kun o'tgach, kimyoviy tozalash har qanday javobgarlikni to'liq o'zidan soqit qiladi."
+    },
+]
+
 SITE_SETTINGS_DEFAULTS = {
     # Соцсети
     "social_instagram":    "https://www.instagram.com/ziyoboboev/",
@@ -8045,6 +8094,8 @@ SITE_SETTINGS_DEFAULTS = {
     "site_video_enabled":      "false",
     "site_video_placement":    "hero",  # hero | how_it_works | reviews | floating
     "sms_registration_enabled": "true",
+    # Правила приёма и выдачи заказов — JSON-массив [{emoji,title,text}]
+    "order_rules": _json.dumps(_DEFAULT_ORDER_RULES, ensure_ascii=False),
 }
 
 async def _get_cfg(key: str) -> str:
@@ -8067,6 +8118,7 @@ async def get_site_settings():
         "osago_partner_phone", "osago_partner_promo",
         "site_video_enabled", "site_video_placement",
         "sms_registration_enabled",
+        "order_rules",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -8134,6 +8186,7 @@ class SiteSettings(BaseModel):
     site_video_enabled:      str | None = None
     site_video_placement:    str | None = None
     sms_registration_enabled: str | None = None
+    order_rules:             str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
