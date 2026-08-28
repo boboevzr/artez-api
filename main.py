@@ -8129,6 +8129,10 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_registration_enabled": "true",
     # Правила приёма и выдачи заказов — JSON-массив [{emoji,title,text}]
     "order_rules": _json.dumps(_DEFAULT_ORDER_RULES, ensure_ascii=False),
+    # Режим "техработ" сайта/бота — как в SaaS-версии (CLEANO-SAAS-API), но без
+    # per-company scoping (прод — один тенант). Дефолт "false".
+    "site_maintenance_mode": "false",
+    "bot_maintenance_mode": "false",
 }
 
 async def _get_cfg(key: str) -> str:
@@ -8151,7 +8155,7 @@ async def get_site_settings():
         "osago_partner_phone", "osago_partner_promo",
         "site_video_enabled", "site_video_placement",
         "sms_registration_enabled",
-        "order_rules",
+        "order_rules", "site_maintenance_mode",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -8220,6 +8224,8 @@ class SiteSettings(BaseModel):
     site_video_placement:    str | None = None
     sms_registration_enabled: str | None = None
     order_rules:             str | None = None
+    site_maintenance_mode:   str | None = None
+    bot_maintenance_mode:    str | None = None
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
