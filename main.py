@@ -657,11 +657,28 @@ async def _notify_new_lead(lead: dict, staff: dict):
         note_first = note_first[5:]
     note_inline = f" · {note_first}" if note_first else ""
 
+    # branch_line — прод всегда двухфилиальный (Зарафшан/Навои), поэтому филиал в
+    # сообщении показываем всегда, когда он указан (в отличие от SaaS, где для
+    # однофилиальной компании эта строка была бы лишней — там branch_line считается
+    # по факту числа активных филиалов конкретной компании).
+    branch_line = f"🏢 {branch_ru(branch)}\n" if branch else ""
+
+    # Кр. адрес приоритетнее полного — то же поле, что видно в карточке лида/заказа
+    # как "Кр. адрес".
+    address = lead.get("short_address") or lead.get("address") or "—"
+
+    pickup_line = ""
+    if lead.get("pickup_date"):
+        pickup_line = f"📅 {lead['pickup_date']} {lead.get('pickup_time') or ''}".rstrip() + "\n"
+
     vars_ = {
         "lead_code":     lead.get("lead_code") or f"#{lead.get('id')}",
         "client_name":   lead.get("client_name") or "—",
         "client_phone":  lead.get("client_phone") or "—",
         "branch":        branch_ru(branch) if branch else "—",
+        "branch_line":   branch_line,
+        "address":       address,
+        "pickup_line":   pickup_line,
         "note":          note_full or "—",
         "note_short":    note_first,
         "note_inline":   note_inline,
@@ -8104,15 +8121,19 @@ SITE_SETTINGS_DEFAULTS = {
     "leads_group_enabled": "0",
     "lead_notify_ru": (
         "🎯 {lead_code} · {source_full}\n"
-        "👤 {client_name}  📞 {client_phone}\n"
-        "🏢 {branch}{note_inline}\n"
-        "{location_link}"
+        "{branch_line}📍 {address}\n"
+        "📞 {client_phone}\n"
+        "👤 {client_name}\n"
+        "📝 {note}\n"
+        "{pickup_line}{location_link}"
     ),
     "lead_notify_uz": (
         "🎯 {lead_code} · {source_full}\n"
-        "👤 {client_name}  📞 {client_phone}\n"
-        "🏢 {branch}{note_inline}\n"
-        "{location_link}"
+        "{branch_line}📍 {address}\n"
+        "📞 {client_phone}\n"
+        "👤 {client_name}\n"
+        "📝 {note}\n"
+        "{pickup_line}{location_link}"
     ),
     "callback_overdue_minutes": "10",
     # Комиссия агентов за лиды
