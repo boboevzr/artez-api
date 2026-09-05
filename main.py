@@ -716,9 +716,45 @@ async def _notify_new_lead(lead: dict, staff: dict):
         if keyboard:
             payload["reply_markup"] = keyboard
         async with aiohttp.ClientSession() as s:
-            await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
+            async with s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                res = await r.json()
+        # Сохраняем chat_id/message_id/текст — понадобится, чтобы отредактировать ЭТО
+        # сообщение (убрать кнопку "Взять лид", дописать "✅ Взял(а): Имя"), если лид
+        # возьмут через веб (admin.html/staff.html), а не нажатием кнопки в Telegram.
+        if res.get("ok") and lead_id and keyboard:
+            msg_id = res["result"]["message_id"]
+            asyncio.create_task(db.set_lead_tg_message(lead_id, int(group_id), msg_id, msg_text))
     except Exception as e:
         logging.warning(f"_notify_new_lead error: {e}")
+
+
+async def _tg_mark_lead_taken(lead_id: int, staff_name: str, gender: str = ""):
+    """Взятие лида через веб (admin.html/staff.html) раньше никак не отражалось на
+    уведомлении в TG-группе — кнопка "Взять лид" исчезала только если нажать её
+    прямо в Telegram (см. cb_take_lead в bot.py). Редактирует то же сообщение:
+    убирает кнопку и дописывает "✅ Взял(а): Имя", как и при нажатии кнопки."""
+    if not db.pool or not BOT_TOKEN:
+        return
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT tg_chat_id, tg_message_id, tg_msg_text FROM leads WHERE id=$1", lead_id)
+    if not row or not row["tg_chat_id"] or not row["tg_message_id"] or not row["tg_msg_text"]:
+        return
+    verb = "Взяла" if gender == "F" else "Взял"
+    new_text = row["tg_msg_text"].rstrip("━" * 10).rstrip() + f"\n{'━'*10}\n✅ {verb}: {staff_name}"
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText"
+        payload = {
+            "chat_id": row["tg_chat_id"],
+            "message_id": row["tg_message_id"],
+            "text": new_text,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": []},
+        }
+        async with aiohttp.ClientSession() as s:
+            await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
+    except Exception as e:
+        logging.warning(f"_tg_mark_lead_taken error: {e}")
 
 
 # ══════════════════════════════════════
@@ -1971,6 +2007,8 @@ async def assign_lead(lead_id: int, body: dict = Body({}),
                 raise HTTPException(status_code=409, detail="Лид уже взят другим сотрудником")
             await conn.execute("UPDATE leads SET assigned_to=$1 WHERE id=$2", staff_id, lead_id)
             note = f"Лид взят: {staff.get('first_name','')} {staff.get('last_name','')}".strip()
+            staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','')
+            asyncio.create_task(_tg_mark_lead_taken(lead_id, staff_name, staff.get("gender", "")))
         else:
             row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
             if not row:
