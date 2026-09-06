@@ -45,7 +45,12 @@ async def init_db():
     if not DB_URL:
         logging.warning("DATABASE_URL not set, DB disabled")
         return
-    pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=5)
+    # max_size=5 (было) исчерпывался под живой нагрузкой — pool.acquire() у asyncpg
+    # не имеет таймаута по умолчанию, поэтому при исчерпании пула ЛЮБОЙ запрос к БД
+    # (включая логин) зависал навечно вместо ошибки (инцидент 06.09, artez.uz
+    # не отвечал). Учитывая и фоновые задачи (push, TG-уведомления), которые тоже
+    # забирают соединение из этого же пула, поднят запас.
+    pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=20)
     await create_tables()
     # Загружаем timezone из settings в кеш
     try:
