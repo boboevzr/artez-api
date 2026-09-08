@@ -8079,6 +8079,20 @@ async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depe
 # Правила приёма и выдачи заказов — редактируется в админке (admin.html →
 # Настройки сайта), хранится как JSON-массив [{emoji,title_ru,text_ru,title_uz,text_uz}]
 # в config под ключом order_rules. Это дефолт для первого запуска / отсутствия записи в БД.
+# Конструктор печати списка заказов (staff.html, кнопка 🖨 в режиме "☑️ Выбрать")
+# — блоки строки на 80мм-ленте, каждый со своим стилем. id блока фиксирован
+# (используется в рендере на фронте), остальное настраивается в admin.html.
+_DEFAULT_BULK_PRINT_TEMPLATE = [
+    {"id": "order_num",   "label": "Номер заказа", "enabled": True,  "fontSize": 15, "bold": True,  "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 2},
+    {"id": "address",     "label": "Адрес",         "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Адрес: "},
+    {"id": "items",       "label": "Позиции",       "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0},
+    {"id": "client_name", "label": "ФИО клиента",   "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "ФИО: "},
+    {"id": "phone",       "label": "Телефон",       "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Тел: "},
+    {"id": "total",       "label": "Итого",         "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Итого: "},
+    {"id": "payment",     "label": "Оплачено/К оплате", "enabled": True, "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0},
+    {"id": "separator",   "label": "Разделитель между заказами", "enabled": True, "thickness": 3, "marginTop": 6, "marginBottom": 6},
+]
+
 _DEFAULT_ORDER_RULES = [
     {
         "emoji": "💰",
@@ -8218,6 +8232,8 @@ SITE_SETTINGS_DEFAULTS = {
     "sms_registration_enabled": "true",
     # Правила приёма и выдачи заказов — JSON-массив [{emoji,title,text}]
     "order_rules": _json.dumps(_DEFAULT_ORDER_RULES, ensure_ascii=False),
+    # Конструктор печати списка заказов — JSON-массив блоков (см. _DEFAULT_BULK_PRINT_TEMPLATE)
+    "bulk_print_template": _json.dumps(_DEFAULT_BULK_PRINT_TEMPLATE, ensure_ascii=False),
     # Режим "техработ" сайта/бота — как в SaaS-версии (CLEANO-SAAS-API), но без
     # per-company scoping (прод — один тенант). Дефолт "false".
     "site_maintenance_mode": "false",
@@ -8309,6 +8325,7 @@ class SiteSettings(BaseModel):
     receipt_header_text: str | None = None
     receipt_slogan:      str | None = None
     receipt_footer_note: str | None = None
+    bulk_print_template: str | None = None
     site_video_enabled:      str | None = None
     site_video_placement:    str | None = None
     sms_registration_enabled: str | None = None
@@ -8327,6 +8344,18 @@ async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
     for key, val in data.items():
         await db.set_config(key, val)
     return {"ok": True}
+
+@app.get("/api/staff/print-template")
+async def get_bulk_print_template(_=Depends(get_current_staff)):
+    """Шаблон печати списка заказов (конструктор в admin.html) — читается
+    staff.html при печати выбранных заказов. Доступен любому авторизованному
+    сотруднику (только чтение), редактируется только из admin.html."""
+    raw = await _get_cfg("bulk_print_template")
+    try:
+        blocks = _json.loads(raw) if raw else _DEFAULT_BULK_PRINT_TEMPLATE
+    except Exception:
+        blocks = _DEFAULT_BULK_PRINT_TEMPLATE
+    return {"ok": True, "blocks": blocks}
 
 
 # ── Видео-карточка на главной странице сайта ─────────────────────────────
