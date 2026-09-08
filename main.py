@@ -8084,12 +8084,12 @@ async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depe
 # (используется в рендере на фронте), остальное настраивается в admin.html.
 _DEFAULT_BULK_PRINT_TEMPLATE = [
     {"id": "order_num",   "label": "Номер заказа", "enabled": True,  "fontSize": 15, "bold": True,  "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 2},
-    {"id": "address",     "label": "Адрес",         "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Адрес: "},
+    {"id": "address",     "label": "Адрес",         "enabled": True,  "fontSize": 15, "bold": True,  "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Адрес: "},
     {"id": "items",       "label": "Позиции",       "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0},
-    {"id": "client_name", "label": "ФИО клиента",   "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "ФИО: "},
-    {"id": "phone",       "label": "Телефон",       "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Тел: "},
-    {"id": "total",       "label": "Итого",         "enabled": True,  "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Итого: "},
-    {"id": "payment",     "label": "Оплачено/К оплате", "enabled": True, "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0},
+    {"id": "client_name", "label": "ФИО клиента",   "enabled": True,  "fontSize": 14, "bold": True,  "italic": True,  "underline": False, "fontFamily": "inherit", "marginTop": 7, "marginBottom": 0, "prefix": "ФИО: "},
+    {"id": "phone",       "label": "Телефон",       "enabled": True,  "fontSize": 15, "bold": True,  "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 0, "marginBottom": 0, "prefix": "Тел: "},
+    {"id": "total",       "label": "Итого",         "enabled": True,  "fontSize": 16, "bold": True,  "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 8, "marginBottom": 0, "prefix": "Итого: "},
+    {"id": "payment",     "label": "Оплачено/К оплате", "enabled": True, "fontSize": 13, "bold": False, "italic": False, "underline": False, "fontFamily": "inherit", "marginTop": 8, "marginBottom": 0},
     {"id": "separator",   "label": "Разделитель между заказами", "enabled": True, "thickness": 3, "marginTop": 6, "marginBottom": 6},
 ]
 
