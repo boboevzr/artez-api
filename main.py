@@ -39,12 +39,10 @@ VAPID_PUBLIC   = os.getenv("VAPID_PUBLIC", "")
 BOT_TOKEN          = os.getenv("BOT_TOKEN", "")
 BOT_INTERNAL_SECRET = os.getenv("BOT_INTERNAL_SECRET", "")
 GROUP_ID              = os.getenv("GROUP_ID", "")
-GROUP_ID_ZARAFSHAN    = os.getenv("GROUP_ID_ZARAFSHAN", "")
 LEADS_GROUP_ID        = os.getenv("LEADS_GROUP_ID", "-1004486597965")
 GROUP_NEW_CLIENTS_ID  = os.getenv("GROUP_NEW_CLIENTS_ID", "-1003768571929")
 GROUP_DELIVERY_ZARAFSHAN_CHANNEL = os.getenv("GROUP_DELIVERY_ZARAFSHAN_CHANNEL", "-1004483444044")
 GROUP_DELIVERY_NAVOI_CHANNEL     = os.getenv("GROUP_DELIVERY_NAVOI_CHANNEL", "-1004483444044")
-GROUP_ID_NAVOI     = os.getenv("GROUP_ID_NAVOI", "")
 MEDIA_CHANNEL_ID   = os.getenv("MEDIA_CHANNEL_ID", "-1004453880659")
 APP_URL            = os.getenv("APP_URL", "")  # https://your-app.railway.app
 
@@ -2424,7 +2422,6 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             staff_label = f"{staff_label} (@{login})"
         branch = req.branch or staff.get("branch") or ""
         location = req.location or ""
-        location_address = req.location_address or ""
         note_full = f"📱 Заявка от сотрудника: {staff_label}" + (f"\n{req.note}" if req.note else "")
         await db.save_site_order({
             "order_num":   order_num,
@@ -2445,51 +2442,6 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "note":        note_full,
             "total_price": None,
         }, source="staff")
-        # Уведомление в Telegram — строим текст вручную, без Pydantic
-        if BOT_TOKEN:
-            staff_chat_id = await _group_id_for_branch(branch)
-            if staff_chat_id:
-                full_name = req.first_name
-                staff_name = staff_label
-                if location:
-                    try:
-                        lat, lon = location.split(",", 1)
-                        yandex_url = f"https://yandex.uz/maps/?pt={lon.strip()},{lat.strip()}&z=16"
-                        link_text = location_address if location_address else f"{lat.strip()}, {lon.strip()}"
-                        loc_line = f"\n🗺 <a href=\"{yandex_url}\">{link_text}</a>"
-                    except Exception:
-                        loc_line = f"\n🗺 {location_address or location}"
-                else:
-                    loc_line = ""
-                SERVICE_RU = {
-                    "carpet":      "Ковры",
-                    "carpet_home": "Ковры на дому",
-                    "sofa":        "Диваны",
-                    "mattress":    "Матрасы",
-                    "curtains":    "Шторы",
-                }
-                service_ru = SERVICE_RU.get(req.service, req.service or "—")
-                text = (
-                    f"📱 Заявка от сотрудника {order_num}\n"
-                    f"━━━━━━━━━━\n"
-                    f"👤 {full_name}\n"
-                    f"📞 {req.phone}\n"
-                    f"🏢 {branch_ru(branch)}\n"
-                    f"🧺 {service_ru}\n"
-                    f"🏠 {req.short_address or req.address or '—'}{(' | ' + req.address) if req.short_address and req.address and req.short_address != req.address else ''}{loc_line}\n"
-                    f"👷 {staff_name}\n"
-                    f"━━━━━━━━━━"
-                )
-                # Без кнопок Принять/Отклонить — заявка уже создана сотрудником в staff.html,
-                # группа только для быстрого просмотра админами/руководителями
-                # (см. запрос пользователя 2026-08-08).
-                async with aiohttp.ClientSession() as session:
-                    await session.post(
-                        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-                        json={"chat_id": staff_chat_id, "text": text,
-                              "parse_mode": "HTML", "disable_web_page_preview": True},
-                        timeout=aiohttp.ClientTimeout(total=8),
-                    )
         # Авто-регистрация клиента в CRM
         await db.upsert_crm_client(
             phone=req.phone,
@@ -3571,91 +3523,6 @@ def branch_ru(branch: str) -> str:
     if not branch: return "—"
     key = branch.lower().replace("📍", "").strip()
     return BRANCH_RU.get(key, branch.strip("📍 ").strip())
-
-async def _group_id_for_branch(branch: str) -> str:
-    """Возвращает chat_id группы для указанного филиала (из БД или env)."""
-    if branch in ("zarafshan", "Зарафшан"):
-        gid = await _get_cfg("tg_group_zarafshan")
-        return gid or GROUP_ID
-    if branch in ("navoi", "Навои"):
-        gid = await _get_cfg("tg_group_navoi")
-        return gid or GROUP_ID
-    return GROUP_ID
-
-async def notify_group_new_order(order_num: str, data: "OrderRequest"):
-    if not BOT_TOKEN:
-        logging.warning("BOT_TOKEN not set — skipping group notification")
-        return
-    chat_id = await _group_id_for_branch(getattr(data, "branch", "") or "")
-    if not chat_id:
-        logging.warning("No GROUP_ID configured — skipping group notification")
-        return
-
-    full_name = f"{data.first_name} {data.last_name}".strip()
-
-    # Строим ссылку на Яндекс Карты, если есть координаты
-    location_url = None
-    loc_display = "—"
-    if data.location:
-        try:
-            lat_s, lon_s = data.location.split(",", 1)
-            location_url = f"https://yandex.uz/maps/?pt={lon_s.strip()},{lat_s.strip()}&z=16"
-        except Exception:
-            pass
-        loc_display = data.location_address if data.location_address else data.location
-
-    def he(s):
-        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;") if s else "—"
-
-    loc_line = f'🗺 <a href="{location_url}">{he(loc_display)}</a>' if location_url else f"🗺 {he(loc_display)}"
-
-    if data.is_quick:
-        text = (
-            f"⚡ Быстрая заявка {order_num} (сайт)\n"
-            f"━━━━━━━━━━\n"
-            f"👤 {he(full_name)}\n"
-            f"📞 {he(data.phone)}\n"
-            f"━━━━━━━━━━"
-        )
-    else:
-        text = (
-            f"🌐 Новая заявка {order_num} (сайт)\n"
-            f"━━━━━━━━━━\n"
-            f"👤 {he(full_name)}\n"
-            f"📞 {he(data.phone)}\n"
-            f"🏢 {he(branch_ru(data.branch))}\n"
-            f"📍 {he(data.city)}\n"
-            f"🏠 {he(data.address)}\n"
-            f"{loc_line}\n"
-            f"🧺 {he(data.service)}\n"
-            f"⚙️ {he(data.service_type)}\n"
-            f"📅 {he(data.pickup_date)}\n"
-            f"🕐 {he(data.pickup_time)}\n"
-            f"━━━━━━━━━━"
-        )
-
-    kb_rows = []
-    kb_rows.extend([
-        [{"text": "✅ Принять заказ", "callback_data": f"accept_{order_num}_0"}],
-        [
-            {"text": "🚗 Назначить водителя", "callback_data": f"driver_{order_num}_0"},
-            {"text": "❌ Отклонить", "callback_data": f"reject_{order_num}_0"},
-        ],
-    ])
-    keyboard = {"inline_keyboard": kb_rows}
-
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": chat_id, "text": text, "reply_markup": keyboard, "parse_mode": "HTML", "disable_web_page_preview": True}
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    logging.warning(f"Telegram notify failed: {resp.status} {body}")
-    except Exception as e:
-        logging.warning(f"Telegram notify error: {e}")
-
 
 # ══════════════════════════════════════
 #  GOOGLE-ТАБЛИЦА — ТА ЖЕ, КУДА ПИШЕТ БОТ
@@ -8162,9 +8029,6 @@ SITE_SETTINGS_DEFAULTS = {
     "branch_navoi_location":       "",
     # Telegram бот — fallback из env
     "tg_bot_token":        BOT_TOKEN,
-    "tg_group_id":         GROUP_ID,
-    "tg_group_zarafshan":  GROUP_ID_ZARAFSHAN,
-    "tg_group_navoi":      GROUP_ID_NAVOI,
     "tg_group_sms_id":     os.getenv("GROUP_SMS_ID", ""),
     # Яндекс Карты — fallback из env
     "yandex_maps_key":     os.getenv("YANDEX_MAPS_KEY", ""),
@@ -8293,9 +8157,6 @@ class SiteSettings(BaseModel):
     delivery_channel_zarafshan_link:  str | None = None
     delivery_channel_navoi_link:      str | None = None
     tg_bot_token:        str | None = None
-    tg_group_id:         str | None = None
-    tg_group_zarafshan:  str | None = None
-    tg_group_navoi:      str | None = None
     tg_group_sms_id:     str | None = None
     yandex_maps_key:     str | None = None
     eskiz_email:         str | None = None
@@ -8813,59 +8674,6 @@ async def create_bot_lead(req: BotLeadRequest, x_bot_token: str = Header(None, a
 
     return {"ok": True, "lead_code": lead_code, "lead_id": (lead or {}).get("id")}
 
-
-
-async def _notify_group_site_lead(lead_code: str, data: "OrderRequest", lead_id: int = None):
-    """Telegram: новый лид с сайта — кнопка Взять лид прямо в группе."""
-    if not BOT_TOKEN:
-        return
-    chat_id = await _group_id_for_branch(data.branch or "")
-    if not chat_id:
-        return
-
-    def he(s):
-        return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;") if s else "—"
-
-    full_name = f"{data.first_name} {data.last_name}".strip()
-
-    if data.is_quick:
-        text = (
-            f"🎯 Новый лид <b>{lead_code}</b> — быстрая заявка (сайт)\n"
-            f"━━━━━━━━━━\n"
-            f"👤 {he(full_name)}\n"
-            f"📞 {he(data.phone)}\n"
-            f"━━━━━━━━━━"
-        )
-    else:
-        lines = [
-            f"🎯 Новый лид <b>{lead_code}</b> (сайт)",
-            f"━━━━━━━━━━",
-            f"👤 {he(full_name)}",
-            f"📞 {he(data.phone)}",
-        ]
-        if data.branch:      lines.append(f"🏢 {he(branch_ru(data.branch))}")
-        if data.city:        lines.append(f"📍 {he(data.city)}")
-        if data.address:     lines.append(f"🏠 {he(data.address)}")
-        if data.service:     lines.append(f"🧺 {he(data.service)}")
-        if data.pickup_date: lines.append(f"📅 {he(data.pickup_date)} {he(data.pickup_time)}".rstrip())
-        lines.append("━━━━━━━━━━")
-        text = "\n".join(lines)
-
-    keyboard = None
-    if lead_id:
-        keyboard = {"inline_keyboard": [[
-            {"text": "✋ Взять лид", "callback_data": f"take_lead_{lead_id}"}
-        ]]}
-
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": str(chat_id), "text": text, "parse_mode": "HTML"}
-        if keyboard:
-            payload["reply_markup"] = keyboard
-        async with aiohttp.ClientSession() as s:
-            await s.post(url, json=payload, timeout=aiohttp.ClientTimeout(total=8))
-    except Exception as e:
-        logging.warning(f"_notify_group_site_lead error: {e}")
 
 
 # ── ОБСЛУЖИВАНИЕ БД ──────────────────────────────────────────────────────────
