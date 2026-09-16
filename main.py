@@ -1152,6 +1152,7 @@ def _staff_public(s: dict) -> dict:
         "can_edit_confirmed":  s.get("can_edit_confirmed", False),
         "can_send_pickup":     s.get("can_send_pickup", False),
         "can_edit_delivery":   s.get("can_edit_delivery", False),
+        "can_edit_price":      s.get("can_edit_price", False),
         "can_accept_payment":  s.get("can_accept_payment", False),
         "can_manage_cash":     s.get("can_manage_cash", False),
         "can_approve_debt":    s.get("can_approve_debt", False),
@@ -4753,6 +4754,18 @@ async def admin_bulk_create_items(order_id: int, count: int = Body(..., embed=Tr
 @app.put("/api/admin/orders/{order_id}/items/{item_id}")
 async def admin_update_order_item(order_id: int, item_id: int,
                                    req: OrderItemRequest, staff=Depends(get_current_staff)):
+    # Позиции (в т.ч. цену) нельзя менять на поздних статусах — кроме админа
+    # и сотрудников с отдельным правом can_edit_price (см. запрос пользователя 2026-09-16:
+    # менеджеры не замечали примечание о скидке клиенту, а на "Доставке" исправить
+    # цену было нельзя даже им — приходилось откатывать статус на "Мойку").
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    can_bypass_lock = staff.get("role") == "admin" or staff.get("can_edit_price", False)
+    locked_statuses = {"delivered", "cancelled"} if can_bypass_lock \
+        else {"packing", "ready", "delivery", "delivered", "cancelled"}
+    if order.get("status") in locked_statuses:
+        raise HTTPException(status_code=403, detail="Редактирование позиций недоступно в этом статусе заказа")
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
@@ -6959,6 +6972,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_edit_confirmed:   bool = Body(False, embed=True),
     can_send_pickup:      bool = Body(False, embed=True),
     can_edit_delivery:    bool = Body(False, embed=True),
+    can_edit_price:       bool = Body(False, embed=True),
     can_accept_payment:   bool = Body(False, embed=True),
     can_manage_cash:      bool = Body(False, embed=True),
     notify_new_users:     bool = Body(False, embed=True),
@@ -6977,20 +6991,21 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
                    can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17,
-                   hide_client_phone=$18
+                   hide_client_phone=$18, can_edit_price=$19
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
                          can_create_order, can_confirm_order, order_stages,
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users,
-                         can_approve_debt, can_drive, can_view_timesheet, hide_client_phone""",
+                         can_approve_debt, can_drive, can_view_timesheet, hide_client_phone,
+                         can_edit_price""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
             can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt,
-            can_drive, can_view_timesheet, hide_client_phone)
+            can_drive, can_view_timesheet, hide_client_phone, can_edit_price)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
