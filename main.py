@@ -831,6 +831,8 @@ class OrderRequest(BaseModel):
     delivery_address: str = ""
     location: str = ""
     location_address: str = ""
+    delivery_location: str = ""
+    delivery_location_address: str = ""
     service: str = ""
     service_type: str = ""
     pickup_date: str = ""
@@ -887,6 +889,8 @@ class StaffOrderRequest(BaseModel):
     delivery_short_address: str = ""
     location: str = ""
     location_address: str = ""
+    delivery_location: str = ""
+    delivery_location_address: str = ""
     note: str = ""
     pickup_date: str = ""
     pickup_time: str = ""
@@ -1597,10 +1601,11 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
         client = f"{s.get('client_first_name', '')} {s.get('client_last_name', '')}".strip()
         addr = _stop_address(s)
         line = f"{i}. {s.get('order_num', '')} — {client}\n   📍 {addr}"
-        # Google Maps ссылка если есть геометка
-        if s.get("location"):
+        # Google Maps ссылка если есть геометка (для доставки — точка доставки, если указана)
+        stop_loc = _stop_location(s)
+        if stop_loc:
             try:
-                loc = _json.loads(s["location"])
+                loc = _json.loads(stop_loc)
                 if loc.get("lat") and loc.get("lon"):
                     line += f"\n   🗺 https://maps.google.com/?q={loc['lat']},{loc['lon']}"
             except Exception:
@@ -1698,6 +1703,17 @@ def _stop_address(stop: dict) -> str:
     return stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
 
 
+def _stop_location(stop: dict) -> str | None:
+    """Координаты (lat,lon строка) для карты в сообщении водителю — тот же принцип,
+    что и _stop_address: на этапе доставки берём точку доставки, если указана."""
+    status = stop.get("order_status") or stop.get("status") or ""
+    if status in ("ready", "delivery", "delivered"):
+        loc = stop.get("delivery_location")
+        if loc:
+            return loc
+    return stop.get("location")
+
+
 def _parse_loc_str(val: str | None):
     if not val: return None
     try:
@@ -1719,7 +1735,7 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
     phone  = f"📞 {stop['client_phone']}\n" if stop.get("client_phone") else ""
     if stop.get("client_phone2"):
         phone += f"📞 (запасной) {stop['client_phone2']}\n"
-    loc    = _parse_loc_str(stop.get("location"))
+    loc    = _parse_loc_str(_stop_location(stop))
     map_link = f"🗺 https://maps.google.com/?q={loc[0]},{loc[1]}\n" if loc else ""
     status = _ORDER_STATUS_RU.get(stop.get("order_status", ""), "—")
     return template.format(
@@ -1749,7 +1765,7 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
     client = f"{first} {last}".strip() or "—"
     phone  = stop.get("client_phone", "") or ""
     phone2 = stop.get("client_phone2", "") or ""
-    loc    = _parse_loc_str(stop.get("location"))
+    loc    = _parse_loc_str(_stop_location(stop))
 
     if loc:
         yandex = f"https://yandex.com/maps/?rtext=~{loc[0]},{loc[1]}&rtt=auto"
@@ -1928,6 +1944,8 @@ class LeadCreateRequest(BaseModel):
     volunteer_id: int | None = None
     location: str | None = None
     location_address: str | None = None
+    delivery_location: str | None = None
+    delivery_location_address: str | None = None
     notify_group: bool = True
     pickup_date: str = ""
     pickup_time: str = ""
@@ -1981,6 +1999,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
         "assigned_to": req.assigned_to, "created_by": creator_id,
         "volunteer_id": agent_id,
         "location": req.location, "location_address": req.location_address,
+        "delivery_location": req.delivery_location, "delivery_location_address": req.delivery_location_address,
         "source": lead_source,
         "pickup_date": req.pickup_date or "",
         "pickup_time": req.pickup_time or "",
@@ -2020,7 +2039,7 @@ async def get_leads(status: str = None, branch: str = None,
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
-    allowed = {"client_name","client_phone","client_phone2","branch","address","short_address","delivery_address","delivery_short_address","note","volunteer_id","location","location_address","pickup_type","delivery_type","pickup_date","pickup_time"}
+    allowed = {"client_name","client_phone","client_phone2","branch","address","short_address","delivery_address","delivery_short_address","note","volunteer_id","location","location_address","delivery_location","delivery_location_address","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
@@ -2482,6 +2501,8 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "delivery_short_address": req.delivery_short_address or "",
             "location":         location,
             "location_address": req.location_address or "",
+            "delivery_location":         req.delivery_location or "",
+            "delivery_location_address": req.delivery_location_address or "",
             "service":      req.service,
             "service_type": req.service_type or "standard",
             "pickup_type":  req.pickup_type or "courier",
@@ -3706,6 +3727,10 @@ class LeadUpdateRequest(BaseModel):
     short_address: str | None = None
     delivery_address: str | None = None
     delivery_short_address: str | None = None
+    location: str | None = None
+    location_address: str | None = None
+    delivery_location: str | None = None
+    delivery_location_address: str | None = None
     note:         str | None = None
     status:       str | None = None
 
@@ -4348,6 +4373,8 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "delivery_short_address": lead.get("delivery_short_address", ""),
         "location":         lead.get("location", ""),
         "location_address": lead.get("location_address", ""),
+        "delivery_location":         lead.get("delivery_location", ""),
+        "delivery_location_address": lead.get("delivery_location_address", ""),
         "service":       "",
         "pickup_type":   lead.get("pickup_type", "courier"),
         "delivery_type": lead.get("delivery_type", "courier"),
@@ -8626,6 +8653,8 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         "volunteer_id":  volunteer_id,
         "location":      order.location,
         "location_address": order.location_address,
+        "delivery_location":         order.delivery_location,
+        "delivery_location_address": order.delivery_location_address,
         "source":        lead_source,
         "client_tg_id":  order.client_tg_id,
         "pickup_date":   order.pickup_date or "",
@@ -8694,6 +8723,8 @@ class BotLeadRequest(BaseModel):
     note: str = ""
     location: str = ""
     location_address: str = ""
+    delivery_location: str = ""
+    delivery_location_address: str = ""
     client_tg_id: int | None = None
     is_quick: bool = False
 
@@ -8747,6 +8778,8 @@ async def create_bot_lead(req: BotLeadRequest, x_bot_token: str = Header(None, a
         "volunteer_id":    None,
         "location":        req.location,
         "location_address": req.location_address,
+        "delivery_location":         req.delivery_location,
+        "delivery_location_address": req.delivery_location_address,
         "source":          "bot",
         "client_tg_id":    req.client_tg_id,
         "pickup_date":     req.pickup_date or "",
