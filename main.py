@@ -824,9 +824,11 @@ class OrderRequest(BaseModel):
     first_name: str
     last_name: str = ""
     phone: str
+    phone2: str = ""
     branch: str = ""
     city: str = ""
     address: str
+    delivery_address: str = ""
     location: str = ""
     location_address: str = ""
     service: str = ""
@@ -858,10 +860,22 @@ class OrderRequest(BaseModel):
     def validate_address(cls, v):
         return v.strip()  # allow empty for quick/bot orders
 
+    @field_validator("phone2")
+    @classmethod
+    def validate_phone2(cls, v):
+        v = (v or "").strip()
+        if not v:
+            return ""
+        v = normalize_phone(v)
+        if not PHONE_RE.match(v):
+            raise ValueError("Неверный формат запасного номера. Используйте +998XXXXXXXXX")
+        return v
+
 
 class StaffOrderRequest(BaseModel):
     first_name: str
     phone: str
+    phone2: str = ""
     service: str = ""
     service_type: str = "standard"
     pickup_type: str = "courier"
@@ -869,6 +883,8 @@ class StaffOrderRequest(BaseModel):
     branch: str = ""
     address: str = ""
     short_address: str = ""
+    delivery_address: str = ""
+    delivery_short_address: str = ""
     location: str = ""
     location_address: str = ""
     note: str = ""
@@ -1579,7 +1595,7 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
     import json as _json
     for i, s in enumerate(stops, 1):
         client = f"{s.get('client_first_name', '')} {s.get('client_last_name', '')}".strip()
-        addr = s.get("address") or s.get("location_address") or "—"
+        addr = _stop_address(s)
         line = f"{i}. {s.get('order_num', '')} — {client}\n   📍 {addr}"
         # Google Maps ссылка если есть геометка
         if s.get("location"):
@@ -1591,6 +1607,8 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
                 pass
         if s.get("client_phone"):
             line += f"\n   📞 {s['client_phone']}"
+        if s.get("client_phone2"):
+            line += f"\n   📞 (запасной) {s['client_phone2']}"
         lines.append(line)
 
     lines += ["", f"Всего точек: {len(stops)}"]
@@ -1667,6 +1685,19 @@ def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
     else:
         return {"inline_keyboard": [[p, h, r]]}
 
+def _stop_address(stop: dict) -> str:
+    """Адрес для сообщения водителю. На этапе доставки (ready/delivery/delivered)
+    показываем отдельный адрес доставки, если он указан — иначе адрес вывоза
+    (короткий/полный/геометка), как и раньше. См. запрос пользователя 2026-09-17:
+    вывоз и доставка иногда с разных адресов."""
+    status = stop.get("order_status") or stop.get("status") or ""
+    if status in ("ready", "delivery", "delivered"):
+        addr = stop.get("delivery_short_address") or stop.get("delivery_address")
+        if addr:
+            return addr
+    return stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
+
+
 def _parse_loc_str(val: str | None):
     if not val: return None
     try:
@@ -1684,8 +1715,10 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
     branch_label = {"zarafshan": "Зарафшан", "navoi": "Навои"}.get(route.get("branch", ""), "")
     type_label   = {"pickup": "📥 Забор", "delivery": "📤 Доставка", "mixed": "🔄 Смешанный"}.get(route.get("type", ""), "")
     client = f"{stop.get('client_first_name', '')} {stop.get('client_last_name', '')}".strip() or "—"
-    addr   = stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
+    addr   = _stop_address(stop)
     phone  = f"📞 {stop['client_phone']}\n" if stop.get("client_phone") else ""
+    if stop.get("client_phone2"):
+        phone += f"📞 (запасной) {stop['client_phone2']}\n"
     loc    = _parse_loc_str(stop.get("location"))
     map_link = f"🗺 https://maps.google.com/?q={loc[0]},{loc[1]}\n" if loc else ""
     status = _ORDER_STATUS_RU.get(stop.get("order_status", ""), "—")
@@ -1710,11 +1743,12 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
 
     order_num = (stop.get("order_num", "") or "").replace("ARTEZ-", "")
     item_count = stop.get("item_count", 0) or 0
-    addr  = stop.get("short_address") or stop.get("address") or stop.get("location_address") or "—"
+    addr  = _stop_address(stop)
     first = (stop.get("client_first_name") or "").strip()
     last  = (stop.get("client_last_name")  or "").strip()
     client = f"{first} {last}".strip() or "—"
     phone  = stop.get("client_phone", "") or ""
+    phone2 = stop.get("client_phone2", "") or ""
     loc    = _parse_loc_str(stop.get("location"))
 
     if loc:
@@ -1725,6 +1759,7 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
 
     contact = f"👤 {h(client)}"
     if phone: contact += f" 📞{h(phone)}"
+    if phone2: contact += f" 📞2{h(phone2)}"
 
     total = float(stop.get("items_total") or stop.get("total_price") or 0)
     disc  = (float(stop.get("discount_sum") or 0) + float(stop.get("delivery_discount") or 0)
@@ -1880,11 +1915,14 @@ async def staff_change_password(staff_id: int, body: dict, me=Depends(get_curren
 class LeadCreateRequest(BaseModel):
     client_name: str | None = None
     client_phone: str
+    client_phone2: str | None = None
     service: str | None = None
     branch: str | None = None
     city: str | None = None
     address: str | None = None
     short_address: str | None = None
+    delivery_address: str | None = None
+    delivery_short_address: str | None = None
     note: str | None = None
     assigned_to: int | None = None
     volunteer_id: int | None = None
@@ -1935,9 +1973,11 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     lead_source = "agent" if role == "agent" else "staff"
     lead = await db.create_lead({
         "client_name": req.client_name,
-        "client_phone": req.client_phone, "service": req.service,
+        "client_phone": req.client_phone, "client_phone2": req.client_phone2, "service": req.service,
         "branch": req.branch, "city": req.city, "address": req.address,
-        "short_address": req.short_address, "note": req.note,
+        "short_address": req.short_address,
+        "delivery_address": req.delivery_address, "delivery_short_address": req.delivery_short_address,
+        "note": req.note,
         "assigned_to": req.assigned_to, "created_by": creator_id,
         "volunteer_id": agent_id,
         "location": req.location, "location_address": req.location_address,
@@ -1980,7 +2020,7 @@ async def get_leads(status: str = None, branch: str = None,
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
-    allowed = {"client_name","client_phone","branch","address","short_address","note","volunteer_id","location","location_address","pickup_type","delivery_type","pickup_date","pickup_time"}
+    allowed = {"client_name","client_phone","client_phone2","branch","address","short_address","delivery_address","delivery_short_address","note","volunteer_id","location","location_address","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
@@ -2413,6 +2453,10 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
     req.phone = normalize_phone(req.phone)
     if not PHONE_RE.match(req.phone):
         raise HTTPException(status_code=400, detail="Неверный формат номера. Используйте +998XXXXXXXXX")
+    if req.phone2:
+        req.phone2 = normalize_phone(req.phone2)
+        if not PHONE_RE.match(req.phone2):
+            raise HTTPException(status_code=400, detail="Неверный формат запасного номера. Используйте +998XXXXXXXXX")
     try:
         order_num = await db.get_next_order_num()
         first_name = staff.get("first_name") or ""
@@ -2429,11 +2473,15 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "first_name":  req.first_name,
             "last_name":   "",
             "phone":       req.phone,
+            "phone2":      req.phone2 or "",
             "branch":      branch,
             "city":        "",
             "address":       req.address or "",
             "short_address": req.short_address or "",
-            "location":      location,
+            "delivery_address":       req.delivery_address or "",
+            "delivery_short_address": req.delivery_short_address or "",
+            "location":         location,
+            "location_address": req.location_address or "",
             "service":      req.service,
             "service_type": req.service_type or "standard",
             "pickup_type":  req.pickup_type or "courier",
@@ -3650,11 +3698,14 @@ async def admin_get_leads(status: str = None, branch: str = None,
 class LeadUpdateRequest(BaseModel):
     client_name:  str | None = None
     client_phone: str | None = None
+    client_phone2: str | None = None
     service:      str | None = None
     branch:       str | None = None
     city:         str | None = None
     address:      str | None = None
     short_address: str | None = None
+    delivery_address: str | None = None
+    delivery_short_address: str | None = None
     note:         str | None = None
     status:       str | None = None
 
@@ -4220,8 +4271,9 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
             and order.get("status") not in _ORDER_EDITABLE_STATUSES
             and not (order.get("status") == "delivery" and can_edit_delivery)):
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
-    allowed = {"client_first_name","client_last_name","client_phone",
-               "branch","address","short_address","location","location_address","note","deadline","service_type",
+    allowed = {"client_first_name","client_last_name","client_phone","client_phone2",
+               "branch","address","short_address","delivery_address","delivery_short_address",
+               "location","location_address","note","deadline","service_type",
                "pickup_type","self_pickup_discount","discount_sum","manual_discount",
                "delivery_type","delivery_discount","delivery_discount_pct"}
     updates = {k: v for k, v in body.items() if k in allowed}
@@ -4232,6 +4284,11 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
         if not PHONE_RE.match(normalized_phone):
             raise HTTPException(status_code=400, detail="Неверный формат номера. Используйте +998XXXXXXXXX")
         updates["client_phone"] = normalized_phone
+    if "client_phone2" in updates and updates["client_phone2"]:
+        normalized_phone2 = normalize_phone(str(updates["client_phone2"]))
+        if not PHONE_RE.match(normalized_phone2):
+            raise HTTPException(status_code=400, detail="Неверный формат запасного номера. Используйте +998XXXXXXXXX")
+        updates["client_phone2"] = normalized_phone2
     # asyncpg требует объект date, а не строку
     if "deadline" in updates and isinstance(updates["deadline"], str):
         from datetime import date
@@ -4279,12 +4336,18 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "order_num":     order_num,
         "first_name":    first,
         "last_name":     last,
-        "phone":         lead.get("phone", ""),
+        # Было lead.get("phone", "") — такого ключа у лида нет (колонка client_phone),
+        # из-за чего номер клиента терялся при каждой конвертации лида в заказ.
+        "phone":         lead.get("client_phone", ""),
+        "phone2":        lead.get("client_phone2", ""),
         "branch":        lead.get("branch") or body.get("branch", ""),
-        "city":          "",
+        "city":          lead.get("city", ""),
         "address":       lead.get("address", ""),
         "short_address": lead.get("short_address", ""),
-        "location":      lead.get("location", ""),
+        "delivery_address":       lead.get("delivery_address", ""),
+        "delivery_short_address": lead.get("delivery_short_address", ""),
+        "location":         lead.get("location", ""),
+        "location_address": lead.get("location_address", ""),
         "service":       "",
         "pickup_type":   lead.get("pickup_type", "courier"),
         "delivery_type": lead.get("delivery_type", "courier"),
@@ -8549,11 +8612,14 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     lead = await db.create_lead({
         "client_name":   full_name,
         "client_phone":  order.phone,
+        "client_phone2": order.phone2,
         "service":       order.service,
         "branch":        order.branch,
         "city":          order.city,
         "address":       order.address,
         "short_address": order.address,
+        "delivery_address":       order.delivery_address,
+        "delivery_short_address": order.delivery_address,
         "note":          note,
         "status":        "new",
         "created_by":    None,
@@ -8616,9 +8682,11 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
 class BotLeadRequest(BaseModel):
     client_name: str
     client_phone: str
+    client_phone2: str = ""
     branch: str = ""
     city: str = ""
     address: str = ""
+    delivery_address: str = ""
     service: str = ""
     service_type: str = ""
     pickup_date: str = ""
@@ -8635,6 +8703,17 @@ class BotLeadRequest(BaseModel):
         v = normalize_phone(v)
         if not PHONE_RE.match(v):
             raise ValueError("Неверный формат номера. Используйте +998XXXXXXXXX")
+        return v
+
+    @field_validator("client_phone2")
+    @classmethod
+    def validate_phone2(cls, v):
+        v = (v or "").strip()
+        if not v:
+            return ""
+        v = normalize_phone(v)
+        if not PHONE_RE.match(v):
+            raise ValueError("Неверный формат запасного номера. Используйте +998XXXXXXXXX")
         return v
 
 @app.post("/api/bot/lead")
@@ -8654,11 +8733,14 @@ async def create_bot_lead(req: BotLeadRequest, x_bot_token: str = Header(None, a
     lead = await db.create_lead({
         "client_name":     req.client_name,
         "client_phone":    req.client_phone,
+        "client_phone2":   req.client_phone2,
         "service":         req.service,
         "branch":          req.branch,
         "city":            req.city,
         "address":         req.address,
         "short_address":   req.address,
+        "delivery_address":       req.delivery_address,
+        "delivery_short_address": req.delivery_address,
         "note":            note,
         "status":          "new",
         "created_by":      None,

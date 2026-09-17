@@ -160,6 +160,15 @@ async def create_tables():
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS discount_sum  NUMERIC(12,2) DEFAULT 0",
         "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
+        # Второй телефон (запасной, на этот конкретный лид/заказ — НЕ contacts.phone2)
+        # и адрес доставки, если отличается от адреса вывоза (short_address/address).
+        # Пусто = доставка на тот же адрес. См. запрос пользователя 2026-09-17.
+        "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS client_phone2         VARCHAR(20)  DEFAULT NULL",
+        "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS delivery_address      TEXT         DEFAULT ''",
+        "ALTER TABLE orders      ADD COLUMN IF NOT EXISTS delivery_short_address VARCHAR(200) DEFAULT ''",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS client_phone2         VARCHAR(20)  DEFAULT NULL",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS delivery_address      TEXT         DEFAULT ''",
+        "ALTER TABLE leads       ADD COLUMN IF NOT EXISTS delivery_short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS address       TEXT         DEFAULT ''",
         "ALTER TABLE crm_clients ADD COLUMN IF NOT EXISTS short_address VARCHAR(200) DEFAULT ''",
         "ALTER TABLE staff       ADD COLUMN IF NOT EXISTS can_edit_items      BOOLEAN DEFAULT TRUE",
@@ -1534,14 +1543,16 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
         await conn.execute("""
             INSERT INTO orders (
                 order_num, source,
-                client_tg_id, client_first_name, client_last_name, client_phone,
-                branch, city, address, short_address, location, service, service_type, pickup_type, delivery_type, pickup_date, pickup_time, note,
+                client_tg_id, client_first_name, client_last_name, client_phone, client_phone2,
+                branch, city, address, short_address, delivery_address, delivery_short_address,
+                location, location_address, service, service_type, pickup_type, delivery_type, pickup_date, pickup_time, note,
                 total_price, status
             ) VALUES (
                 $1, $2,
-                NULL, $3, $4, $5,
-                $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
-                $18, 'new'
+                NULL, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11, $12,
+                $13, $14, $15, $16, $17, $18, $19, $20, $21,
+                $22, 'new'
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
@@ -1550,11 +1561,15 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
             data.get("first_name"),
             data.get("last_name", ""),
             data.get("phone"),
+            data.get("phone2") or None,
             data.get("branch"),
             data.get("city"),
             data.get("address"),
             data.get("short_address", ""),
+            data.get("delivery_address", ""),
+            data.get("delivery_short_address", ""),
             data.get("location"),
+            data.get("location_address"),
             data.get("service"),
             data.get("service_type") or "standard",
             data.get("pickup_type") or "courier",
@@ -2983,15 +2998,18 @@ async def create_lead(data: dict) -> dict:
             logging.error(f"create_lead: promo tag failed: {e}")
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO leads (client_name, client_phone, service, branch,
-                               city, address, short_address, note, status, assigned_to,
+            INSERT INTO leads (client_name, client_phone, client_phone2, service, branch,
+                               city, address, short_address, delivery_address, delivery_short_address,
+                               note, status, assigned_to,
                                created_by, volunteer_id, location, location_address,
                                source, client_tg_id, pickup_date, pickup_time, promo_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
             RETURNING *
-        """, data.get("client_name"), data["client_phone"],
+        """, data.get("client_name"), data["client_phone"], data.get("client_phone2"),
             data.get("service"), data.get("branch"), data.get("city"),
-            data.get("address"), data.get("short_address", ""), data.get("note"),
+            data.get("address"), data.get("short_address", ""),
+            data.get("delivery_address", ""), data.get("delivery_short_address", ""),
+            data.get("note"),
             data.get("status","new"), data.get("assigned_to"), data.get("created_by"),
             data.get("volunteer_id"), data.get("location"), data.get("location_address"),
             source, data.get("client_tg_id"),
@@ -3054,7 +3072,7 @@ async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None
-    allowed = {"client_name","client_phone","service","branch","city","address","short_address","note","status","location","location_address","volunteer_id","pickup_type","delivery_type","pickup_date","pickup_time"}
+    allowed = {"client_name","client_phone","client_phone2","service","branch","city","address","short_address","delivery_address","delivery_short_address","note","status","location","location_address","volunteer_id","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -4125,8 +4143,9 @@ async def get_order_by_id(order_id: int) -> dict:
 
 async def update_order(order_id: int, **kwargs) -> dict:
     if not pool: return {}
-    allowed = {"client_first_name", "client_last_name", "client_phone",
-               "branch", "address", "short_address", "location", "location_address", "note", "deadline",
+    allowed = {"client_first_name", "client_last_name", "client_phone", "client_phone2",
+               "branch", "address", "short_address", "delivery_address", "delivery_short_address",
+               "location", "location_address", "note", "deadline",
                "service_type", "pickup_type", "self_pickup_discount",
                "discount_sum", "manual_discount",
                "delivery_type", "delivery_discount", "delivery_discount_pct"}
@@ -4961,7 +4980,8 @@ async def get_route(route_id: int) -> dict | None:
         route = dict(row)
         stops = await conn.fetch("""
             SELECT ro.*, o.order_num, o.client_first_name, o.client_last_name,
-                   o.client_phone, o.address, o.short_address,
+                   o.client_phone, o.client_phone2, o.address, o.short_address,
+                   o.delivery_address, o.delivery_short_address,
                    o.location, o.location_address, o.status AS order_status,
                    ro.driver_confirmed,
                    o.service, o.branch,
@@ -5069,8 +5089,9 @@ async def get_channel_stop_full(order_id: int) -> dict | None:
         row = await conn.fetchrow("""
             SELECT r.branch, r.tg_delivery_msg_ids, ro.sort_order,
                    o.id AS order_id, o.order_num, o.status,
-                   o.client_first_name, o.client_last_name, o.client_phone,
-                   o.address, o.short_address, o.location, o.location_address,
+                   o.client_first_name, o.client_last_name, o.client_phone, o.client_phone2,
+                   o.address, o.short_address, o.delivery_address, o.delivery_short_address,
+                   o.location, o.location_address,
                    COALESCE(o.total_price, 0) AS total_price,
                    COALESCE(o.discount_sum, 0) AS discount_sum,
                    COALESCE(o.delivery_discount, 0) AS delivery_discount,
@@ -6152,8 +6173,9 @@ async def get_routes_today(branch: str | None = None) -> list:
                    TRIM(COALESCE(s.first_name,'') || ' ' || COALESCE(s.last_name,'')) AS driver_name,
                    ro.sort_order, ro.stop_status, ro.driver_confirmed,
                    o.id AS order_id, o.order_num, o.status AS order_status,
-                   o.client_first_name, o.client_last_name, o.client_phone,
-                   o.address, o.short_address, o.location, o.location_address,
+                   o.client_first_name, o.client_last_name, o.client_phone, o.client_phone2,
+                   o.address, o.short_address, o.delivery_address, o.delivery_short_address,
+                   o.location, o.location_address,
                    COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
                             COALESCE(o.total_price,0)) AS items_total,
                    COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS total_discount,
@@ -6187,8 +6209,11 @@ async def get_routes_today(branch: str | None = None) -> list:
                 "client_first_name": row["client_first_name"],
                 "client_last_name":  row.get("client_last_name"),
                 "client_phone":   row.get("client_phone"),
+                "client_phone2":  row.get("client_phone2"),
                 "address":        row.get("address"),
                 "short_address":  row.get("short_address"),
+                "delivery_address":       row.get("delivery_address"),
+                "delivery_short_address": row.get("delivery_short_address"),
                 "location":       row.get("location"),
                 "location_address": row.get("location_address"),
                 "items_total":    float(row["items_total"]),
