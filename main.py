@@ -2440,7 +2440,7 @@ _STAGE_STATUSES = {
 
 @app.get("/api/staff/orders")
 async def staff_orders(status: str = None, branch: str = None, limit: int = 50, offset: int = 0,
-                       staff=Depends(require_perm("orders"))):
+                       search: str = None, staff=Depends(require_perm("orders"))):
     # Фильтр по этапам: если order_stages заданы — показывать только нужные статусы
     stages_raw = staff.get("order_stages") or ""
     stages = [s.strip() for s in stages_raw.split(",") if s.strip()]
@@ -2449,7 +2449,7 @@ async def staff_orders(status: str = None, branch: str = None, limit: int = 50, 
         visible |= _STAGE_STATUSES.get(stage, set())
     result, total = await db.get_admin_orders(
         status=status, statuses=list(visible) if stages else None,
-        branch=branch, limit=limit, offset=offset)
+        branch=branch, limit=limit, offset=offset, search=search)
     if staff.get("hide_client_phone"):
         for o in result:
             o["client_phone"] = ""
@@ -2457,9 +2457,9 @@ async def staff_orders(status: str = None, branch: str = None, limit: int = 50, 
 
 @app.get("/api/staff/orders/own")
 async def staff_own_orders(status: str = None, limit: int = 50, offset: int = 0,
-                            staff=Depends(get_current_staff)):
+                            search: str = None, staff=Depends(get_current_staff)):
     result, total = await db.get_admin_orders(
-        status=status, branch=staff.get("branch"), limit=limit, offset=offset)
+        status=status, branch=staff.get("branch"), limit=limit, offset=offset, search=search)
     if staff.get("hide_client_phone"):
         for o in result:
             o["client_phone"] = ""

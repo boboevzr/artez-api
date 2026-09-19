@@ -2053,10 +2053,15 @@ async def get_order_items_billing(order_id: int) -> dict:
 
 
 async def get_admin_orders(status: str = None, statuses: list = None, branch: str = None,
-                            limit: int = 50, offset: int = 0):
+                            limit: int = 50, offset: int = 0, search: str = None):
     """Список заказов с постраничностью. statuses (набор, из order_stages сотрудника)
     и status (выбранная вкладка) пересекаются, если заданы оба — так же, как раньше
     фильтровалось на Python-стороне, только теперь в SQL (нужно для верного total_count).
+    search — по номеру заявки/телефону/ФИО/адресу, в SQL (не на клиенте): раньше поиск
+    фильтровал только уже загруженную (по вкладке и пагинации) страницу заказов, из-за
+    чего, например, заказ со статусом "Долги" не находился на вкладке "Все" (там
+    подгружалась только первая страница), хотя находился на вкладке "Долги" (она грузит
+    без пагинации) — см. жалобу пользователя 2026-09-19.
     Возвращает (orders, total_count)."""
     if not pool:
         return [], 0
@@ -2076,6 +2081,17 @@ async def get_admin_orders(status: str = None, statuses: list = None, branch: st
         if branch:
             conditions.append(f"o.branch = ${len(params)+1}")
             params.append(branch)
+        if search:
+            idx = len(params) + 1
+            conditions.append(f"""(
+                o.order_num ILIKE ${idx}
+                OR o.client_phone ILIKE ${idx}
+                OR (COALESCE(o.client_first_name,'') || ' ' || COALESCE(o.client_last_name,'')) ILIKE ${idx}
+                OR (COALESCE(o.client_last_name,'') || ' ' || COALESCE(o.client_first_name,'')) ILIKE ${idx}
+                OR COALESCE(o.short_address,'') ILIKE ${idx}
+                OR COALESCE(o.address,'') ILIKE ${idx}
+            )""")
+            params.append(f"%{search}%")
         where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
         limit_idx, offset_idx = len(params) + 1, len(params) + 2
         q = f"""
