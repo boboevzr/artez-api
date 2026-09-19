@@ -2486,7 +2486,6 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             staff_label = f"{staff_label} (@{login})"
         branch = req.branch or staff.get("branch") or ""
         location = req.location or ""
-        note_full = f"📱 Заявка от сотрудника: {staff_label}" + (f"\n{req.note}" if req.note else "")
         await db.save_site_order({
             "order_num":   order_num,
             "first_name":  req.first_name,
@@ -2509,7 +2508,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "delivery_type": req.delivery_type or "courier",
             "pickup_date": req.pickup_date or "",
             "pickup_time": req.pickup_time or "",
-            "note":        note_full,
+            "note":        req.note or "",
             "total_price": None,
         }, source="staff", staff_name=staff_label)
         # Авто-регистрация клиента в CRM
