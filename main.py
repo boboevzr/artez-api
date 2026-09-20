@@ -833,6 +833,9 @@ class OrderRequest(BaseModel):
     location_address: str = ""
     delivery_location: str = ""
     delivery_location_address: str = ""
+    region_id: int | None = None
+    house_number: str = ""
+    apartment_number: str = ""
     service: str = ""
     service_type: str = ""
     pickup_date: str = ""
@@ -891,6 +894,9 @@ class StaffOrderRequest(BaseModel):
     location_address: str = ""
     delivery_location: str = ""
     delivery_location_address: str = ""
+    region_id: int | None = None
+    house_number: str = ""
+    apartment_number: str = ""
     note: str = ""
     pickup_date: str = ""
     pickup_time: str = ""
@@ -1946,6 +1952,9 @@ class LeadCreateRequest(BaseModel):
     location_address: str | None = None
     delivery_location: str | None = None
     delivery_location_address: str | None = None
+    region_id: int | None = None
+    house_number: str | None = None
+    apartment_number: str | None = None
     notify_group: bool = True
     pickup_date: str = ""
     pickup_time: str = ""
@@ -2000,6 +2009,8 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
         "volunteer_id": agent_id,
         "location": req.location, "location_address": req.location_address,
         "delivery_location": req.delivery_location, "delivery_location_address": req.delivery_location_address,
+        "region_id": req.region_id, "house_number": req.house_number,
+        "apartment_number": req.apartment_number,
         "source": lead_source,
         "pickup_date": req.pickup_date or "",
         "pickup_time": req.pickup_time or "",
@@ -2039,7 +2050,7 @@ async def get_leads(status: str = None, branch: str = None,
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
-    allowed = {"client_name","client_phone","client_phone2","branch","address","short_address","delivery_address","delivery_short_address","note","volunteer_id","location","location_address","delivery_location","delivery_location_address","pickup_type","delivery_type","pickup_date","pickup_time"}
+    allowed = {"client_name","client_phone","client_phone2","branch","address","short_address","delivery_address","delivery_short_address","note","volunteer_id","location","location_address","delivery_location","delivery_location_address","region_id","house_number","apartment_number","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in body.items() if k in allowed}
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
@@ -2504,6 +2515,9 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             "location_address": req.location_address or "",
             "delivery_location":         req.delivery_location or "",
             "delivery_location_address": req.delivery_location_address or "",
+            "region_id":         req.region_id,
+            "house_number":      req.house_number or "",
+            "apartment_number":  req.apartment_number or "",
             "service":      req.service,
             "service_type": req.service_type or "standard",
             "pickup_type":  req.pickup_type or "courier",
@@ -4299,7 +4313,9 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone","client_phone2",
                "branch","address","short_address","delivery_address","delivery_short_address",
-               "location","location_address","note","deadline","service_type",
+               "location","location_address",
+               "region_id","house_number","apartment_number",
+               "note","deadline","service_type",
                "pickup_type","self_pickup_discount","discount_sum","manual_discount",
                "delivery_type","delivery_discount","delivery_discount_pct"}
     updates = {k: v for k, v in body.items() if k in allowed}
@@ -5683,6 +5699,90 @@ async def delete_expense_category(cat_id: int, staff=Depends(get_current_staff))
             raise HTTPException(status_code=400, detail="Сначала удалите подкатегории")
         raise HTTPException(status_code=400, detail=err)
     return {"ok": True}
+
+
+# ── Логистика / Регионы обслуживания ────────────────────────────────────────
+
+@app.get("/api/admin/service-regions/tree")
+async def service_regions_tree(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    tree = await db.get_service_regions_tree()
+    return {"ok": True, "regions": tree}
+
+@app.post("/api/admin/service-regions")
+async def create_service_region_ep(
+    parent_id:        int  = Body(None,  embed=True),
+    level:             int  = Body(...,   embed=True),
+    node_type:         str  = Body(None,  embed=True),
+    branch:            str  = Body(None,  embed=True),
+    name_ru:           str  = Body(...,   embed=True),
+    name_uz:           str  = Body(None,  embed=True),
+    lat:               str  = Body(None,  embed=True),
+    location_address:  str  = Body(None,  embed=True),
+    sort_order:        int  = Body(0,     embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    region = await db.create_service_region(
+        parent_id, level, node_type, branch, name_ru, name_uz,
+        lat, location_address, sort_order)
+    return {"ok": True, "region": region}
+
+@app.put("/api/admin/service-regions/{region_id}")
+async def update_service_region_ep(
+    region_id:         int,
+    parent_id:         int  = Body(None,  embed=True),
+    level:             int  = Body(None,  embed=True),
+    node_type:         str  = Body(None,  embed=True),
+    branch:            str  = Body(None,  embed=True),
+    name_ru:           str  = Body(None,  embed=True),
+    name_uz:           str  = Body(None,  embed=True),
+    lat:               str  = Body(None,  embed=True),
+    location_address:  str  = Body(None,  embed=True),
+    polygon:           list = Body(None,  embed=True),
+    sort_order:        int  = Body(None,  embed=True),
+    active:            bool = Body(None,  embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    fields = {k: v for k, v in {
+        "parent_id": parent_id, "level": level, "node_type": node_type,
+        "branch": branch, "name_ru": name_ru, "name_uz": name_uz,
+        "lat": lat, "location_address": location_address,
+        "polygon": polygon, "sort_order": sort_order, "active": active,
+    }.items() if v is not None}
+    region = await db.update_service_region(region_id, **fields)
+    if not region:
+        raise HTTPException(status_code=404, detail="Регион не найден")
+    return {"ok": True, "region": region}
+
+@app.delete("/api/admin/service-regions/{region_id}")
+async def delete_service_region_ep(region_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    result = await db.delete_service_region(region_id)
+    if not result.get("ok"):
+        err = result.get("error", "unknown")
+        if err == "has_children":
+            raise HTTPException(status_code=400, detail="Сначала удалите дочерние элементы")
+        raise HTTPException(status_code=400, detail=err)
+    return {"ok": True}
+
+@app.get("/api/regions/search")
+async def regions_search_ep(q: str = "", limit: int = 15, staff=Depends(get_current_staff)):
+    if not q:
+        return {"ok": True, "results": []}
+    results = await db.search_service_regions(q, limit)
+    return {"ok": True, "results": results}
+
+@app.get("/api/regions/children")
+async def regions_children_ep(parent_id: int = None, staff=Depends(get_current_staff)):
+    children = await db.get_service_region_children(parent_id)
+    return {"ok": True, "children": children}
+
 
 @app.post("/api/admin/expenses")
 async def create_expense(

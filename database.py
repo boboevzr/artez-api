@@ -568,6 +568,30 @@ async def create_tables():
         "ALTER TABLE sms_codes ALTER COLUMN code TYPE VARCHAR(20)",
         "ALTER TABLE sms_codes DROP CONSTRAINT IF EXISTS sms_codes_purpose_check",
         "ALTER TABLE sms_codes ADD CONSTRAINT sms_codes_purpose_check CHECK (purpose IN ('register','login','reset','reset_attempt'))",
+        # Логистика: регионы обслуживания (3 уровня — населённый пункт → тип
+        # застройки → конкретный объект). polygon пока не используется (будущий этап).
+        """CREATE TABLE IF NOT EXISTS service_regions (
+            id           SERIAL PRIMARY KEY,
+            parent_id    INTEGER REFERENCES service_regions(id) ON DELETE CASCADE,
+            level        SMALLINT NOT NULL,
+            node_type    VARCHAR(20),
+            branch       VARCHAR(50),
+            name_ru      VARCHAR(200) NOT NULL,
+            name_uz      VARCHAR(200),
+            lat          TEXT,
+            location_address TEXT,
+            polygon      JSONB,
+            sort_order   INT DEFAULT 0,
+            active       BOOLEAN DEFAULT TRUE,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_service_regions_parent ON service_regions(parent_id)",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES service_regions(id)",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS house_number VARCHAR(20)",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS apartment_number VARCHAR(10)",
+        "ALTER TABLE leads  ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES service_regions(id)",
+        "ALTER TABLE leads  ADD COLUMN IF NOT EXISTS house_number VARCHAR(20)",
+        "ALTER TABLE leads  ADD COLUMN IF NOT EXISTS apartment_number VARCHAR(10)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1551,14 +1575,14 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
                 branch, city, address, short_address, delivery_address, delivery_short_address,
                 location, location_address, delivery_location, delivery_location_address,
                 service, service_type, pickup_type, delivery_type, pickup_date, pickup_time, note,
-                total_price, status
+                total_price, status, region_id, house_number, apartment_number
             ) VALUES (
                 $1, $2,
                 NULL, $3, $4, $5, $6,
                 $7, $8, $9, $10, $11, $12,
                 $13, $14, $15, $16,
                 $17, $18, $19, $20, $21, $22, $23,
-                $24, 'new'
+                $24, 'new', $25, $26, $27
             )
             ON CONFLICT (order_num) DO NOTHING
         """,
@@ -1586,6 +1610,9 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
             data.get("pickup_time"),
             data.get("note"),
             data.get("total_price"),
+            data.get("region_id"),
+            data.get("house_number") or "",
+            data.get("apartment_number") or "",
         )
         await conn.execute("""
             INSERT INTO order_status_history (order_num, new_status, note)
@@ -3032,8 +3059,9 @@ async def create_lead(data: dict) -> dict:
                                note, status, assigned_to,
                                created_by, volunteer_id, location, location_address,
                                delivery_location, delivery_location_address,
-                               source, client_tg_id, pickup_date, pickup_time, promo_id)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+                               source, client_tg_id, pickup_date, pickup_time, promo_id,
+                               region_id, house_number, apartment_number)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
             RETURNING *
         """, data.get("client_name"), data["client_phone"], data.get("client_phone2"),
             data.get("service"), data.get("branch"), data.get("city"),
@@ -3044,7 +3072,8 @@ async def create_lead(data: dict) -> dict:
             data.get("volunteer_id"), data.get("location"), data.get("location_address"),
             data.get("delivery_location", ""), data.get("delivery_location_address", ""),
             source, data.get("client_tg_id"),
-            data.get("pickup_date", ""), data.get("pickup_time", ""), promo_id)
+            data.get("pickup_date", ""), data.get("pickup_time", ""), promo_id,
+            data.get("region_id"), data.get("house_number"), data.get("apartment_number"))
         rid      = row["id"]
         lead_num = f"LEAD-{rid:04d}"
         lead_code = f"L-{rid:04d}"
@@ -3103,7 +3132,7 @@ async def update_lead_status(lead_id: int, status: str, scheduled_at=None):
 
 async def update_lead(lead_id: int, **kwargs) -> dict | None:
     if not pool: return None
-    allowed = {"client_name","client_phone","client_phone2","service","branch","city","address","short_address","delivery_address","delivery_short_address","note","status","location","location_address","delivery_location","delivery_location_address","volunteer_id","pickup_type","delivery_type","pickup_date","pickup_time"}
+    allowed = {"client_name","client_phone","client_phone2","service","branch","city","address","short_address","delivery_address","delivery_short_address","note","status","location","location_address","delivery_location","delivery_location_address","region_id","house_number","apartment_number","volunteer_id","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
@@ -4177,6 +4206,7 @@ async def update_order(order_id: int, **kwargs) -> dict:
     allowed = {"client_first_name", "client_last_name", "client_phone", "client_phone2",
                "branch", "address", "short_address", "delivery_address", "delivery_short_address",
                "location", "location_address", "delivery_location", "delivery_location_address",
+               "region_id", "house_number", "apartment_number",
                "note", "deadline",
                "service_type", "pickup_type", "self_pickup_discount",
                "discount_sum", "manual_discount",
@@ -6500,6 +6530,103 @@ async def delete_expense_category(cat_id: int) -> dict:
         if has_children:
             return {"ok": False, "error": "has_children"}
         await conn.execute("DELETE FROM expense_categories WHERE id=$1", cat_id)
+        return {"ok": True}
+
+# ── Логистика: регионы обслуживания (3 уровня — населённый пункт → тип
+# застройки → конкретный объект). Дерево/CRUD мирроринг expense_categories,
+# частичное обновление мирроринг update_lead(**kwargs).
+
+async def get_service_regions_tree(active_only: bool = True) -> list:
+    """Возвращает дерево: уровень1 -> children (уровень2) -> children (уровень3)."""
+    if not pool: return []
+    where = "WHERE active=TRUE" if active_only else ""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            f"SELECT * FROM service_regions {where} ORDER BY sort_order, id")
+    nodes = [dict(r) for r in rows]
+    by_id = {n['id']: n for n in nodes}
+    for n in nodes:
+        n['children'] = []
+    roots = []
+    for n in nodes:
+        if n['parent_id'] and n['parent_id'] in by_id:
+            by_id[n['parent_id']]['children'].append(n)
+        elif not n['parent_id']:
+            roots.append(n)
+    return roots
+
+async def get_service_region_children(parent_id: int = None) -> list:
+    """Плоский список прямых детей узла (или корней уровня 1, если parent_id не задан)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        if parent_id is None:
+            rows = await conn.fetch(
+                "SELECT * FROM service_regions WHERE parent_id IS NULL AND active=TRUE ORDER BY sort_order, id")
+        else:
+            rows = await conn.fetch(
+                "SELECT * FROM service_regions WHERE parent_id=$1 AND active=TRUE ORDER BY sort_order, id",
+                parent_id)
+        return [dict(r) for r in rows]
+
+async def search_service_regions(query: str, limit: int = 15) -> list:
+    """Поиск по name_ru/name_uz на всех уровнях с хлебной крошкой пути и координатами."""
+    if not pool: return []
+    like = f"%{query}%"
+    prefix = f"{query}%"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT r.*, p1.name_ru AS p1_name_ru, p2.name_ru AS p2_name_ru
+            FROM service_regions r
+            LEFT JOIN service_regions p2 ON p2.id = r.parent_id
+            LEFT JOIN service_regions p1 ON p1.id = p2.parent_id
+            WHERE r.active=TRUE AND (r.name_ru ILIKE $1 OR r.name_uz ILIKE $1)
+            ORDER BY
+                CASE WHEN r.name_ru ILIKE $2 OR r.name_uz ILIKE $2 THEN 0 ELSE 1 END,
+                r.name_ru
+            LIMIT $3
+        """, like, prefix, limit)
+    results = []
+    for r in rows:
+        d = dict(r)
+        p1_name = d.pop('p1_name_ru', None)
+        p2_name = d.pop('p2_name_ru', None)
+        d['breadcrumb'] = " → ".join(p for p in (p1_name, p2_name, d['name_ru']) if p)
+        results.append(d)
+    return results
+
+async def create_service_region(parent_id, level: int, node_type, branch, name_ru: str,
+                                 name_uz=None, lat=None, location_address=None,
+                                 sort_order: int = 0) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO service_regions
+                (parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+        """, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order)
+        return dict(row) if row else {}
+
+async def update_service_region(region_id: int, **kwargs) -> dict | None:
+    if not pool: return None
+    allowed = {"parent_id", "level", "node_type", "branch", "name_ru", "name_uz",
+               "lat", "location_address", "polygon", "sort_order", "active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields: return None
+    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE service_regions SET {set_parts} WHERE id=$1 RETURNING *",
+            region_id, *list(fields.values()))
+        return dict(row) if row else None
+
+async def delete_service_region(region_id: int) -> dict:
+    if not pool: return {"ok": False, "error": "no pool"}
+    async with pool.acquire() as conn:
+        has_children = await conn.fetchval(
+            "SELECT COUNT(*) FROM service_regions WHERE parent_id=$1", region_id)
+        if has_children:
+            return {"ok": False, "error": "has_children"}
+        await conn.execute("DELETE FROM service_regions WHERE id=$1", region_id)
         return {"ok": True}
 
 async def create_expense(category_id: int, amount: float, description: str,
