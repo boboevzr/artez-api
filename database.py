@@ -6575,9 +6575,10 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
     prefix = f"{query}%"
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT r.*, p1.name_ru AS p1_name_ru, p2.name_ru AS p2_name_ru
+            SELECT r.*, p1.name_ru AS p1_name_ru, p2.name_ru AS p2_name_ru, p3.name_ru AS p3_name_ru
             FROM service_regions r
-            LEFT JOIN service_regions p2 ON p2.id = r.parent_id
+            LEFT JOIN service_regions p3 ON p3.id = r.parent_id
+            LEFT JOIN service_regions p2 ON p2.id = p3.parent_id
             LEFT JOIN service_regions p1 ON p1.id = p2.parent_id
             WHERE r.active=TRUE AND (r.name_ru ILIKE $1 OR r.name_uz ILIKE $1)
             ORDER BY
@@ -6590,7 +6591,8 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
         d = dict(r)
         p1_name = d.pop('p1_name_ru', None)
         p2_name = d.pop('p2_name_ru', None)
-        d['breadcrumb'] = " → ".join(p for p in (p1_name, p2_name, d['name_ru']) if p)
+        p3_name = d.pop('p3_name_ru', None)
+        d['breadcrumb'] = " → ".join(p for p in (p1_name, p2_name, p3_name, d['name_ru']) if p)
         results.append(d)
     return results
 
