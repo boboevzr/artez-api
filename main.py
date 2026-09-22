@@ -5718,6 +5718,8 @@ async def create_service_region_ep(
     branch:            str  = Body(None,  embed=True),
     name_ru:           str  = Body(...,   embed=True),
     name_uz:           str  = Body(None,  embed=True),
+    name_ru_full:      str  = Body(None,  embed=True),
+    name_uz_full:      str  = Body(None,  embed=True),
     lat:               str  = Body(None,  embed=True),
     location_address:  str  = Body(None,  embed=True),
     sort_order:        int  = Body(0,     embed=True),
@@ -5728,7 +5730,7 @@ async def create_service_region_ep(
         raise HTTPException(status_code=403, detail="Только для admin")
     region = await db.create_service_region(
         parent_id, level, node_type, branch, name_ru, name_uz,
-        lat, location_address, sort_order, note)
+        lat, location_address, sort_order, note, name_ru_full, name_uz_full)
     return {"ok": True, "region": region}
 
 @app.put("/api/admin/service-regions/{region_id}")
@@ -5740,6 +5742,8 @@ async def update_service_region_ep(
     branch:            str  = Body(None,  embed=True),
     name_ru:           str  = Body(None,  embed=True),
     name_uz:           str  = Body(None,  embed=True),
+    name_ru_full:      str  = Body(None,  embed=True),
+    name_uz_full:      str  = Body(None,  embed=True),
     lat:               str  = Body(None,  embed=True),
     location_address:  str  = Body(None,  embed=True),
     polygon:           list = Body(None,  embed=True),
@@ -5753,6 +5757,7 @@ async def update_service_region_ep(
     fields = {k: v for k, v in {
         "parent_id": parent_id, "level": level, "node_type": node_type,
         "branch": branch, "name_ru": name_ru, "name_uz": name_uz,
+        "name_ru_full": name_ru_full, "name_uz_full": name_uz_full,
         "lat": lat, "location_address": location_address,
         "polygon": polygon, "sort_order": sort_order, "active": active,
         "note": note,
