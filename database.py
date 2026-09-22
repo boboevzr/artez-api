@@ -586,6 +586,7 @@ async def create_tables():
             created_at   TIMESTAMPTZ DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS idx_service_regions_parent ON service_regions(parent_id)",
+        "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS note TEXT",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES service_regions(id)",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS house_number VARCHAR(20)",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS apartment_number VARCHAR(10)",
@@ -6575,7 +6576,9 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
     prefix = f"{query}%"
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT r.*, p1.name_ru AS p1_name_ru, p2.name_ru AS p2_name_ru, p3.name_ru AS p3_name_ru
+            SELECT r.*, p1.name_ru AS p1_name_ru,
+                   p2.name_ru AS p2_name_ru, p2.node_type AS p2_node_type,
+                   p3.name_ru AS p3_name_ru, p3.node_type AS p3_node_type
             FROM service_regions r
             LEFT JOIN service_regions p3 ON p3.id = r.parent_id
             LEFT JOIN service_regions p2 ON p2.id = p3.parent_id
@@ -6591,27 +6594,42 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
         d = dict(r)
         p1_name = d.pop('p1_name_ru', None)
         p2_name = d.pop('p2_name_ru', None)
+        p2_node_type = d.pop('p2_node_type', None)
         p3_name = d.pop('p3_name_ru', None)
+        p3_node_type = d.pop('p3_node_type', None)
         d['breadcrumb'] = " → ".join(p for p in (p1_name, p2_name, p3_name, d['name_ru']) if p)
+        # short_fill: компактная запись для подстановки в "Адрес вывоза" (мкр-дом- / улица, дом)
+        # вместо полной хлебной крошки — квартиру сотрудник дописывает сам.
+        object_name, house_name, node_type = None, None, None
+        if d['level'] == 4:
+            object_name, house_name, node_type = p3_name, d['name_ru'], p2_node_type
+        elif d['level'] == 3:
+            object_name, node_type = d['name_ru'], p3_node_type
+        if object_name and node_type == 'microdistrict':
+            d['short_fill'] = f"{object_name}-{house_name}-" if house_name else f"{object_name}-"
+        elif object_name:
+            d['short_fill'] = f"{object_name}, {house_name}" if house_name else f"{object_name}, "
+        else:
+            d['short_fill'] = None
         results.append(d)
     return results
 
 async def create_service_region(parent_id, level: int, node_type, branch, name_ru: str,
                                  name_uz=None, lat=None, location_address=None,
-                                 sort_order: int = 0) -> dict:
+                                 sort_order: int = 0, note=None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO service_regions
-                (parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
-        """, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order)
+                (parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *
+        """, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note)
         return dict(row) if row else {}
 
 async def update_service_region(region_id: int, **kwargs) -> dict | None:
     if not pool: return None
     allowed = {"parent_id", "level", "node_type", "branch", "name_ru", "name_uz",
-               "lat", "location_address", "polygon", "sort_order", "active"}
+               "lat", "location_address", "polygon", "sort_order", "active", "note"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
