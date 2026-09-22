@@ -5710,6 +5710,17 @@ async def service_regions_tree(staff=Depends(get_current_staff)):
     tree = await db.get_service_regions_tree()
     return {"ok": True, "regions": tree}
 
+@app.get("/api/admin/service-regions/debug-all")
+async def service_regions_debug_all(staff=Depends(get_current_staff)):
+    """ВРЕМЕННЫЙ диагностический эндпоинт — все строки как есть, без фильтра active/дерева."""
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM service_regions ORDER BY id")
+    return {"ok": True, "regions": [dict(r) for r in rows]}
+
 @app.post("/api/admin/service-regions")
 async def create_service_region_ep(
     parent_id:        int  = Body(None,  embed=True),
