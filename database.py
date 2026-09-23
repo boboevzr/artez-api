@@ -589,6 +589,7 @@ async def create_tables():
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS note TEXT",
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS name_ru_full TEXT",
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS name_uz_full TEXT",
+        "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS not_exists BOOLEAN DEFAULT FALSE",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES service_regions(id)",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS house_number VARCHAR(20)",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS apartment_number VARCHAR(10)",
@@ -6564,10 +6565,10 @@ async def get_service_region_children(parent_id: int = None) -> list:
     async with pool.acquire() as conn:
         if parent_id is None:
             rows = await conn.fetch(
-                "SELECT * FROM service_regions WHERE parent_id IS NULL AND active=TRUE ORDER BY sort_order, id")
+                "SELECT * FROM service_regions WHERE parent_id IS NULL AND active=TRUE AND not_exists IS NOT TRUE ORDER BY sort_order, id")
         else:
             rows = await conn.fetch(
-                "SELECT * FROM service_regions WHERE parent_id=$1 AND active=TRUE ORDER BY sort_order, id",
+                "SELECT * FROM service_regions WHERE parent_id=$1 AND active=TRUE AND not_exists IS NOT TRUE ORDER BY sort_order, id",
                 parent_id)
         return [dict(r) for r in rows]
 
@@ -6585,7 +6586,7 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
             LEFT JOIN service_regions p3 ON p3.id = r.parent_id
             LEFT JOIN service_regions p2 ON p2.id = p3.parent_id
             LEFT JOIN service_regions p1 ON p1.id = p2.parent_id
-            WHERE r.active=TRUE AND (r.name_ru ILIKE $1 OR r.name_uz ILIKE $1)
+            WHERE r.active=TRUE AND r.not_exists IS NOT TRUE AND (r.name_ru ILIKE $1 OR r.name_uz ILIKE $1)
             ORDER BY
                 CASE WHEN r.name_ru ILIKE $2 OR r.name_uz ILIKE $2 THEN 0 ELSE 1 END,
                 r.name_ru
@@ -6627,22 +6628,23 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
 async def create_service_region(parent_id, level: int, node_type, branch, name_ru: str,
                                  name_uz=None, lat=None, location_address=None,
                                  sort_order: int = 0, note=None,
-                                 name_ru_full=None, name_uz_full=None) -> dict:
+                                 name_ru_full=None, name_uz_full=None,
+                                 not_exists: bool = False) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO service_regions
                 (parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note,
-                 name_ru_full, name_uz_full)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *
+                 name_ru_full, name_uz_full, not_exists)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
         """, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note,
-            name_ru_full, name_uz_full)
+            name_ru_full, name_uz_full, not_exists)
         return dict(row) if row else {}
 
 async def update_service_region(region_id: int, **kwargs) -> dict | None:
     if not pool: return None
     allowed = {"parent_id", "level", "node_type", "branch", "name_ru", "name_uz",
-               "name_ru_full", "name_uz_full",
+               "name_ru_full", "name_uz_full", "not_exists",
                "lat", "location_address", "polygon", "sort_order", "active", "note"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
