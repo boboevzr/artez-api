@@ -6560,6 +6560,10 @@ async def get_service_regions_tree(active_only: bool = True) -> list:
     by_id = {n['id']: n for n in nodes}
     for n in nodes:
         n['children'] = []
+        # asyncpg отдаёт jsonb как текст — распаковываем polygon в массив точек,
+        # чтобы фронт получал обычный JS-массив, а не JSON-строку внутри JSON.
+        if isinstance(n.get('polygon'), str):
+            n['polygon'] = json.loads(n['polygon'])
     roots = []
     for n in nodes:
         if n['parent_id'] and n['parent_id'] in by_id:
@@ -6638,16 +6642,18 @@ async def create_service_region(parent_id, level: int, node_type, branch, name_r
                                  name_uz=None, lat=None, location_address=None,
                                  sort_order: int = 0, note=None,
                                  name_ru_full=None, name_uz_full=None,
-                                 not_exists: bool = False) -> dict:
+                                 not_exists: bool = False, polygon=None) -> dict:
     if not pool: return {}
+    if polygon is not None and not isinstance(polygon, str):
+        polygon = json.dumps(polygon)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             INSERT INTO service_regions
                 (parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note,
-                 name_ru_full, name_uz_full, not_exists)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *
+                 name_ru_full, name_uz_full, not_exists, polygon)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) RETURNING *
         """, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note,
-            name_ru_full, name_uz_full, not_exists)
+            name_ru_full, name_uz_full, not_exists, polygon)
         return dict(row) if row else {}
 
 async def update_service_region(region_id: int, **kwargs) -> dict | None:
@@ -6657,7 +6663,14 @@ async def update_service_region(region_id: int, **kwargs) -> dict | None:
                "lat", "location_address", "polygon", "sort_order", "active", "note"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
-    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    # polygon — JSONB; asyncpg не сериализует Python-объекты в jsonb сам по себе,
+    # нужен явный json.dumps + приведение типа в SQL.
+    if "polygon" in fields and fields["polygon"] is not None and not isinstance(fields["polygon"], str):
+        fields["polygon"] = json.dumps(fields["polygon"])
+    set_parts = ", ".join(
+        f"{k}=${i+2}" + ("::jsonb" if k == "polygon" else "")
+        for i, k in enumerate(fields)
+    )
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             f"UPDATE service_regions SET {set_parts} WHERE id=$1 RETURNING *",
@@ -6740,7 +6753,7 @@ async def restore_service_regions_backup(backup_id: int) -> dict:
                         not_exists=EXCLUDED.not_exists
                 """, r.get("id"), r.get("parent_id"), r.get("level"), r.get("node_type"), r.get("branch"),
                     r.get("name_ru"), r.get("name_uz"), r.get("lat"), r.get("location_address"),
-                    json.dumps(r["polygon"]) if r.get("polygon") else None,
+                    r.get("polygon"),  # уже валидный JSON-текст (как отдала asyncpg при бэкапе) — не re-энкодить
                     r.get("sort_order"), r.get("active"), r.get("note"),
                     r.get("name_ru_full"), r.get("name_uz_full"), r.get("not_exists"))
                 restored += 1
