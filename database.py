@@ -1,4 +1,5 @@
 import os
+import json
 import asyncpg
 import logging
 from datetime import datetime, timezone, timedelta
@@ -590,6 +591,14 @@ async def create_tables():
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS name_ru_full TEXT",
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS name_uz_full TEXT",
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS not_exists BOOLEAN DEFAULT FALSE",
+        """CREATE TABLE IF NOT EXISTS service_regions_backups (
+            id            SERIAL PRIMARY KEY,
+            label         TEXT,
+            created_by    INTEGER,
+            record_count  INT,
+            data          JSONB NOT NULL,
+            created_at    TIMESTAMPTZ DEFAULT NOW()
+        )""",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES service_regions(id)",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS house_number VARCHAR(20)",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS apartment_number VARCHAR(10)",
@@ -6664,6 +6673,80 @@ async def delete_service_region(region_id: int) -> dict:
             return {"ok": False, "error": "has_children"}
         await conn.execute("DELETE FROM service_regions WHERE id=$1", region_id)
         return {"ok": True}
+
+# ── Архивация регионов (защита от потери данных при импорте/экспорте Excel) ──
+
+async def create_service_regions_backup(label: str = None, created_by: int = None) -> dict:
+    """Снимок ВСЕЙ таблицы service_regions (все уровни, все поля) как есть на текущий момент."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM service_regions ORDER BY id")
+        records = [dict(r) for r in rows]
+        data_json = json.dumps(records, default=str, ensure_ascii=False)
+        row = await conn.fetchrow("""
+            INSERT INTO service_regions_backups (label, created_by, record_count, data)
+            VALUES ($1, $2, $3, $4::jsonb)
+            RETURNING id, label, created_by, record_count, created_at
+        """, label, created_by, len(records), data_json)
+        return dict(row) if row else {}
+
+async def list_service_regions_backups(limit: int = 30) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, label, created_by, record_count, created_at
+            FROM service_regions_backups ORDER BY id DESC LIMIT $1
+        """, limit)
+        return [dict(r) for r in rows]
+
+async def get_service_regions_backup(backup_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM service_regions_backups WHERE id=$1", backup_id)
+        if not row: return None
+        d = dict(row)
+        # asyncpg отдаёт jsonb как текст — распаковываем для клиента.
+        if isinstance(d.get("data"), str):
+            d["data"] = json.loads(d["data"])
+        return d
+
+async def restore_service_regions_backup(backup_id: int) -> dict:
+    """Восстанавливает записи из архива через UPSERT по id — НЕ удаляет записи,
+    созданные после архива, только возвращает прежние значения полей для тех
+    записей, что были в архиве. Это защита от порчи существующих регионов
+    неудачным импортом, а не откат к состоянию "как было" целиком."""
+    if not pool: return {"ok": False, "error": "no_pool"}
+    async with pool.acquire() as conn:
+        backup_row = await conn.fetchrow("SELECT data FROM service_regions_backups WHERE id=$1", backup_id)
+        if not backup_row:
+            return {"ok": False, "error": "not_found"}
+        records = backup_row["data"]
+        if isinstance(records, str):
+            records = json.loads(records)
+        restored = 0
+        async with conn.transaction():
+            for r in records:
+                await conn.execute("""
+                    INSERT INTO service_regions
+                        (id, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address,
+                         polygon, sort_order, active, note, name_ru_full, name_uz_full, not_exists)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16)
+                    ON CONFLICT (id) DO UPDATE SET
+                        parent_id=EXCLUDED.parent_id, level=EXCLUDED.level, node_type=EXCLUDED.node_type,
+                        branch=EXCLUDED.branch, name_ru=EXCLUDED.name_ru, name_uz=EXCLUDED.name_uz,
+                        lat=EXCLUDED.lat, location_address=EXCLUDED.location_address,
+                        polygon=EXCLUDED.polygon, sort_order=EXCLUDED.sort_order, active=EXCLUDED.active,
+                        note=EXCLUDED.note, name_ru_full=EXCLUDED.name_ru_full, name_uz_full=EXCLUDED.name_uz_full,
+                        not_exists=EXCLUDED.not_exists
+                """, r.get("id"), r.get("parent_id"), r.get("level"), r.get("node_type"), r.get("branch"),
+                    r.get("name_ru"), r.get("name_uz"), r.get("lat"), r.get("location_address"),
+                    json.dumps(r["polygon"]) if r.get("polygon") else None,
+                    r.get("sort_order"), r.get("active"), r.get("note"),
+                    r.get("name_ru_full"), r.get("name_uz_full"), r.get("not_exists"))
+                restored += 1
+            await conn.execute(
+                "SELECT setval(pg_get_serial_sequence('service_regions','id'), (SELECT MAX(id) FROM service_regions))")
+        return {"ok": True, "restored": restored}
 
 async def create_expense(category_id: int, amount: float, description: str,
                          staff_id: int, branch: str, for_staff_id: int = None) -> dict:

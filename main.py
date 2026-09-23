@@ -5781,6 +5781,41 @@ async def delete_service_region_ep(region_id: int, staff=Depends(get_current_sta
         raise HTTPException(status_code=400, detail=err)
     return {"ok": True}
 
+@app.post("/api/admin/service-regions/backup")
+async def create_service_regions_backup_ep(label: str = Body(None, embed=True), staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    backup = await db.create_service_regions_backup(label, staff.get("id"))
+    return {"ok": True, "backup": backup}
+
+@app.get("/api/admin/service-regions/backups")
+async def list_service_regions_backups_ep(staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    backups = await db.list_service_regions_backups()
+    return {"ok": True, "backups": backups}
+
+@app.get("/api/admin/service-regions/backups/{backup_id}")
+async def get_service_regions_backup_ep(backup_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    backup = await db.get_service_regions_backup(backup_id)
+    if not backup:
+        raise HTTPException(status_code=404, detail="Архив не найден")
+    return {"ok": True, "backup": backup}
+
+@app.post("/api/admin/service-regions/backups/{backup_id}/restore")
+async def restore_service_regions_backup_ep(backup_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    result = await db.restore_service_regions_backup(backup_id)
+    if not result.get("ok"):
+        err = result.get("error", "unknown")
+        if err == "not_found":
+            raise HTTPException(status_code=404, detail="Архив не найден")
+        raise HTTPException(status_code=400, detail=err)
+    return result
+
 @app.get("/api/regions/search")
 async def regions_search_ep(q: str = "", limit: int = 15, staff=Depends(get_current_staff)):
     if not q:
