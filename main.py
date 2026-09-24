@@ -5894,6 +5894,58 @@ async def delete_place_ep(place_id: int, staff=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Точка не найдена")
     return {"ok": True}
 
+# ── Справочник категорий точек — редактируемый самим админом (см. places выше).
+@app.get("/api/admin/place-categories")
+async def list_place_categories_ep(project: str = "artez", staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    cats = await db.list_place_categories(project)
+    return {"ok": True, "categories": cats}
+
+@app.post("/api/admin/place-categories")
+async def create_place_category_ep(
+    project:    str = Body('artez', embed=True),
+    name_ru:    str = Body(...,    embed=True),
+    name_uz:    str = Body(None,   embed=True),
+    icon:       str = Body(None,   embed=True),
+    sort_order: int = Body(0,      embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    cat = await db.create_place_category(project, name_ru, name_uz, icon, sort_order)
+    return {"ok": True, "category": cat}
+
+@app.put("/api/admin/place-categories/{cat_id}")
+async def update_place_category_ep(
+    cat_id:     int,
+    name_ru:    str  = Body(None, embed=True),
+    name_uz:    str  = Body(None, embed=True),
+    icon:       str  = Body(None, embed=True),
+    sort_order: int  = Body(None, embed=True),
+    active:     bool = Body(None, embed=True),
+    staff=Depends(get_current_staff),
+):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    fields = {k: v for k, v in {
+        "name_ru": name_ru, "name_uz": name_uz, "icon": icon,
+        "sort_order": sort_order, "active": active,
+    }.items() if v is not None}
+    cat = await db.update_place_category(cat_id, **fields)
+    if not cat:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    return {"ok": True, "category": cat}
+
+@app.delete("/api/admin/place-categories/{cat_id}")
+async def delete_place_category_ep(cat_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для admin")
+    ok = await db.delete_place_category(cat_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    return {"ok": True}
+
 
 @app.post("/api/admin/expenses")
 async def create_expense(

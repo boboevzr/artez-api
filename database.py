@@ -629,6 +629,20 @@ async def create_tables():
         # (было единое свободнотекстовое поле category, без реальных данных в проде).
         "ALTER TABLE places RENAME COLUMN category TO category_ru",
         "ALTER TABLE places ADD COLUMN IF NOT EXISTS category_uz TEXT",
+        # Редактируемый самим админом справочник категорий точек (изначально —
+        # захардкоженный список в admin.html, теперь пользователь может сам
+        # добавлять/менять/удалять без правки кода).
+        """CREATE TABLE IF NOT EXISTS place_categories (
+            id           SERIAL PRIMARY KEY,
+            project      TEXT NOT NULL DEFAULT 'artez',
+            name_ru      TEXT NOT NULL,
+            name_uz      TEXT,
+            icon         TEXT,
+            sort_order   INT DEFAULT 0,
+            active       BOOLEAN DEFAULT TRUE,
+            created_at   TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_place_categories_project ON place_categories(project)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -660,6 +674,42 @@ async def create_tables():
             await c.executemany(
                 "INSERT INTO autodial_ivrs (exten,label,ivr_group) VALUES ($1,$2,$3)",
                 ivr_seeds
+            )
+        # Засеваем справочник категорий точек один раз (дальше редактируется
+        # самим админом через UI — миграция больше не трогает эти строки).
+        cnt_place_cats = await c.fetchval("SELECT COUNT(*) FROM place_categories WHERE project='artez'")
+        if cnt_place_cats == 0:
+            place_category_seeds = [
+                ('Кафе', 'Kafe', '☕'), ('Ресторан', 'Restoran', '🍽️'),
+                ('Фастфуд', 'Fast-fud', '🍔'), ('Пекарня', 'Nonvoyxona', '🥐'),
+                ('Кондитерская', 'Qandolatxona', '🍰'), ('Чайхана', 'Choyxona', '🫖'),
+                ('Общежитие', 'Yotoqxona', '🛏️'), ('Гостиница', 'Mehmonxona', '🏨'),
+                ('Хостел', 'Xostel', '🛌'), ('Магазин', "Do'kon", '🏪'),
+                ('Супермаркет', 'Supermarket', '🛒'), ('Рынок', 'Bozor', '🧺'),
+                ('Аптека', 'Dorixona', '💊'), ('Книжный магазин', "Kitob do'koni", '📚'),
+                ('Цветочный магазин', "Gul do'koni", '💐'), ('Ювелирный магазин', "Zargarlik do'koni", '💍'),
+                ('Магазин одежды', "Kiyim do'koni", '👕'), ('Обувной магазин', "Poyabzal do'koni", '👟'),
+                ('Стройматериалы', 'Qurilish materiallari', '🧱'), ('Автозапчасти', 'Avto ehtiyot qismlar', '🔧'),
+                ('Мебельный магазин', "Mebel do'koni", '🛋️'), ('Клиника', 'Klinika', '🏥'),
+                ('Стоматология', 'Stomatologiya', '🦷'), ('Поликлиника', 'Poliklinika', '⚕️'),
+                ('Ветеринарная клиника', 'Veterinariya klinikasi', '🐾'), ('Школа', 'Maktab', '🏫'),
+                ('Детский сад', "Bog'cha", '🧸'), ('Детский центр', 'Bolalar markazi', '🎈'),
+                ('Университет', 'Universitet', '🎓'), ('Курсы', 'Kurslar', '📖'),
+                ('Парикмахерская', 'Sartaroshxona', '💇'), ('Салон красоты', "Go'zallik saloni", '💅'),
+                ('Спа', 'Spa markazi', '🧖'), ('Барбершоп', 'Barbershop', '💈'),
+                ('Автосервис', 'Avtoservis', '🔧'), ('Автомойка', 'Avtomoyka', '🚗'),
+                ('АЗС', "Yoqilg'i shahobchasi", '⛽'), ('Шиномонтаж', 'Shinamontaj', '🛞'),
+                ('Банк', 'Bank', '🏦'), ('Почта', 'Pochta', '📮'),
+                ('Нотариус', 'Notarius', '📝'), ('Центр гос. услуг', 'Xizmatlar markazi', '🏢'),
+                ('Спортзал', 'Sport zali', '🏋️'), ('Бассейн', 'Basseyn', '🏊'),
+                ('Кинотеатр', 'Kinoteatr', '🎬'), ('Парк', "Bog'", '🌳'),
+                ('Мечеть', 'Masjid', '🕌'), ('Церковь', 'Cherkov', '⛪'),
+                ('Офис', 'Ofis', '🏢'), ('Склад', 'Ombor', '📦'),
+                ('Мастерская', 'Usta xonasi', '🛠️'),
+            ]
+            await c.executemany(
+                "INSERT INTO place_categories (project, name_ru, name_uz, icon, sort_order) VALUES ('artez',$1,$2,$3,$4)",
+                [(ru, uz, icon, i + 1) for i, (ru, uz, icon) in enumerate(place_category_seeds)]
             )
 
     # ── Шаг 2: миграции staff (добавляем недостающие колонки) ────────────
@@ -6656,6 +6706,42 @@ async def delete_place(place_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
         result = await conn.execute("DELETE FROM places WHERE id=$1", place_id)
+        return result == "DELETE 1"
+
+# ── Справочник категорий точек — редактируется самим админом (см. places выше),
+# засеян один раз стартовым списком в миграции, дальше миграция его не трогает.
+async def list_place_categories(project: str = 'artez', active_only: bool = False) -> list:
+    if not pool: return []
+    where = "WHERE project=$1" + (" AND active=TRUE" if active_only else "")
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(f"SELECT * FROM place_categories {where} ORDER BY sort_order, id", project)
+        return [dict(r) for r in rows]
+
+async def create_place_category(project: str, name_ru: str, name_uz=None, icon=None, sort_order: int = 0) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO place_categories (project, name_ru, name_uz, icon, sort_order)
+            VALUES ($1,$2,$3,$4,$5) RETURNING *
+        """, project or 'artez', name_ru, name_uz or name_ru, icon, sort_order)
+        return dict(row) if row else {}
+
+async def update_place_category(cat_id: int, **kwargs) -> dict | None:
+    if not pool: return None
+    allowed = {"name_ru", "name_uz", "icon", "sort_order", "active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields: return None
+    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE place_categories SET {set_parts} WHERE id=$1 RETURNING *",
+            cat_id, *list(fields.values()))
+        return dict(row) if row else None
+
+async def delete_place_category(cat_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM place_categories WHERE id=$1", cat_id)
         return result == "DELETE 1"
 
 async def list_places_by_region(region_id: int, project: str = 'artez') -> list:
