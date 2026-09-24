@@ -6585,11 +6585,28 @@ async def get_service_region_children(parent_id: int = None) -> list:
                 parent_id)
         return [dict(r) for r in rows]
 
+def _split_compound_region_query(q: str):
+    """"11-27" / "11, 27" / "11 27" -> ("11", "27") — короткая запись объект+дом,
+    как в short_fill. Возвращает (None, None), если запрос не похож на пару."""
+    q = q.strip()
+    for sep in ('-', ',', ' '):
+        if sep in q:
+            a, b = q.split(sep, 1)
+            a, b = a.strip(), b.strip()
+            if a and b:
+                return a, b
+    return None, None
+
 async def search_service_regions(query: str, limit: int = 15) -> list:
-    """Поиск по name_ru/name_uz на всех уровнях с хлебной крошкой пути и координатами."""
+    """Поиск по name_ru/name_uz на всех уровнях с хлебной крошкой пути и координатами.
+    Дополнительно понимает составной запрос "11-27" (объект-дом) — ищет дом по
+    housePart среди детей объекта, чьё название совпадает с objPart."""
     if not pool: return []
     like = f"%{query}%"
     prefix = f"{query}%"
+    obj_part, house_part = _split_compound_region_query(query)
+    obj_prefix = f"{obj_part}%" if obj_part else None
+    house_prefix = f"{house_part}%" if house_part else None
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT r.*, p1.name_ru AS p1_name_ru, p1.name_ru_full AS p1_name_ru_full,
@@ -6599,12 +6616,21 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
             LEFT JOIN service_regions p3 ON p3.id = r.parent_id
             LEFT JOIN service_regions p2 ON p2.id = p3.parent_id
             LEFT JOIN service_regions p1 ON p1.id = p2.parent_id
-            WHERE r.active=TRUE AND r.not_exists IS NOT TRUE AND (r.name_ru ILIKE $1 OR r.name_uz ILIKE $1)
+            WHERE r.active=TRUE AND r.not_exists IS NOT TRUE AND (
+                r.name_ru ILIKE $1 OR r.name_uz ILIKE $1
+                OR ($4::text IS NOT NULL AND r.level = 4 AND (r.name_ru ILIKE $4 OR r.name_uz ILIKE $4)
+                    AND (p3.name_ru ILIKE $5 OR p3.name_uz ILIKE $5))
+            )
             ORDER BY
-                CASE WHEN r.name_ru ILIKE $2 OR r.name_uz ILIKE $2 THEN 0 ELSE 1 END,
+                CASE
+                    WHEN $4::text IS NOT NULL AND r.level = 4 AND (r.name_ru ILIKE $4 OR r.name_uz ILIKE $4)
+                         AND (p3.name_ru ILIKE $5 OR p3.name_uz ILIKE $5) THEN -1
+                    WHEN r.name_ru ILIKE $2 OR r.name_uz ILIKE $2 THEN 0
+                    ELSE 1
+                END,
                 r.name_ru
             LIMIT $3
-        """, like, prefix, limit)
+        """, like, prefix, limit, house_prefix, obj_prefix)
     results = []
     for r in rows:
         d = dict(r)
