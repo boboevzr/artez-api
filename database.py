@@ -3616,6 +3616,36 @@ async def get_crm_clients_list(search: str = "", limit: int = 50, offset: int = 
             """, limit, offset)
         return [dict(r) for r in rows]
 
+async def get_crm_clients_search_count(search: str = "") -> int:
+    """Кол-во клиентов, подходящих под тот же поиск, что и get_crm_clients_list —
+    для пагинации (total), а не общий счётчик по всем клиентам."""
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        if search:
+            return await conn.fetchval("""
+                SELECT COUNT(*) FROM crm_clients
+                WHERE phone ILIKE $1 OR first_name ILIKE $1 OR last_name ILIKE $1
+                   OR short_address ILIKE $1 OR address ILIKE $1
+            """, f"%{search}%")
+        return await conn.fetchval("SELECT COUNT(*) FROM crm_clients")
+
+async def get_clients_map_points() -> list:
+    """По одной точке на клиента — координаты последнего заказа с указанной
+    точкой (у самого клиента координат не хранится, только текстовый адрес)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT ON (o.client_phone)
+                   c.id AS client_id, o.client_phone AS phone,
+                   c.first_name, c.last_name, c.status,
+                   o.location, o.location_address
+            FROM orders o
+            JOIN crm_clients c ON c.phone = o.client_phone
+            WHERE o.location IS NOT NULL AND o.location <> ''
+            ORDER BY o.client_phone, o.created_at DESC
+        """)
+        return [dict(r) for r in rows]
+
 
 async def update_crm_client(client_id: int, **kwargs) -> dict | None:
     if not pool or not kwargs:
