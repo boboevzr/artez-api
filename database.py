@@ -606,6 +606,25 @@ async def create_tables():
         "ALTER TABLE leads  ADD COLUMN IF NOT EXISTS region_id INTEGER REFERENCES service_regions(id)",
         "ALTER TABLE leads  ADD COLUMN IF NOT EXISTS house_number VARCHAR(20)",
         "ALTER TABLE leads  ADD COLUMN IF NOT EXISTS apartment_number VARCHAR(10)",
+        # Универсальный слой типизированных точек (общежития/кафе/гостиницы и т.д.),
+        # переиспользуемый другими будущими проектами через колонку project —
+        # НЕ часть адресного дерева service_regions, только ссылается на него.
+        """CREATE TABLE IF NOT EXISTS places (
+            id                SERIAL PRIMARY KEY,
+            region_id         INTEGER REFERENCES service_regions(id),
+            project           TEXT NOT NULL DEFAULT 'artez',
+            category          TEXT,
+            name_ru           TEXT NOT NULL,
+            name_uz           TEXT,
+            lat               TEXT,
+            location_address  TEXT,
+            note              TEXT,
+            extra             JSONB,
+            active            BOOLEAN DEFAULT TRUE,
+            created_at        TIMESTAMPTZ DEFAULT NOW()
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_places_region ON places(region_id)",
+        "CREATE INDEX IF NOT EXISTS idx_places_project ON places(project)",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -6573,18 +6592,131 @@ async def get_service_regions_tree(active_only: bool = True) -> list:
             roots.append(n)
     return roots
 
+# ── places: универсальный слой типизированных точек (не привязан к бизнесу
+# ARTEZ, project-scoped) — общежития/кафе/гостиницы и т.п., которые физически
+# внутри узла адресного дерева, но не являются "домом" в этом дереве. ──────
+
+def _place_as_node(p: dict) -> dict:
+    """Представляет запись places как узел-лист адресного дерева для мест, где
+    ожидается service_regions-совместимая форма (staff-пикер, поиск). id делаем
+    ОТРИЦАТЕЛЬНЫМ (-place.id) — id мест и id узлов дерева это две разные
+    последовательности SERIAL, без этого трюка они бы коллидировали в одном
+    списке детей. leads/orders.region_id при выборе места пишет p['region_id']
+    (родительский узел дерева), а не -p['id'] — FK ссылается только на дерево."""
+    return {
+        "id": -p["id"],
+        "place_id": p["id"],
+        "parent_id": p.get("region_id"),
+        "region_id": p.get("region_id"),
+        "level": 4,
+        "node_type": None,
+        "is_place": True,
+        "category": p.get("category"),
+        "name_ru": p["name_ru"],
+        "name_uz": p.get("name_uz") or p["name_ru"],
+        "name_ru_full": p["name_ru"],
+        "name_uz_full": p.get("name_uz") or p["name_ru"],
+        "lat": p.get("lat"),
+        "location_address": p.get("location_address"),
+        "note": p.get("note"),
+        "not_exists": False,
+        "active": p.get("active", True),
+        "poi_type": None,
+        "sort_order": 999999,  # места — в конце списка домов
+    }
+
+async def create_place(region_id, project: str, category, name_ru: str, name_uz=None,
+                        lat=None, location_address=None, note=None) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO places (region_id, project, category, name_ru, name_uz, lat, location_address, note)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
+        """, region_id, project or 'artez', category, name_ru, name_uz or name_ru, lat, location_address, note)
+        return dict(row) if row else {}
+
+async def update_place(place_id: int, **kwargs) -> dict | None:
+    if not pool: return None
+    allowed = {"region_id", "category", "name_ru", "name_uz", "lat", "location_address", "note", "active"}
+    fields = {k: v for k, v in kwargs.items() if k in allowed}
+    if not fields: return None
+    set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            f"UPDATE places SET {set_parts} WHERE id=$1 RETURNING *",
+            place_id, *list(fields.values()))
+        return dict(row) if row else None
+
+async def delete_place(place_id: int) -> bool:
+    if not pool: return False
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM places WHERE id=$1", place_id)
+        return result == "DELETE 1"
+
+async def list_places_by_region(region_id: int, project: str = 'artez') -> list:
+    """Прямой (не в service_regions-совместимой форме) список точек узла — для админки."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM places WHERE region_id=$1 AND project=$2 ORDER BY active DESC, name_ru",
+            region_id, project)
+        return [dict(r) for r in rows]
+
+async def get_places_children(parent_id: int, project: str = 'artez') -> list:
+    """Точки узла в service_regions-совместимой форме — подмешиваются в get_service_region_children."""
+    if not pool or parent_id is None: return []
+    rows = await list_places_by_region(parent_id, project)
+    return [_place_as_node(p) for p in rows if p.get("active", True)]
+
+async def _region_ancestors_chain(conn, region_id):
+    """Полная цепочка от корня дерева до region_id включительно, по уровням."""
+    if region_id is None: return []
+    rows = await conn.fetch("""
+        WITH RECURSIVE anc AS (
+            SELECT id, parent_id, name_ru, name_ru_full, node_type, level FROM service_regions WHERE id=$1
+            UNION ALL
+            SELECT sr.id, sr.parent_id, sr.name_ru, sr.name_ru_full, sr.node_type, sr.level
+            FROM service_regions sr JOIN anc a ON sr.id = a.parent_id
+        )
+        SELECT * FROM anc ORDER BY level
+    """, region_id)
+    return [dict(r) for r in rows]
+
+async def search_places(query: str, project: str = 'artez', limit: int = 8) -> list:
+    """Поиск по названию точки с хлебной крошкой её родителя в адресном дереве."""
+    if not pool: return []
+    like = f"%{query}%"
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM places WHERE project=$1 AND active=TRUE AND (name_ru ILIKE $2 OR name_uz ILIKE $2)
+            ORDER BY name_ru LIMIT $3
+        """, project, like, limit)
+        results = []
+        for r in rows:
+            p = dict(r)
+            chain = await _region_ancestors_chain(conn, p.get("region_id"))
+            crumb = " → ".join((c.get("name_ru_full") or c["name_ru"]) for c in chain)
+            node = _place_as_node(p)
+            node["breadcrumb"] = f"{crumb} → {p['name_ru']}" if crumb else p["name_ru"]
+            node["short_fill"] = p["name_ru"]
+            results.append(node)
+        return results
+
 async def get_service_region_children(parent_id: int = None) -> list:
-    """Плоский список прямых детей узла (или корней уровня 1, если parent_id не задан)."""
+    """Плоский список прямых детей узла (или корней уровня 1, если parent_id не задан) —
+    для узлов дерева дополнительно подмешиваются точки (places) этого узла."""
     if not pool: return []
     async with pool.acquire() as conn:
         if parent_id is None:
             rows = await conn.fetch(
                 "SELECT * FROM service_regions WHERE parent_id IS NULL AND active=TRUE AND not_exists IS NOT TRUE ORDER BY sort_order, id")
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM service_regions WHERE parent_id=$1 AND active=TRUE AND not_exists IS NOT TRUE ORDER BY sort_order, id",
-                parent_id)
-        return [dict(r) for r in rows]
+            return [dict(r) for r in rows]
+        rows = await conn.fetch(
+            "SELECT * FROM service_regions WHERE parent_id=$1 AND active=TRUE AND not_exists IS NOT TRUE ORDER BY sort_order, id",
+            parent_id)
+    result = [dict(r) for r in rows]
+    result += await get_places_children(parent_id)
+    return result
 
 def _split_compound_region_query(q: str):
     """"11-27" / "11, 27" / "11 27" -> ("11", "27") — короткая запись объект+дом,
@@ -6663,7 +6795,8 @@ async def search_service_regions(query: str, limit: int = 15) -> list:
         else:
             d['short_fill'] = None
         results.append(d)
-    return results
+    place_results = await search_places(query, limit=max(3, limit // 3))
+    return (results + place_results)[:limit]
 
 async def create_service_region(parent_id, level: int, node_type, branch, name_ru: str,
                                  name_uz=None, lat=None, location_address=None,
