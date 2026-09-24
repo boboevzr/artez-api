@@ -5726,13 +5726,14 @@ async def create_service_region_ep(
     note:              str  = Body(None,  embed=True),
     not_exists:        bool = Body(False, embed=True),
     polygon:           list = Body(None,  embed=True),
+    poi_type:          str  = Body(None,  embed=True),
     staff=Depends(get_current_staff),
 ):
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только для admin")
     region = await db.create_service_region(
         parent_id, level, node_type, branch, name_ru, name_uz,
-        lat, location_address, sort_order, note, name_ru_full, name_uz_full, not_exists, polygon)
+        lat, location_address, sort_order, note, name_ru_full, name_uz_full, not_exists, polygon, poi_type)
     return {"ok": True, "region": region}
 
 @app.put("/api/admin/service-regions/{region_id}")
@@ -5753,6 +5754,7 @@ async def update_service_region_ep(
     active:            bool = Body(None,  embed=True),
     note:              str  = Body(None,  embed=True),
     not_exists:        bool = Body(None,  embed=True),
+    poi_type:          str  = Body(None,  embed=True),
     staff=Depends(get_current_staff),
 ):
     if staff.get("role") != "admin":
@@ -5763,7 +5765,7 @@ async def update_service_region_ep(
         "name_ru_full": name_ru_full, "name_uz_full": name_uz_full,
         "lat": lat, "location_address": location_address,
         "polygon": polygon, "sort_order": sort_order, "active": active,
-        "note": note, "not_exists": not_exists,
+        "note": note, "not_exists": not_exists, "poi_type": poi_type,
     }.items() if v is not None}
     region = await db.update_service_region(region_id, **fields)
     if not region:

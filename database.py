@@ -591,6 +591,7 @@ async def create_tables():
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS name_ru_full TEXT",
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS name_uz_full TEXT",
         "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS not_exists BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE service_regions ADD COLUMN IF NOT EXISTS poi_type TEXT",
         """CREATE TABLE IF NOT EXISTS service_regions_backups (
             id            SERIAL PRIMARY KEY,
             label         TEXT,
@@ -6668,7 +6669,7 @@ async def create_service_region(parent_id, level: int, node_type, branch, name_r
                                  name_uz=None, lat=None, location_address=None,
                                  sort_order: int = 0, note=None,
                                  name_ru_full=None, name_uz_full=None,
-                                 not_exists: bool = False, polygon=None) -> dict:
+                                 not_exists: bool = False, polygon=None, poi_type=None) -> dict:
     if not pool: return {}
     if polygon is not None and not isinstance(polygon, str):
         polygon = json.dumps(polygon)
@@ -6676,16 +6677,16 @@ async def create_service_region(parent_id, level: int, node_type, branch, name_r
         row = await conn.fetchrow("""
             INSERT INTO service_regions
                 (parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note,
-                 name_ru_full, name_uz_full, not_exists, polygon)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb) RETURNING *
+                 name_ru_full, name_uz_full, not_exists, polygon, poi_type)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14::jsonb,$15) RETURNING *
         """, parent_id, level, node_type, branch, name_ru, name_uz, lat, location_address, sort_order, note,
-            name_ru_full, name_uz_full, not_exists, polygon)
+            name_ru_full, name_uz_full, not_exists, polygon, poi_type)
         return dict(row) if row else {}
 
 async def update_service_region(region_id: int, **kwargs) -> dict | None:
     if not pool: return None
     allowed = {"parent_id", "level", "node_type", "branch", "name_ru", "name_uz",
-               "name_ru_full", "name_uz_full", "not_exists",
+               "name_ru_full", "name_uz_full", "not_exists", "poi_type",
                "lat", "location_address", "polygon", "sort_order", "active", "note"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
