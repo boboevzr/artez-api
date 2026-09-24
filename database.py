@@ -625,6 +625,10 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_places_region ON places(region_id)",
         "CREATE INDEX IF NOT EXISTS idx_places_project ON places(project)",
+        # Категория точки — двуязычная, как name_ru/name_uz везде в проекте
+        # (было единое свободнотекстовое поле category, без реальных данных в проде).
+        "ALTER TABLE places RENAME COLUMN category TO category_ru",
+        "ALTER TABLE places ADD COLUMN IF NOT EXISTS category_uz TEXT",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -6611,7 +6615,8 @@ def _place_as_node(p: dict) -> dict:
         "level": 4,
         "node_type": None,
         "is_place": True,
-        "category": p.get("category"),
+        "category_ru": p.get("category_ru"),
+        "category_uz": p.get("category_uz"),
         "name_ru": p["name_ru"],
         "name_uz": p.get("name_uz") or p["name_ru"],
         "name_ru_full": p["name_ru"],
@@ -6625,19 +6630,19 @@ def _place_as_node(p: dict) -> dict:
         "sort_order": 999999,  # места — в конце списка домов
     }
 
-async def create_place(region_id, project: str, category, name_ru: str, name_uz=None,
+async def create_place(region_id, project: str, category_ru, category_uz, name_ru: str, name_uz=None,
                         lat=None, location_address=None, note=None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO places (region_id, project, category, name_ru, name_uz, lat, location_address, note)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *
-        """, region_id, project or 'artez', category, name_ru, name_uz or name_ru, lat, location_address, note)
+            INSERT INTO places (region_id, project, category_ru, category_uz, name_ru, name_uz, lat, location_address, note)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *
+        """, region_id, project or 'artez', category_ru, category_uz, name_ru, name_uz or name_ru, lat, location_address, note)
         return dict(row) if row else {}
 
 async def update_place(place_id: int, **kwargs) -> dict | None:
     if not pool: return None
-    allowed = {"region_id", "category", "name_ru", "name_uz", "lat", "location_address", "note", "active"}
+    allowed = {"region_id", "category_ru", "category_uz", "name_ru", "name_uz", "lat", "location_address", "note", "active"}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return None
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))

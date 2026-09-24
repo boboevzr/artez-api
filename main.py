@@ -5845,7 +5845,8 @@ async def list_places_ep(region_id: int, project: str = "artez", staff=Depends(g
 async def create_place_ep(
     region_id:        int  = Body(...,    embed=True),
     project:          str  = Body('artez', embed=True),
-    category:         str  = Body(None,   embed=True),
+    category_ru:      str  = Body(None,   embed=True),
+    category_uz:      str  = Body(None,   embed=True),
     name_ru:          str  = Body(...,    embed=True),
     name_uz:          str  = Body(None,   embed=True),
     lat:              str  = Body(None,   embed=True),
@@ -5855,14 +5856,15 @@ async def create_place_ep(
 ):
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только для admin")
-    place = await db.create_place(region_id, project, category, name_ru, name_uz, lat, location_address, note)
+    place = await db.create_place(region_id, project, category_ru, category_uz, name_ru, name_uz, lat, location_address, note)
     return {"ok": True, "place": place}
 
 @app.put("/api/admin/places/{place_id}")
 async def update_place_ep(
     place_id:         int,
     region_id:        int  = Body(None, embed=True),
-    category:         str  = Body(None, embed=True),
+    category_ru:      str  = Body(None, embed=True),
+    category_uz:      str  = Body(None, embed=True),
     name_ru:          str  = Body(None, embed=True),
     name_uz:          str  = Body(None, embed=True),
     lat:              str  = Body(None, embed=True),
@@ -5874,7 +5876,8 @@ async def update_place_ep(
     if staff.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Только для admin")
     fields = {k: v for k, v in {
-        "region_id": region_id, "category": category, "name_ru": name_ru, "name_uz": name_uz,
+        "region_id": region_id, "category_ru": category_ru, "category_uz": category_uz,
+        "name_ru": name_ru, "name_uz": name_uz,
         "lat": lat, "location_address": location_address, "note": note, "active": active,
     }.items() if v is not None}
     place = await db.update_place(place_id, **fields)
