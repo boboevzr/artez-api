@@ -3638,6 +3638,14 @@ async def get_clients_map_points(date_from: str = None, date_to: str = None) -> 
     if not pool: return []
     where = ["o.location IS NOT NULL", "o.location <> ''"]
     params = []
+    # asyncpg с явным ::date в SQL требует datetime.date, а не строку —
+    # передача "YYYY-MM-DD" как str падает с "'str' object has no attribute
+    # 'toordinal'". Парсим сразу, невалидную строку просто игнорируем.
+    def _parse_date(s):
+        try: return datetime.strptime(s, "%Y-%m-%d").date()
+        except (ValueError, TypeError): return None
+    date_from = _parse_date(date_from) if date_from else None
+    date_to = _parse_date(date_to) if date_to else None
     if date_from:
         params.append(date_from)
         where.append(f"o.created_at >= ${len(params)}::date")
