@@ -2632,8 +2632,9 @@ async def clients_list(search: str = "", limit: int = 50, offset: int = 0,
 
 
 @app.get("/api/clients/map-points")
-async def clients_map_points_ep(_=Depends(_get_admin_or_staff_clients)):
-    points = await db.get_clients_map_points()
+async def clients_map_points_ep(date_from: str = None, date_to: str = None,
+                                 _=Depends(_get_admin_or_staff_clients)):
+    points = await db.get_clients_map_points(date_from, date_to)
     return {"ok": True, "points": points}
 
 

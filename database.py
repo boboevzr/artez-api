@@ -3629,21 +3629,32 @@ async def get_crm_clients_search_count(search: str = "") -> int:
             """, f"%{search}%")
         return await conn.fetchval("SELECT COUNT(*) FROM crm_clients")
 
-async def get_clients_map_points() -> list:
+async def get_clients_map_points(date_from: str = None, date_to: str = None) -> list:
     """По одной точке на клиента — координаты последнего заказа с указанной
-    точкой (у самого клиента координат не хранится, только текстовый адрес)."""
+    точкой (у самого клиента координат не хранится, только текстовый адрес).
+    date_from/date_to (YYYY-MM-DD, границы включительно) фильтруют, СРЕДИ
+    КАКИХ заказов искать "последний" — важно фильтровать ДО DISTINCT ON,
+    иначе получится последний заказ вообще, а не последний внутри периода."""
     if not pool: return []
+    where = ["o.location IS NOT NULL", "o.location <> ''"]
+    params = []
+    if date_from:
+        params.append(date_from)
+        where.append(f"o.created_at >= ${len(params)}::date")
+    if date_to:
+        params.append(date_to)
+        where.append(f"o.created_at < (${len(params)}::date + INTERVAL '1 day')")
     async with pool.acquire() as conn:
-        rows = await conn.fetch("""
+        rows = await conn.fetch(f"""
             SELECT DISTINCT ON (o.client_phone)
                    c.id AS client_id, o.client_phone AS phone,
                    c.first_name, c.last_name, c.status,
                    o.location, o.location_address
             FROM orders o
             JOIN crm_clients c ON c.phone = o.client_phone
-            WHERE o.location IS NOT NULL AND o.location <> ''
+            WHERE {" AND ".join(where)}
             ORDER BY o.client_phone, o.created_at DESC
-        """)
+        """, *params)
         return [dict(r) for r in rows]
 
 
