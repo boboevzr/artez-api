@@ -5360,65 +5360,82 @@ def _date_bounds_clause(col: str, date_from: str, date_to: str, params: list) ->
     return frag
 
 
+async def _my_cash_sums(conn, staff_id: int, date_from: str, date_to: str) -> dict:
+    """Считает 7 составляющих баланса сотрудника (опционально в границах периода) —
+    общая часть для get_my_cash_balance(), вызывается дважды, когда нужен и
+    период, и всегда-актуальный "на руках" (см. ниже)."""
+    # Принял от клиентов (только по staff_id)
+    p1 = [staff_id]
+    r1 = await conn.fetchval(
+        f"""SELECT COALESCE(SUM(amount),0) FROM order_payments
+           WHERE method='cash' AND created_by_staff_id=$1{_date_bounds_clause('created_at', date_from, date_to, p1)}""",
+        *p1)
+    # Сдал сразу при записи (handed_to != me)
+    p2 = [staff_id]
+    r2 = await conn.fetchval(
+        f"""SELECT COALESCE(SUM(amount),0) FROM order_payments
+           WHERE method='cash' AND handed_to_staff_id IS NOT NULL AND handed_to_staff_id!=$1
+           AND created_by_staff_id=$1{_date_bounds_clause('created_at', date_from, date_to, p2)}""",
+        *p2)
+    # Получил от других сотрудников через платёж (они сдали мне)
+    p3 = [staff_id]
+    r3 = await conn.fetchval(
+        f"SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id<>$1){_date_bounds_clause('created_at', date_from, date_to, p3)}",
+        *p3)
+    # Получил через ручную передачу (cash_handovers to me, только подтверждённые)
+    p4 = [staff_id]
+    r4 = await conn.fetchval(
+        f"SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE to_staff_id=$1 AND status='confirmed'{_date_bounds_clause('created_at', date_from, date_to, p4)}", *p4)
+    # Сдал через ручную передачу (cash_handovers from me, только подтверждённые)
+    p5 = [staff_id]
+    r5 = await conn.fetchval(
+        f"SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1 AND status='confirmed'{_date_bounds_clause('created_at', date_from, date_to, p5)}", *p5)
+    # Ожидают подтверждения (cash_handovers from me, status='pending')
+    p6 = [staff_id]
+    r6 = await conn.fetchval(
+        f"SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1 AND status='pending'{_date_bounds_clause('created_at', date_from, date_to, p6)}", *p6)
+    # Расходы утверждённые — вычитаются из наличных на руках
+    p7 = [staff_id]
+    r7 = await conn.fetchval(
+        f"SELECT COALESCE(SUM(amount),0) FROM expenses WHERE created_by_staff_id=$1 AND status IN ('approved','paid'){_date_bounds_clause('created_at', date_from, date_to, p7)}",
+        *p7)
+    collected         = float(r1)
+    given_imm         = float(r2)
+    recv_others       = float(r3)
+    recv_hand         = float(r4)
+    given_hand        = float(r5)
+    pending_sent      = float(r6)
+    expenses_approved = float(r7)
+    on_hand = collected - given_imm + recv_others + recv_hand - given_hand - expenses_approved
+    return {
+        "collected":            collected,
+        "given_immediately":    given_imm,
+        "received_from_others": recv_others + recv_hand,
+        "handed_over":          given_imm + given_hand,
+        "pending_sent":         pending_sent,
+        "expenses_approved":    expenses_approved,
+        "on_hand":              on_hand,
+    }
+
+
 async def get_my_cash_balance(staff_id: int, date_from: str = None, date_to: str = None) -> dict:
     """Баланс конкретного сотрудника: принял / сдал / на руках.
     Без date_from/date_to — текущий остаток за всё время (как раньше). С ними —
     те же формулы, но по created_at только внутри периода (по явной просьбе
-    пользователя фильтровать "всё сразу", а не только списки во вкладках)."""
+    пользователя фильтровать "всё сразу", а не только списки во вкладках).
+    "on_hand_total" — ФИЗИЧЕСКИЙ остаток на руках ВСЕГДА за всё время, независимо
+    от фильтра: пользователь явно попросил не фильтровать реальный остаток по
+    периоду (это running balance, а не сумма за период) — только "on_hand"
+    (входит в период-статистику) может быть 0 при фильтре "Сегодня" и т.п."""
     if not pool: return {}
     async with pool.acquire() as conn:
-        # Принял от клиентов (только по staff_id)
-        p1 = [staff_id]
-        r1 = await conn.fetchval(
-            f"""SELECT COALESCE(SUM(amount),0) FROM order_payments
-               WHERE method='cash' AND created_by_staff_id=$1{_date_bounds_clause('created_at', date_from, date_to, p1)}""",
-            *p1)
-        # Сдал сразу при записи (handed_to != me)
-        p2 = [staff_id]
-        r2 = await conn.fetchval(
-            f"""SELECT COALESCE(SUM(amount),0) FROM order_payments
-               WHERE method='cash' AND handed_to_staff_id IS NOT NULL AND handed_to_staff_id!=$1
-               AND created_by_staff_id=$1{_date_bounds_clause('created_at', date_from, date_to, p2)}""",
-            *p2)
-        # Получил от других сотрудников через платёж (они сдали мне)
-        p3 = [staff_id]
-        r3 = await conn.fetchval(
-            f"SELECT COALESCE(SUM(amount),0) FROM order_payments WHERE handed_to_staff_id=$1 AND method='cash' AND (created_by_staff_id IS NULL OR created_by_staff_id<>$1){_date_bounds_clause('created_at', date_from, date_to, p3)}",
-            *p3)
-        # Получил через ручную передачу (cash_handovers to me, только подтверждённые)
-        p4 = [staff_id]
-        r4 = await conn.fetchval(
-            f"SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE to_staff_id=$1 AND status='confirmed'{_date_bounds_clause('created_at', date_from, date_to, p4)}", *p4)
-        # Сдал через ручную передачу (cash_handovers from me, только подтверждённые)
-        p5 = [staff_id]
-        r5 = await conn.fetchval(
-            f"SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1 AND status='confirmed'{_date_bounds_clause('created_at', date_from, date_to, p5)}", *p5)
-        # Ожидают подтверждения (cash_handovers from me, status='pending')
-        p6 = [staff_id]
-        r6 = await conn.fetchval(
-            f"SELECT COALESCE(SUM(amount),0) FROM cash_handovers WHERE from_staff_id=$1 AND status='pending'{_date_bounds_clause('created_at', date_from, date_to, p6)}", *p6)
-        # Расходы утверждённые — вычитаются из наличных на руках
-        p7 = [staff_id]
-        r7 = await conn.fetchval(
-            f"SELECT COALESCE(SUM(amount),0) FROM expenses WHERE created_by_staff_id=$1 AND status IN ('approved','paid'){_date_bounds_clause('created_at', date_from, date_to, p7)}",
-            *p7)
-        collected         = float(r1)
-        given_imm         = float(r2)
-        recv_others       = float(r3)
-        recv_hand         = float(r4)
-        given_hand        = float(r5)
-        pending_sent      = float(r6)
-        expenses_approved = float(r7)
-        on_hand = collected - given_imm + recv_others + recv_hand - given_hand - expenses_approved
-        return {
-            "collected":            collected,
-            "given_immediately":    given_imm,
-            "received_from_others": recv_others + recv_hand,
-            "handed_over":          given_imm + given_hand,
-            "pending_sent":         pending_sent,
-            "expenses_approved":    expenses_approved,
-            "on_hand":              on_hand,
-        }
+        result = await _my_cash_sums(conn, staff_id, date_from, date_to)
+        if date_from or date_to:
+            all_time = await _my_cash_sums(conn, staff_id, None, None)
+            result["on_hand_total"] = all_time["on_hand"]
+        else:
+            result["on_hand_total"] = result["on_hand"]
+        return result
 
 async def get_cash_balance() -> list:
     """Баланс наличных по всем сотрудникам (два уровня: исполнители + ответственные)."""
