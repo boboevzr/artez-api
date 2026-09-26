@@ -5189,8 +5189,6 @@ async def get_route(route_id: int) -> dict | None:
                    o.pickup_date, o.deadline,
                    o.total_price, o.prepaid_amount, o.payment_status,
                    o.discount_sum, o.delivery_discount, o.manual_discount,
-                   COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
-                              FROM order_items WHERE order_id=o.id), 0) AS items_total,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id=o.id
@@ -5201,6 +5199,12 @@ async def get_route(route_id: int) -> dict | None:
             ORDER BY ro.sort_order, ro.id
         """, route_id)
         route["stops"] = [dict(s) for s in stops]
+        # items_total — та же формула с учётом мин.по.позиции/мин.по.заказу, что и
+        # карточка заказа (get_orders_items_totals), а не сырой SUM(price_per_sqm*sqm) —
+        # иначе сумма "к оплате" в канале водителей/staff "Доставка" расходится с карточкой.
+        totals = await get_orders_items_totals([s["order_id"] for s in route["stops"]])
+        for s in route["stops"]:
+            s["items_total"] = totals.get(s["order_id"], 0.0)
         return route
 
 async def update_route(route_id: int, data: dict) -> dict:
