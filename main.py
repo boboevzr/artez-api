@@ -3366,7 +3366,7 @@ class PromotionCreateRequest(BaseModel):
     discount_pct:    float = 0
     starts_at:       str | None = None
     ends_at:         str
-    window_hours:    int = 48
+    window_hours:    int | None = None  # None/0 — напоминать до конца акции (ends_at)
     sound_enabled:   bool = True
     target_new_only: bool = False
     is_active:       bool = True
@@ -3410,7 +3410,7 @@ async def admin_create_promotion(body: PromotionCreateRequest, _=Depends(_get_ad
         row = await db.create_promotion(
             code=body.code.strip(), title_ru=body.title_ru, title_uz=body.title_uz,
             text_ru=body.text_ru, text_uz=body.text_uz, discount_pct=body.discount_pct,
-            ends_at=ends_at, starts_at=starts_at, window_hours=body.window_hours,
+            ends_at=ends_at, starts_at=starts_at, window_hours=body.window_hours or 0,
             sound_enabled=body.sound_enabled, target_new_only=body.target_new_only,
             is_active=body.is_active,
         )
@@ -3438,6 +3438,8 @@ async def admin_update_promotion(promo_id: int, body: PromotionUpdateRequest, _=
         raise HTTPException(status_code=400, detail="Дата окончания должна быть позже даты начала")
     if "code" in data and data["code"] is not None:
         data["code"] = data["code"].strip()
+    if "window_hours" in data and data["window_hours"] is None:
+        data["window_hours"] = 0  # NULL недопустим в БД — 0 означает "до конца акции", см. check_promo_eligibility
     if not data:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
     try:

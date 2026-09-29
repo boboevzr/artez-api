@@ -1769,12 +1769,22 @@ async def check_promo_eligibility(user_id: int, phone: str, channel: str) -> dic
             promo["id"], user_id
         )
         if not state:
+            # Окно напоминания: если window_hours задан (>0) — раньше из двух дат
+            # (не длиннее, чем сама акция), иначе — до конца акции целиком. Раньше
+            # был только NOW()+window_hours, из-за чего многомесячная акция с
+            # window_hours=0/маленьким числом замолкала почти сразу после первого
+            # показа — см. запрос пользователя 2026-09-29.
+            now = datetime.now(timezone.utc)
+            if promo["window_hours"]:
+                expires_at = min(now + timedelta(hours=promo["window_hours"]), promo["ends_at"])
+            else:
+                expires_at = promo["ends_at"]
             state = await conn.fetchrow("""
                 INSERT INTO promo_user_state (promotion_id, user_id, shown_at, expires_at, channel)
-                VALUES ($1, $2, NOW(), NOW() + ($3 * INTERVAL '1 hour'), $4)
+                VALUES ($1, $2, NOW(), $3, $4)
                 ON CONFLICT (promotion_id, user_id) DO NOTHING
                 RETURNING *
-            """, promo["id"], user_id, promo["window_hours"], channel)
+            """, promo["id"], user_id, expires_at, channel)
             if state:
                 mode = "full"
             else:
