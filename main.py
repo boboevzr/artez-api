@@ -3363,7 +3363,7 @@ class PromotionCreateRequest(BaseModel):
     title_uz:        str
     text_ru:         str
     text_uz:         str
-    discount_pct:    float
+    discount_pct:    float = 0
     starts_at:       str | None = None
     ends_at:         str
     window_hours:    int = 48
@@ -3398,7 +3398,9 @@ async def admin_list_promotions(_=Depends(_get_admin)):
 async def admin_create_promotion(body: PromotionCreateRequest, _=Depends(_get_admin)):
     """Создаёт новую промо-кампанию. При is_active=true остальные кампании деактивируются
     (правило "не более одной активной одновременно")."""
-    if not (0 < body.discount_pct <= 100):
+    # 0% допустим — акции без денежной скидки (розыгрыши, конкурсы и т.п.),
+    # см. запрос пользователя 2026-09-28.
+    if not (0 <= body.discount_pct <= 100):
         raise HTTPException(status_code=400, detail="Скидка должна быть в диапазоне от 0 до 100%")
     starts_at = _parse_promo_dt(body.starts_at)
     ends_at = _parse_promo_dt(body.ends_at)
@@ -3426,7 +3428,7 @@ async def admin_update_promotion(promo_id: int, body: PromotionUpdateRequest, _=
     деактивируются (правило "не более одной активной одновременно")."""
     data = body.dict(exclude_unset=True)
     if "discount_pct" in data and data["discount_pct"] is not None:
-        if not (0 < data["discount_pct"] <= 100):
+        if not (0 <= data["discount_pct"] <= 100):
             raise HTTPException(status_code=400, detail="Скидка должна быть в диапазоне от 0 до 100%")
     if "starts_at" in data:
         data["starts_at"] = _parse_promo_dt(data["starts_at"])
