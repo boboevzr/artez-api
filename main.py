@@ -3452,6 +3452,14 @@ async def admin_update_promotion(promo_id: int, body: PromotionUpdateRequest, _=
     return {"ok": True, "promotion": row}
 
 
+@app.post("/api/admin/promotions/{promo_id}/reset-tracking")
+async def admin_reset_promo_tracking(promo_id: int, _=Depends(_get_admin)):
+    """Сбрасывает трекинг показов акции — все клиенты (в т.ч. уже видевшие
+    её раньше) увидят её заново при следующем заходе."""
+    deleted = await db.reset_promo_tracking(promo_id)
+    return {"ok": True, "deleted": deleted}
+
+
 class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None

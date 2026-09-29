@@ -1912,6 +1912,22 @@ async def update_promotion(promo_id: int, **kwargs) -> dict | None:
             return dict(row) if row else None
 
 
+async def reset_promo_tracking(promo_id: int) -> int:
+    """Admin: сбрасывает трекинг показов акции (удаляет все promo_user_state)
+    — иначе клиент, который уже видел/использовал эту акцию раньше (в т.ч.
+    сам админ при тестировании), продолжает получать mode='none' и после
+    правок кампании. См. запрос пользователя 2026-09-29 (акция не показывалась
+    авторизованному тестовому аккаунту, хотя target_new_only был выключен)."""
+    if not pool:
+        return 0
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM promo_user_state WHERE promotion_id=$1", promo_id)
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 # ══════════════════════════════════════
 #  ЦЕНЫ (общая таблица с ботом)
 # ══════════════════════════════════════
