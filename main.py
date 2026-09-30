@@ -3777,6 +3777,13 @@ class ServiceRequest(BaseModel):
     emoji: str = ''
     order_idx: int = 0
 
+class ServiceTypeRequest(BaseModel):
+    service_key: str
+    type_key: str
+    name_ru: str
+    name_uz: str
+    order_idx: int = 0
+
 class UnitRequest(BaseModel):
     key: str
     name_ru: str
@@ -4309,11 +4316,11 @@ async def admin_get_prices(_=Depends(get_admin)):
 @app.put("/api/admin/prices")
 async def admin_set_price(req: SetPriceRequest, _=Depends(get_admin)):
     SERVICE_KEYS = [s["key"] for s in await db.get_services()]
-    TYPE_KEYS    = ["standard","express"]
     if req.service_key not in SERVICE_KEYS:
         raise HTTPException(status_code=400, detail=f"Неверная услуга: {req.service_key}")
+    TYPE_KEYS = [t["type_key"] for t in await db.get_service_types(req.service_key)]
     if req.type_key not in TYPE_KEYS:
-        raise HTTPException(status_code=400, detail=f"Неверный тип: {req.type_key}")
+        raise HTTPException(status_code=400, detail=f"Неверный тип для этой услуги: {req.type_key}")
     if req.price <= 0:
         raise HTTPException(status_code=400, detail="Цена должна быть > 0")
     if req.min_order is not None and req.min_order <= 0:
@@ -4352,6 +4359,38 @@ async def admin_delete_service(key: str, _=Depends(get_admin)):
     ok = await db.delete_service(key)
     if not ok:
         raise HTTPException(status_code=404, detail="Услуга не найдена")
+    return {"ok": True}
+
+@app.get("/api/service-types")
+async def get_service_types_public(service_key: str = None):
+    """Публичный эндпоинт — варианты цены услуги (скорость, размер и т.п.)"""
+    types = await db.get_service_types(service_key)
+    return {"ok": True, "types": types}
+
+@app.get("/api/admin/service-types")
+async def admin_get_service_types(service_key: str = None, _=Depends(get_admin)):
+    types = await db.get_service_types(service_key)
+    return {"ok": True, "types": types}
+
+@app.put("/api/admin/service-types")
+async def admin_upsert_service_type(req: ServiceTypeRequest, _=Depends(get_admin)):
+    if not req.service_key.strip():
+        raise HTTPException(status_code=400, detail="Укажите услугу")
+    if not req.type_key.strip():
+        raise HTTPException(status_code=400, detail="Укажите ключ варианта")
+    if not req.name_ru.strip():
+        raise HTTPException(status_code=400, detail="Укажите название на RU")
+    if not req.name_uz.strip():
+        raise HTTPException(status_code=400, detail="Укажите название на UZ")
+    await db.upsert_service_type(req.service_key.strip(), req.type_key.strip(),
+                                  req.name_ru.strip(), req.name_uz.strip(), req.order_idx)
+    return {"ok": True}
+
+@app.delete("/api/admin/service-types/{service_key}/{type_key}")
+async def admin_delete_service_type(service_key: str, type_key: str, _=Depends(get_admin)):
+    ok = await db.delete_service_type(service_key, type_key)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Вариант не найден")
     return {"ok": True}
 
 @app.get("/api/units")

@@ -1269,6 +1269,29 @@ async def create_tables():
         CREATE INDEX IF NOT EXISTS idx_active_contacts_phone ON active_contacts(phone);
         """)
 
+    # ── Шаг 23: варианты цены услуги (не только скорость standard/express —
+    # любой признак: размер, вместимость и т.д., свой список на каждую услугу).
+    # См. запрос пользователя 2026-09-30 (пример: Матрас — маленький/средний/
+    # большой; Диван — 1-местный/2-местный/3-местный).
+    async with pool.acquire() as c:
+        await c.execute("""
+        CREATE TABLE IF NOT EXISTS service_types (
+            id          SERIAL PRIMARY KEY,
+            service_key VARCHAR(30) NOT NULL REFERENCES services(key) ON DELETE CASCADE,
+            type_key    VARCHAR(20) NOT NULL,
+            name_ru     VARCHAR(100) NOT NULL,
+            name_uz     VARCHAR(100) NOT NULL,
+            order_idx   INTEGER NOT NULL DEFAULT 0,
+            UNIQUE(service_key, type_key)
+        );
+        INSERT INTO service_types (service_key, type_key, name_ru, name_uz, order_idx)
+        SELECT key, 'standard', 'Стандартный', 'Standart', 1 FROM services
+        ON CONFLICT (service_key, type_key) DO NOTHING;
+        INSERT INTO service_types (service_key, type_key, name_ru, name_uz, order_idx)
+        SELECT key, 'express', 'Быстрый', 'Tezkor', 2 FROM services
+        ON CONFLICT (service_key, type_key) DO NOTHING;
+        """)
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -2008,6 +2031,43 @@ async def delete_service(key: str):
         return False
     async with pool.acquire() as conn:
         r = await conn.execute("DELETE FROM services WHERE key=$1", key)
+        return r == "DELETE 1"
+
+# ══════════════════════════════════════
+#  ВАРИАНТЫ ЦЕНЫ УСЛУГИ (per-service: скорость, размер, вместимость и т.д. —
+#  не зашитый enum, свой список на каждую услугу)
+# ══════════════════════════════════════
+async def get_service_types(service_key: str = None) -> list:
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        if service_key:
+            rows = await conn.fetch(
+                "SELECT * FROM service_types WHERE service_key=$1 ORDER BY order_idx, type_key", service_key)
+        else:
+            rows = await conn.fetch("SELECT * FROM service_types ORDER BY service_key, order_idx, type_key")
+        return [dict(r) for r in rows]
+
+async def upsert_service_type(service_key: str, type_key: str, name_ru: str, name_uz: str, order_idx: int = 0):
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO service_types (service_key, type_key, name_ru, name_uz, order_idx)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (service_key, type_key) DO UPDATE SET
+                name_ru   = EXCLUDED.name_ru,
+                name_uz   = EXCLUDED.name_uz,
+                order_idx = EXCLUDED.order_idx
+        """, service_key, type_key, name_ru, name_uz, order_idx)
+        return True
+
+async def delete_service_type(service_key: str, type_key: str):
+    if not pool:
+        return False
+    async with pool.acquire() as conn:
+        r = await conn.execute(
+            "DELETE FROM service_types WHERE service_key=$1 AND type_key=$2", service_key, type_key)
         return r == "DELETE 1"
 
 # ══════════════════════════════════════
