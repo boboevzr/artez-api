@@ -1572,6 +1572,8 @@ async def remove_route_order(route_id: int, order_id: int, me=Depends(get_curren
 
 @app.patch("/api/admin/routes/{route_id}/orders/{order_id}")
 async def update_route_stop(route_id: int, order_id: int, body: dict, me=Depends(get_current_staff)):
+    if me.get("role") not in ("admin","logistics","manager"):
+        raise HTTPException(status_code=403)
     await db.update_route_stop(route_id, order_id, body)
     await _auto_sync_route_channel(route_id)
     return {"ok": True}
