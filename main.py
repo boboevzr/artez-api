@@ -1,4 +1,4 @@
-﻿import os
+import os
 import re
 import secrets
 import logging
@@ -4971,32 +4971,79 @@ async def preview_receipt(body: dict, _=Depends(get_admin)):
 
 
 @app.get("/api/admin/orders/{order_id}/items")
-async def admin_get_order_items(order_id: int, _=Depends(get_current_staff)):
+async def admin_get_order_items(order_id: int, staff=Depends(get_current_staff)):
     # get_order_items_billing — та же логика мин.по.позиции/мин.по.заказу, что и в
     # клиентском кабинете (см. db.get_order_items_billing); карточка заказа в admin.html
     # раньше просто суммировала total_sum по позициям, вообще без учёта минимумов.
-    billing = await db.get_order_items_billing(order_id)
+    # Мойщик видит только цену по прайсу — договорная цена и скидка скрыты НА СЕРВЕРЕ.
+    billing = await db.get_order_items_billing(order_id, as_list_price=staff.get("role") == "washer")
     return {"ok": True, "items": billing["items"], "groups": billing["groups"], "order_total": billing["order_total"]}
 
 class OrderItemRequest(BaseModel):
     service: str
     service_ru: str | None = None
     service_uz: str | None = None
+    service_key: str | None = None   # ключи из справочника — точнее, чем сопоставление по тексту
+    type_key: str | None = None
     sqm: float | None = None
     width_cm: float | None = None
     length_cm: float | None = None
-    price_per_sqm: float = 0
+    price_per_sqm: float = 0          # цена ПО ДОГОВОРУ
+    discount_note: str | None = None  # причина скидки (необязательно)
+
+
+def _is_price_editor(staff: dict) -> bool:
+    """Цену по договору (в т.ч. ниже прайса — скидку) ставят только менеджер и админ
+    (+ сотрудники с отдельным правом can_edit_price) — решение пользователя 2026-10-10."""
+    return staff.get("role") in ("admin", "manager") or bool(staff.get("can_edit_price"))
+
+
+def _item_for(staff: dict, item: dict | None) -> dict | None:
+    """Позиция в ответе API: мойщику — по цене прайса, без договорной цены и скидки."""
+    if not item or staff.get("role") != "washer":
+        return item
+    out = dict(item)
+    if out.get("list_price") is not None:
+        out["price_per_sqm"] = out["list_price"]
+        out["total_sum"] = float(out.get("sqm") or 0) * float(out["list_price"])
+        out["actual_total_sum"] = None
+    out["discount_note"] = None
+    out["price_set_by"] = None
+    return out
+
+
+def _price_audit(staff: dict, price: float, list_price, note: str | None) -> dict:
+    """Кто и когда поставил цену; причина — только если цена ниже прайса."""
+    is_discount = list_price is not None and price < float(list_price)
+    return {
+        "price_set_by": staff.get("id"),
+        "price_set_at": datetime.now(timezone.utc),
+        "discount_note": ((note or "").strip()[:500] or None) if is_discount else None,
+    }
+
 
 @app.post("/api/admin/orders/{order_id}/items")
-async def admin_create_order_item(order_id: int, req: OrderItemRequest, _=Depends(get_current_staff)):
+async def admin_create_order_item(order_id: int, req: OrderItemRequest, staff=Depends(get_current_staff)):
     sqm = req.sqm
     if not sqm and req.width_cm and req.length_cm:
         sqm = round(req.width_cm * req.length_cm / 10000, 3)
+    snap = await db.resolve_price_snapshot(req.service_key, req.type_key, req.service,
+                                           req.service_ru, req.service_uz) or {}
+    editor = _is_price_editor(staff)
+    price = float(req.price_per_sqm or 0)
+    if snap and (not editor or price <= 0):
+        price = snap.get("list_price") or 0      # не менеджер — всегда цена по прайсу
+    elif not snap and not editor:
+        price = 0                                # «своя» услуга — цену поставит менеджер
+    extra = dict(snap)
+    extra.update(service_ru=req.service_ru, service_uz=req.service_uz)
+    if editor:
+        extra.update(_price_audit(staff, price, snap.get("list_price"), req.discount_note))
     item = await db.create_order_item(
         order_id=order_id, service=req.service, sqm=sqm or 0,
-        price_per_sqm=req.price_per_sqm,
-        width_cm=req.width_cm, length_cm=req.length_cm)
-    return {"ok": True, "item": item}
+        price_per_sqm=price,
+        width_cm=req.width_cm, length_cm=req.length_cm, **extra)
+    return {"ok": True, "item": _item_for(staff, item)}
 
 @app.post("/api/admin/orders/{order_id}/items/bulk")
 async def admin_bulk_create_items(order_id: int, count: int = Body(..., embed=True),
@@ -5035,7 +5082,41 @@ async def admin_update_order_item(order_id: int, item_id: int,
                 "SELECT COUNT(*) FROM order_items WHERE order_id=$1 AND id <= $2",
                 order_id, item_id
             )
-    updates = {"service": req.service, "price_per_sqm": req.price_per_sqm}
+    # ── Снимок прайса и цена по договору (2026-10-10) ──
+    # Снимок (ключи, цена по прайсу, минимумы) берётся заново, только если сменилась
+    # услуга; обычная правка (замер, размеры) его не трогает — иначе смена прайса
+    # «просочилась» бы в старый заказ при любом сохранении.
+    snap = await db.resolve_price_snapshot(req.service_key, req.type_key, req.service,
+                                           req.service_ru, req.service_uz)
+    text_changed = (old.get("service") or "").strip() != (req.service or "").strip()
+    keys_changed = bool(snap and old.get("service_key")
+                        and (snap["service_key"], snap["type_key"]) != (old.get("service_key"), old.get("type_key")))
+    service_changed = text_changed or keys_changed
+    editor = _is_price_editor(staff)
+    old_price = float(old.get("price_per_sqm") or 0)
+    list_price = snap.get("list_price") if (snap and service_changed) else old.get("list_price")
+    if editor:
+        price = float(req.price_per_sqm or 0)
+        if service_changed and snap and price <= 0:
+            price = snap.get("list_price") or 0
+    elif service_changed and snap:
+        price = snap.get("list_price") or 0     # новая услуга из прайса — по прайсу
+    else:
+        price = old_price                       # не менеджер не меняет цену (в т.ч. скидку)
+    updates = {"service": req.service, "price_per_sqm": price}
+    if snap and service_changed:
+        updates.update(snap)
+    elif snap and not old.get("service_key"):
+        # старая позиция без снимка: фиксируем ключи и минимумы на сегодня, цену по прайсу
+        # не ставим — какой прайс был при создании заказа, уже неизвестно
+        updates.update({k: snap[k] for k in ("service_key", "type_key", "unit_key_snap",
+                                              "min_order_snap", "min_order_total_snap")})
+    elif not snap and text_changed:
+        # «своя» услуга вне прайса — снимок сбрасываем
+        updates.update(service_key=None, type_key=None, list_price=None, unit_key_snap=None,
+                       min_order_snap=None, min_order_total_snap=None)
+    if editor and (abs(price - old_price) > 0.005 or service_changed or req.discount_note is not None):
+        updates.update(_price_audit(staff, price, list_price, req.discount_note))
     if sqm: updates["sqm"] = sqm
     if req.width_cm: updates["width_cm"] = req.width_cm
     if req.length_cm: updates["length_cm"] = req.length_cm
@@ -5058,9 +5139,13 @@ async def admin_update_order_item(order_id: int, item_id: int,
         if abs(old_sqm - new_sqm) > 0.001:
             parts.append(f"Площадь: {old_sqm:.2f} → {new_sqm:.2f} м²")
         old_p = float(old.get('price_per_sqm') or 0)
-        new_p = float(req.price_per_sqm or 0)
+        new_p = float(price or 0)
         if abs(old_p - new_p) > 0.5:
-            parts.append(f"Цена: {int(old_p):,} → {int(new_p):,} сум/м²")
+            disc = ""
+            if list_price is not None and new_p < float(list_price):
+                disc = f" (прайс {int(float(list_price)):,}, скидка {int(float(list_price) - new_p):,}"
+                disc += f": {updates.get('discount_note')})" if updates.get('discount_note') else ")"
+            parts.append(f"Цена: {int(old_p):,} → {int(new_p):,} сум/м²{disc}")
         old_w, old_l = old.get('width_cm'), old.get('length_cm')
         if (old_w, old_l) != (req.width_cm, req.length_cm):
             parts.append(f"Размер: {_fmt_dim(old_w, old_l)} → {_fmt_dim(req.width_cm, req.length_cm)}")
@@ -5069,7 +5154,7 @@ async def admin_update_order_item(order_id: int, item_id: int,
         if sqm: parts.append(f"{sqm:.2f} м²")
     prefix = f"#{item_pos} {old.get('service') or req.service or '—'}: " if item_pos else ""
     await db.add_order_activity(order_id, staff.get("id"), sname, "item_edited", prefix + "; ".join(parts))
-    return {"ok": True, "item": item}
+    return {"ok": True, "item": _item_for(staff, item)}
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}")
 async def admin_delete_order_item(order_id: int, item_id: int, _=Depends(get_current_staff)):
@@ -7167,7 +7252,7 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                                      exclude=staff.get("id"))
     except Exception as e:
         logging.warning(f"item_updated broadcast error: {e}")
-    return {"ok": True, "item": item}
+    return {"ok": True, "item": _item_for(staff, item)}
 
 @app.post("/api/admin/orders/{order_id}/items/{item_id}/measure/claim")
 async def claim_measure_review(order_id: int, item_id: int, staff=Depends(get_current_staff)):
@@ -7176,7 +7261,7 @@ async def claim_measure_review(order_id: int, item_id: int, staff=Depends(get_cu
     item = await db.claim_measure_review(item_id, staff["id"])
     if not item:
         raise HTTPException(status_code=404, detail="Замер не найден или уже утверждён")
-    return {"ok": True, "item": item}
+    return {"ok": True, "item": _item_for(staff, item)}
 
 @app.get("/api/staff/pending-payment-reviews")
 async def get_pending_payment_reviews(staff=Depends(get_current_staff)):
@@ -7451,7 +7536,7 @@ async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_c
                                      exclude=staff.get("id"))
     except Exception as e:
         logging.warning(f"item_updated broadcast error: {e}")
-    return {"ok": True, "item": item}
+    return {"ok": True, "item": _item_for(staff, item)}
 
 @app.patch("/api/admin/staff/{staff_id}/can-edit-items")
 async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),

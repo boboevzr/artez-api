@@ -283,6 +283,19 @@ async def create_tables():
         # сохранения, из-за чего позиции показывались вперемешку RU/UZ клиенту)
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS service_ru TEXT DEFAULT NULL",
         "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS service_uz TEXT DEFAULT NULL",
+        # Снимок прайса в момент выбора услуги (2026-10-10): price_per_sqm — цена ПО ДОГОВОРУ
+        # (по ней деньги), list_price — по прайсу (для показа скидки), минимумы — какими были
+        # тогда. Смена прайса/минимумов больше не пересчитывает существующие заказы.
+        # Те же колонки добавляет CLEANO-SAAS-API — держать списки одинаковыми.
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS service_key VARCHAR(50) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS type_key VARCHAR(50) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS list_price NUMERIC(10,2) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS unit_key_snap VARCHAR(20) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS min_order_snap NUMERIC(10,2) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS min_order_total_snap NUMERIC(10,2) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS discount_note TEXT DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS price_set_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS price_set_at TIMESTAMPTZ DEFAULT NULL",
         # Отсрочка доставки после статуса "Готов" — клиент просит подождать (ремонт,
         # переезд, отпуск). Заказ остаётся в статусе ready, поля работают поверх него.
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS postponed_until DATE DEFAULT NULL",
@@ -2113,18 +2126,52 @@ async def _price_match_maps() -> tuple[dict, dict]:
     услуги из справочника (см. sifFindPriceMatch в staff.html)."""
     prices   = await get_all_prices()
     services = await get_services()
+    # Живые названия вариантов (service_types: «Стандартный», «Маленький»…) + старые
+    # зашитые («Стандарт»/«Экспресс») — позиции до 2026-09-30 хранят старые подписи.
+    live_types: dict[tuple, dict] = {}
+    try:
+        for t in await get_service_types():
+            live_types[(t["service_key"], t["type_key"])] = t
+    except Exception:
+        pass
     ru_map, uz_map = {}, {}
     for s in services:
         svc_key = s["key"]
         if svc_key not in prices:
             continue
+        emoji = (s.get("emoji") or "").strip()
         for type_key in prices[svc_key]:
-            emoji = (s.get("emoji") or "").strip()
-            ru_label = f"{emoji} {s['name_ru']}".strip() + f" — {_TYPE_NAMES_RU.get(type_key, type_key)}"
-            uz_label = f"{emoji} {s['name_uz']}".strip() + f" — {_TYPE_NAMES_UZ.get(type_key, type_key)}"
-            ru_map[ru_label] = (svc_key, type_key)
-            uz_map[uz_label] = (svc_key, type_key)
+            lt = live_types.get((svc_key, type_key)) or {}
+            for name_ru in {_TYPE_NAMES_RU.get(type_key, type_key), lt.get("name_ru")} - {None, ""}:
+                ru_map[f"{emoji} {s['name_ru']}".strip() + f" — {name_ru}"] = (svc_key, type_key)
+            for name_uz in {_TYPE_NAMES_UZ.get(type_key, type_key), lt.get("name_uz")} - {None, ""}:
+                uz_map[f"{emoji} {s['name_uz']}".strip() + f" — {name_uz}"] = (svc_key, type_key)
     return ru_map, uz_map
+
+
+async def resolve_price_snapshot(service_key: str | None, type_key: str | None, service: str | None = None,
+                                 service_ru: str | None = None, service_uz: str | None = None) -> dict | None:
+    """Снимок прайса для позиции: ключи услуги + цена по прайсу + минимумы НА СЕЙЧАС.
+    Сначала по ключам (staff.html/admin.html шлют их при выборе из справочника), иначе —
+    по тексту названия (старые клиенты, водитель «по услугам»). None — «своя» услуга вне прайса."""
+    prices = await get_all_prices()
+    key = None
+    if service_key and type_key and prices.get(service_key, {}).get(type_key):
+        key = (service_key, type_key)
+    elif service or service_ru or service_uz:
+        ru_map, uz_map = await _price_match_maps()
+        key = (ru_map.get(service_ru) or uz_map.get(service_uz)
+               or ru_map.get(service) or uz_map.get(service))
+    if not key:
+        return None
+    cat = prices[key[0]][key[1]]
+    return {
+        "service_key": key[0], "type_key": key[1],
+        "list_price": float(cat["price"]) if cat.get("price") is not None else None,
+        "unit_key_snap": cat.get("unit_key"),
+        "min_order_snap": cat.get("min_order"),
+        "min_order_total_snap": cat.get("min_order_total"),
+    }
 
 def _group_unit_price(qty: float, price_weight: float, first_price, catalog) -> float | None:
     """Цена единицы для «мин. по заказу» — из ПОЗИЦИЙ заказа (цена на момент добавления),
@@ -2138,6 +2185,23 @@ def _group_unit_price(qty: float, price_weight: float, first_price, catalog) -> 
     return float(catalog["price"]) if (catalog and catalog.get("price")) else None
 
 
+def _item_match(it, ru_map: dict, uz_map: dict):
+    """(service_key, type_key) позиции: сохранённые ключи (позиции с 2026-10-10),
+    иначе — сопоставление текста названия с прайсом (старые позиции)."""
+    if it.get("service_key") and it.get("type_key"):
+        return (it["service_key"], it["type_key"])
+    return (ru_map.get(it.get("service_ru")) or uz_map.get(it.get("service_uz"))
+            or ru_map.get(it.get("service")) or uz_map.get(it.get("service")))
+
+
+def _snap_or_catalog(it, field_snap: str, catalog, field_cat: str):
+    """Минимум из снимка позиции (каким был при выборе услуги); нет снимка — текущий прайс."""
+    v = it.get(field_snap)
+    if v is not None:
+        return float(v)
+    return float(catalog[field_cat]) if (catalog and catalog.get(field_cat)) else None
+
+
 async def get_orders_items_totals(order_ids: list[int]) -> dict[int, float]:
     """Order-level 'Итого' с учётом мин.по.позиции/мин.по.заказу — та же логика,
     что staffRenderItems() в staff.html (группировка по услуге, floor по каталогу).
@@ -2145,15 +2209,12 @@ async def get_orders_items_totals(order_ids: list[int]) -> dict[int, float]:
     if not order_ids or not pool:
         return {}
     async with pool.acquire() as conn:
-        items = await conn.fetch(
-            "SELECT order_id, service, service_ru, service_uz, sqm, price_per_sqm, total_sum "
-            "FROM order_items WHERE order_id = ANY($1::int[])", order_ids)
+        items = [dict(r) for r in await conn.fetch(
+            "SELECT order_id, service, service_ru, service_uz, sqm, price_per_sqm, total_sum, "
+            "service_key, type_key, min_order_snap, min_order_total_snap "
+            "FROM order_items WHERE order_id = ANY($1::int[])", order_ids)]
     prices = await get_all_prices()
     ru_map, uz_map = await _price_match_maps()
-
-    def find_match(it):
-        return (ru_map.get(it["service_ru"]) or uz_map.get(it["service_uz"])
-                or ru_map.get(it["service"]) or uz_map.get(it["service"]))
 
     groups: dict[tuple, dict] = {}
     no_service_totals: dict[int, float] = {}
@@ -2162,10 +2223,12 @@ async def get_orders_items_totals(order_ids: list[int]) -> dict[int, float]:
         if not it["service"]:
             no_service_totals[oid] = no_service_totals.get(oid, 0.0) + float(it["total_sum"] or 0)
             continue
-        m = find_match(it)
-        gkey = it["service_ru"] or (f"{m[0]}::{m[1]}" if m else it["service"])
+        m = _item_match(it, ru_map, uz_map)
+        # одна услуга = одна группа минимума: по ключам, если известны (подписи бывают разные:
+        # «Стандарт»/«Стандартный», с service_ru и без) — иначе по тексту
+        gkey = f"{m[0]}::{m[1]}" if m else (it["service_ru"] or it["service"])
         g = groups.setdefault((oid, gkey), {"sqm": 0.0, "count": 0, "clamped": 0.0, "match": m,
-                                            "price_weight": 0.0, "first_price": None})
+                                            "price_weight": 0.0, "first_price": None, "group_min": None})
         sqm   = float(it["sqm"] or 0)
         price = float(it["price_per_sqm"] or 0)
         total = float(it["total_sum"] or 0)
@@ -2175,14 +2238,16 @@ async def get_orders_items_totals(order_ids: list[int]) -> dict[int, float]:
         if g["first_price"] is None and price:
             g["first_price"] = price
         catalog  = prices.get(m[0], {}).get(m[1]) if m else None
-        pos_min  = catalog.get("min_order") if catalog else None
+        pos_min  = _snap_or_catalog(it, "min_order_snap", catalog, "min_order")
+        if g["group_min"] is None:
+            g["group_min"] = _snap_or_catalog(it, "min_order_total_snap", catalog, "min_order_total")
         g["clamped"] += (pos_min * price) if (pos_min and sqm and sqm < pos_min and price) else total
 
     totals: dict[int, float] = dict(no_service_totals)
     for (oid, _gkey), g in groups.items():
         m = g["match"]
         catalog   = prices.get(m[0], {}).get(m[1]) if m else None
-        group_min = catalog.get("min_order_total") if catalog else None
+        group_min = g["group_min"]
         price     = _group_unit_price(g["sqm"], g["price_weight"], g["first_price"], catalog)
         qty       = g["sqm"] if g["sqm"] > 0 else g["count"]
         contribution = (group_min * price) if (group_min and qty < group_min and price) else g["clamped"]
@@ -2190,23 +2255,29 @@ async def get_orders_items_totals(order_ids: list[int]) -> dict[int, float]:
     return totals
 
 
-async def get_order_items_billing(order_id: int) -> dict:
+async def get_order_items_billing(order_id: int, as_list_price: bool = False) -> dict:
     """Позиции заказа с детализацией мин.по.позиции/мин.по.заказу — та же логика
     расчёта, что get_orders_items_totals() (см. её комментарий), но возвращает
     ДЕТАЛИЗАЦИЮ по каждой позиции и группе услуг, а не только итог по заказу —
     для клиентского личного кабинета (показать, что и почему досчитано до минимума),
-    старая функция для списка заказов сознательно не тронута."""
+    старая функция для списка заказов сознательно не тронута.
+    as_list_price=True — для мойщика: всё по цене прайса (list_price), без договорной
+    цены и скидки (решение пользователя 2026-10-10: мойщик видит только прайс)."""
     if not pool:
         return {"items": [], "groups": [], "order_total": 0.0}
     async with pool.acquire() as conn:
-        items = await conn.fetch(
-            "SELECT * FROM order_items WHERE order_id = $1 ORDER BY id", order_id)
+        items = [dict(r) for r in await conn.fetch(
+            "SELECT * FROM order_items WHERE order_id = $1 ORDER BY id", order_id)]
+    if as_list_price:
+        for it in items:
+            if it.get("list_price") is not None:
+                it["price_per_sqm"] = it["list_price"]
+                it["actual_total_sum"] = None  # пересчитать по прайсу
+                it["total_sum"] = float(it["sqm"] or 0) * float(it["list_price"])
+            it["discount_note"] = None
+            it["price_set_by"] = None
     prices = await get_all_prices()
     ru_map, uz_map = await _price_match_maps()
-
-    def find_match(it):
-        return (ru_map.get(it["service_ru"]) or uz_map.get(it["service_uz"])
-                or ru_map.get(it["service"]) or uz_map.get(it["service"]))
 
     enriched = []
     groups: dict = {}
@@ -2221,9 +2292,9 @@ async def get_order_items_billing(order_id: int) -> dict:
         price = float(it["price_per_sqm"] or 0)
         eff_sqm = float(it["actual_sqm"]) if it["actual_sqm"] is not None else float(it["sqm"] or 0)
         eff_total = float(it["actual_total_sum"]) if it["actual_total_sum"] is not None else (eff_sqm * price)
-        m = find_match(it)
+        m = _item_match(it, ru_map, uz_map)
         catalog = prices.get(m[0], {}).get(m[1]) if m else None
-        pos_min = float(catalog["min_order"]) if (catalog and catalog.get("min_order")) else None
+        pos_min = _snap_or_catalog(it, "min_order_snap", catalog, "min_order")
         pos_clamped = bool(pos_min and eff_sqm and eff_sqm < pos_min)
         billed_sqm = pos_min if pos_clamped else eff_sqm
         billed_total = (billed_sqm * price) if (billed_sqm and price) else eff_total
@@ -2236,18 +2307,20 @@ async def get_order_items_billing(order_id: int) -> dict:
         enriched.append(row)
 
         if it["service"]:
-            gkey = it["service_ru"] or (f"{m[0]}::{m[1]}" if m else it["service"])
+            gkey = f"{m[0]}::{m[1]}" if m else (it["service_ru"] or it["service"])  # см. get_orders_items_totals
             g = groups.setdefault(gkey, {
                 "label": it["service_ru"] or it["service"],
                 "billed_sqm": 0.0, "raw_sqm": 0.0, "count": 0,
                 "billed_amount": 0.0, "match": m,
                 "price_weight": 0.0, "first_price": None,
+                "group_min": _snap_or_catalog(it, "min_order_total_snap", catalog, "min_order_total"),
+                "unit_key": it.get("unit_key_snap") or (catalog or {}).get("unit_key"),
             })
             g["billed_sqm"]    += billed_sqm
             g["raw_sqm"]       += eff_sqm
             g["count"]         += 1
             g["billed_amount"] += billed_total
-            g["price_weight"]  += billed_sqm * price
+            g["price_weight"]  += eff_sqm * price  # средняя цена — по фактической площади, как в списке и staff.html
             if g["first_price"] is None and price:
                 g["first_price"] = price
         else:
@@ -2257,15 +2330,15 @@ async def get_order_items_billing(order_id: int) -> dict:
     for gkey, g in groups.items():
         m = g["match"]
         catalog = prices.get(m[0], {}).get(m[1]) if m else None
-        group_min = float(catalog["min_order_total"]) if (catalog and catalog.get("min_order_total")) else None
-        price = _group_unit_price(g["billed_sqm"], g["price_weight"], g["first_price"], catalog)
+        group_min = g["group_min"]
+        price = _group_unit_price(g["raw_sqm"], g["price_weight"], g["first_price"], catalog)
         qty = g["billed_sqm"] if g["billed_sqm"] > 0 else g["count"]
         group_clamped = bool(group_min and qty < group_min and price)
         group_amount = (group_min * price) if group_clamped else g["billed_amount"]
         group_list.append({
             "label": g["label"], "billed_sqm": g["billed_sqm"], "raw_sqm": g["raw_sqm"], "count": g["count"],
             "min_order_total": group_min, "group_clamped": group_clamped, "amount": group_amount,
-            "unit_key": (catalog or {}).get("unit_key") or "m2", "price": price,
+            "unit_key": g["unit_key"] or "m2", "price": price,
         })
         order_total += group_amount
 
@@ -4353,15 +4426,25 @@ async def get_order_items(order_id: int) -> list:
             "SELECT * FROM order_items WHERE order_id=$1 ORDER BY id", order_id)
         return [dict(r) for r in rows]
 
+_ITEM_EXTRA_FIELDS = ("service_ru", "service_uz", "service_key", "type_key", "list_price", "unit_key_snap",
+                      "min_order_snap", "min_order_total_snap", "discount_note", "price_set_by", "price_set_at")
+
+
 async def create_order_item(order_id: int, service: str, sqm: float,
                              price_per_sqm: float, width_cm: float = None,
-                             length_cm: float = None) -> dict:
+                             length_cm: float = None, **extra) -> dict:
+    """extra — снимок прайса и аудит цены (см. _ITEM_EXTRA_FIELDS, resolve_price_snapshot)."""
     if not pool: return {}
+    cols = ["order_id", "service", "width_cm", "length_cm", "sqm", "price_per_sqm"]
+    vals = [order_id, service, width_cm, length_cm, sqm, price_per_sqm]
+    for k in _ITEM_EXTRA_FIELDS:
+        if extra.get(k) is not None:
+            cols.append(k)
+            vals.append(extra[k])
+    ph = ", ".join(f"${i+1}" for i in range(len(vals)))
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO order_items (order_id, service, width_cm, length_cm, sqm, price_per_sqm)
-            VALUES ($1, $2, $3, $4, $5, $6) RETURNING *
-        """, order_id, service, width_cm, length_cm, sqm, price_per_sqm)
+        row = await conn.fetchrow(
+            f"INSERT INTO order_items ({', '.join(cols)}) VALUES ({ph}) RETURNING *", *vals)
         return dict(row) if row else {}
 
 async def create_empty_items(order_id: int, count: int) -> list:
@@ -4380,23 +4463,23 @@ async def create_empty_items(order_id: int, count: int) -> list:
 async def create_empty_items_by_service(order_id: int, service_counts: dict[str, int]) -> list:
     """Как create_empty_items, но с указанием названия услуги на каждую позицию —
     для водителя, который забирает несколько РАЗНЫХ услуг у клиента и хочет
-    сразу пометить что есть что (мойщик потом доизмерит и проставит цену)."""
+    сразу пометить что есть что (мойщик потом доизмерит).
+    С 2026-10-10: услуга из прайса — сразу снимок прайса и цена = цена по прайсу
+    (менять её дальше может только менеджер/админ, см. admin_update_order_item)."""
     if not pool: return []
     result = []
-    async with pool.acquire() as conn:
-        for service, qty in service_counts.items():
-            for _ in range(max(0, int(qty))):
-                row = await conn.fetchrow("""
-                    INSERT INTO order_items (order_id, service, sqm, price_per_sqm)
-                    VALUES ($1, $2, 0, 0) RETURNING *
-                """, order_id, service)
-                if row:
-                    result.append(dict(row))
+    for service, qty in service_counts.items():
+        snap = await resolve_price_snapshot(None, None, service) or {}
+        price = snap.get("list_price") or 0
+        for _ in range(max(0, int(qty))):
+            row = await create_order_item(order_id, service, 0, price, **snap)
+            if row:
+                result.append(row)
     return result
 
 async def update_order_item(item_id: int, **kwargs) -> dict:
     if not pool: return {}
-    allowed = {"service", "service_ru", "service_uz", "width_cm", "length_cm", "sqm", "price_per_sqm"}
+    allowed = {"service", "width_cm", "length_cm", "sqm", "price_per_sqm", *_ITEM_EXTRA_FIELDS}
     fields = {k: v for k, v in kwargs.items() if k in allowed}
     if not fields: return {}
     set_parts = ", ".join(f"{k}=${i+2}" for i, k in enumerate(fields))
