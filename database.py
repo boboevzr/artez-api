@@ -2132,7 +2132,7 @@ def _group_unit_price(qty: float, price_weight: float, first_price, catalog) -> 
     Позиции одной услуги по разной цене (добавлены до и после смены прайса) — средняя,
     взвешенная по площади/штукам. Прайс — только если у позиций цены ещё нет."""
     if qty > 0 and price_weight > 0:
-        return price_weight / qty
+        return round(price_weight / qty, 2)  # без хвостов float (15000.000000000004)
     if first_price:
         return first_price
     return float(catalog["price"]) if (catalog and catalog.get("price")) else None
