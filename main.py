@@ -3643,6 +3643,9 @@ async def my_order_items(order_num: str, user = Depends(get_current_user)):
         # Досчёт до минимума по позиции/заказу — см. db.get_order_items_billing
         "billed_sqm": it.get("billed_sqm"), "pos_min": it.get("pos_min"),
         "pos_clamped": it.get("pos_clamped"), "billed_total": it.get("billed_total"),
+        # Цена по прайсу — клиенту видна его скидка (решение 2026-10-10); причина скидки и
+        # кто её поставил — внутренние, наружу не отдаются
+        "list_price": it.get("list_price"),
     } for it in billing["items"]]
     return {"ok": True, "items": safe, "groups": billing["groups"], "order_total": billing["order_total"]}
 
