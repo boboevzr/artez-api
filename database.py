@@ -4460,7 +4460,26 @@ async def create_empty_items(order_id: int, count: int) -> list:
                 result.append(dict(row))
     return result
 
-async def create_empty_items_by_service(order_id: int, service_counts: dict[str, int]) -> list:
+async def _service_key_label(service_key: str, service_type: str | None) -> tuple[str, str, str, str] | None:
+    """Ключ услуги (водитель шлёт `carpet`, не подпись) -> (type_key, подпись, подпись_ru, подпись_uz)
+    в том же виде, что пишет форма позиции staff.html. Вариант — из заказа (standard/express),
+    иначе первый из прайса. None — ключ не из справочника."""
+    prices = await get_all_prices()
+    if service_key not in prices or not prices[service_key]:
+        return None
+    svc = next((s for s in await get_services() if s["key"] == service_key), None)
+    if not svc:
+        return None
+    type_key = service_type if service_type in prices[service_key] else next(iter(prices[service_key]))
+    st = next((t for t in await get_service_types(service_key) if t["type_key"] == type_key), {})
+    emoji = (svc.get("emoji") or "").strip()
+    ru = f"{emoji} {svc['name_ru']}".strip() + f" — {st.get('name_ru') or _TYPE_NAMES_RU.get(type_key, type_key)}"
+    uz = f"{emoji} {svc['name_uz']}".strip() + f" — {st.get('name_uz') or _TYPE_NAMES_UZ.get(type_key, type_key)}"
+    return type_key, ru, ru, uz
+
+
+async def create_empty_items_by_service(order_id: int, service_counts: dict[str, int],
+                                        service_type: str | None = None) -> list:
     """Как create_empty_items, но с указанием названия услуги на каждую позицию —
     для водителя, который забирает несколько РАЗНЫХ услуг у клиента и хочет
     сразу пометить что есть что (мойщик потом доизмерит).
@@ -4469,10 +4488,17 @@ async def create_empty_items_by_service(order_id: int, service_counts: dict[str,
     if not pool: return []
     result = []
     for service, qty in service_counts.items():
-        snap = await resolve_price_snapshot(None, None, service) or {}
+        label, extra = service, {}
+        keyed = await _service_key_label(service, service_type)
+        if keyed:
+            type_key, label, ru, uz = keyed
+            snap = await resolve_price_snapshot(service, type_key) or {}
+            extra = {"service_ru": ru, "service_uz": uz}
+        else:
+            snap = await resolve_price_snapshot(None, None, service) or {}
         price = snap.get("list_price") or 0
         for _ in range(max(0, int(qty))):
-            row = await create_order_item(order_id, service, 0, price, **snap)
+            row = await create_order_item(order_id, label, 0, price, **snap, **extra)
             if row:
                 result.append(row)
     return result

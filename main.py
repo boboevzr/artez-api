@@ -2633,7 +2633,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
         if _row:
             order_id = _row["id"]
             if req.items or req.item_count:
-                await (db.create_empty_items_by_service(order_id, req.items) if req.items
+                await (db.create_empty_items_by_service(order_id, req.items, req.service_type) if req.items
                        else db.create_empty_items(order_id, req.item_count))
         return {"ok": True, "order_num": order_num, "id": order_id, "item_count": req.item_count or len(req.items or [])}
     except Exception as e:
@@ -5046,12 +5046,22 @@ async def admin_create_order_item(order_id: int, req: OrderItemRequest, staff=De
     return {"ok": True, "item": _item_for(staff, item)}
 
 @app.post("/api/admin/orders/{order_id}/items/bulk")
-async def admin_bulk_create_items(order_id: int, count: int = Body(..., embed=True),
-                                   _=Depends(get_current_staff)):
-    if count < 1 or count > 50:
-        raise HTTPException(status_code=400, detail="Количество от 1 до 50")
-    items = await db.create_empty_items(order_id, count)
-    return {"ok": True, "items": items, "count": len(items)}
+async def admin_bulk_create_items(order_id: int, count: int = Body(0, embed=True),
+                                   items: dict[str, int] = Body(None, embed=True),
+                                   staff=Depends(get_current_staff)):
+    # items={service_key: qty} — позиции сразу с услугой и ценой по прайсу (менеджер обязан
+    # выбрать услугу, решение 2026-10-10); count — старый режим «пустых» (окно мойщика).
+    if items:
+        total = sum(max(0, int(q)) for q in items.values())
+        if total < 1 or total > 50:
+            raise HTTPException(status_code=400, detail="Количество от 1 до 50")
+        order = await db.get_order_by_id(order_id) or {}
+        created = await db.create_empty_items_by_service(order_id, items, order.get("service_type"))
+    else:
+        if count < 1 or count > 50:
+            raise HTTPException(status_code=400, detail="Количество от 1 до 50")
+        created = await db.create_empty_items(order_id, count)
+    return {"ok": True, "items": [_item_for(staff, it) for it in created], "count": len(created)}
 
 @app.put("/api/admin/orders/{order_id}/items/{item_id}")
 async def admin_update_order_item(order_id: int, item_id: int,
@@ -7854,7 +7864,7 @@ async def driver_pickup_take(order_id: int, req: PickupTakeRequest, staff=Depend
     name = _driver_name(staff)
 
     if req.mode == "by_service" and req.items:
-        items = await db.create_empty_items_by_service(order_id, req.items)
+        items = await db.create_empty_items_by_service(order_id, req.items, order.get("service_type"))
     else:
         items = await db.create_empty_items(order_id, max(1, req.count or 1))
 
@@ -7977,7 +7987,7 @@ async def driver_route_take_pickup(order_id: int, req: PickupTakeRequest, staff=
     name = _driver_name(staff)
 
     if req.mode == "by_service" and req.items:
-        items = await db.create_empty_items_by_service(order_id, req.items)
+        items = await db.create_empty_items_by_service(order_id, req.items, order.get("service_type"))
     else:
         items = await db.create_empty_items(order_id, max(1, req.count or 1))
 
