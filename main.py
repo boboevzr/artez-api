@@ -8720,7 +8720,12 @@ SITE_SETTINGS_DEFAULTS = {
     # per-company scoping (прод — один тенант). Дефолт "false".
     "site_maintenance_mode": "false",
     "bot_maintenance_mode": "false",
+    # Карты менеджеров для оплаты Click/перевода — JSON [{number,name}], до 10.
+    # НЕ публичный ключ: читается только admin.html (печать бумажки водителю).
+    "manager_cards": "[]",
 }
+
+MAX_MANAGER_CARDS = 10
 
 async def _get_cfg(key: str) -> str:
     """БД → env-fallback из SITE_SETTINGS_DEFAULTS."""
@@ -8811,6 +8816,35 @@ class SiteSettings(BaseModel):
     order_rules:             str | None = None
     site_maintenance_mode:   str | None = None
     bot_maintenance_mode:    str | None = None
+    manager_cards:           str | None = None
+
+    @field_validator("manager_cards")
+    @classmethod
+    def _validate_manager_cards(cls, v):
+        # Нормализуем до [{number:"16 цифр", name:"ФИО"}] — номер храним без
+        # пробелов, форматирование 4×4 делает фронт.
+        if v is None:
+            return v
+        try:
+            raw = _json.loads(v)
+        except Exception:
+            raise ValueError("manager_cards: некорректный JSON")
+        if not isinstance(raw, list):
+            raise ValueError("manager_cards: ожидается список")
+        if len(raw) > MAX_MANAGER_CARDS:
+            raise ValueError(f"Не больше {MAX_MANAGER_CARDS} карт")
+        cards = []
+        for c in raw:
+            if not isinstance(c, dict):
+                raise ValueError("manager_cards: некорректная карта")
+            number = "".join(ch for ch in str(c.get("number") or "") if ch.isdigit())
+            name = " ".join(str(c.get("name") or "").split())[:60]
+            if len(number) != 16:
+                raise ValueError(f"Номер карты должен быть из 16 цифр: {c.get('number')!r}")
+            if not name:
+                raise ValueError(f"Не указано Ф.И.О. для карты {number}")
+            cards.append({"number": number, "name": name})
+        return _json.dumps(cards, ensure_ascii=False)
 
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
@@ -8835,6 +8869,19 @@ async def get_bulk_print_template(_=Depends(get_current_staff)):
     except Exception:
         blocks = _DEFAULT_BULK_PRINT_TEMPLATE
     return {"ok": True, "blocks": blocks}
+
+@app.get("/api/staff/manager-cards")
+async def get_manager_cards(me=Depends(get_current_staff)):
+    """Карты менеджеров — для «💳 Печать ПК» в admin.html → Маршруты (там же
+    бывает и staff-токен в режиме «только маршруты»). Те же роли, что видят
+    маршрут, кроме водителя — ему карта уходит на бумажке."""
+    if me.get("role") not in ("admin", "logistics", "manager"):
+        raise HTTPException(status_code=403)
+    try:
+        cards = _json.loads(await _get_cfg("manager_cards") or "[]")
+    except Exception:
+        cards = []
+    return {"ok": True, "cards": cards if isinstance(cards, list) else []}
 
 
 # ── Видео-карточка на главной странице сайта ─────────────────────────────
