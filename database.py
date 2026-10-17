@@ -1320,6 +1320,37 @@ async def create_tables():
         ON CONFLICT (service_key, type_key) DO NOTHING;
         """)
 
+    # ── Шаг 23б (2026-10-17): размер × скорость. Скорость (standard/express) — у всех
+    # услуг; размеры — доп. признак части услуг. Каждая пара хранится обычным
+    # вариантом service_types (type_key = <скорость>_<размер>), поэтому сайт/бот/staff,
+    # которые показывают плоский список вариантов, работают без переделки.
+    # У услуги с размерами базовые standard/express скрыты из публичного каталога
+    # (их цены остаются: бот берёт их при заборе). services.active — «Скрыть услугу».
+    size_migrations = [
+        "ALTER TABLE service_types ADD COLUMN IF NOT EXISTS speed_key    VARCHAR(20)",
+        "ALTER TABLE service_types ADD COLUMN IF NOT EXISTS size_key     VARCHAR(40)",
+        "ALTER TABLE service_types ADD COLUMN IF NOT EXISTS size_name_ru VARCHAR(100)",
+        "ALTER TABLE service_types ADD COLUMN IF NOT EXISTS size_name_uz VARCHAR(100)",
+        "UPDATE service_types SET speed_key=type_key WHERE speed_key IS NULL AND type_key IN ('standard','express')",
+        "ALTER TABLE service_types ALTER COLUMN type_key TYPE VARCHAR(50)",
+        "ALTER TABLE prices ALTER COLUMN type_key TYPE VARCHAR(50)",
+        "ALTER TABLE staff_salary_per_unit ALTER COLUMN type_key TYPE VARCHAR(50)",
+        "ALTER TABLE services ADD COLUMN IF NOT EXISTS active BOOLEAN DEFAULT TRUE",
+        # Разово: вариант «Маленький» у Одеяла, добавленный 17.10 до появления размеров,
+        # становится размером «Маленький» (стандартная скорость). Ключ не меняем —
+        # он уже может стоять в позициях заказов.
+        """UPDATE service_types SET speed_key='standard', size_key='smal',
+                  size_name_ru=name_ru, size_name_uz=name_uz,
+                  name_ru='Стандартный — ' || name_ru, name_uz='Standart — ' || name_uz
+             WHERE service_key='mattress' AND type_key='smal' AND speed_key IS NULL""",
+    ]
+    async with pool.acquire() as c:
+        for sql in size_migrations:
+            try:
+                await c.execute(sql)
+            except Exception as e:
+                logging.warning(f"migration skipped ({sql[:80]!r}): {e}")
+
     logging.info("✅ API: Tables created/verified")
 
 
@@ -1741,7 +1772,9 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
             data.get("delivery_location", ""),
             data.get("delivery_location_address", ""),
             data.get("service"),
-            data.get("service_type") or "standard",
+            # service_type заказа — только скорость: бот при заборе берёт по нему цены
+            # ВСЕХ услуг заказа, а «express_small» есть не у всех (размеры 2026-10-17)
+            "express" if str(data.get("service_type") or "").startswith("express") else "standard",
             data.get("pickup_type") or "courier",
             data.get("delivery_type") or "courier",
             data.get("pickup_date"),
@@ -2059,6 +2092,10 @@ async def delete_service(key: str):
         return False
     async with pool.acquire() as conn:
         r = await conn.execute("DELETE FROM services WHERE key=$1", key)
+        if r == "DELETE 1":
+            # service_types уходят каскадом, цены — нет (без FK): чистим, чтобы
+            # удалённая услуга не всплывала в /api/prices
+            await conn.execute("DELETE FROM prices WHERE service_key=$1", key)
         return r == "DELETE 1"
 
 # ══════════════════════════════════════
@@ -2097,6 +2134,122 @@ async def delete_service_type(service_key: str, type_key: str):
         r = await conn.execute(
             "DELETE FROM service_types WHERE service_key=$1 AND type_key=$2", service_key, type_key)
         return r == "DELETE 1"
+
+
+# ── Размер × скорость (2026-10-17) ───────────────────────────────────────────
+# Размер услуги = ПАРА вариантов service_types: <скорость>_<размер> для standard и
+# express. Публичный каталог (сайт/бот/staff-пикеры) у услуги с размерами показывает
+# только варианты с размером, скрытые услуги (services.active=FALSE) — не показывает.
+SPEEDS = (("standard", "Стандартный", "Standart"), ("express", "Быстрый", "Tezkor"))
+
+_TRANSLIT = dict(zip("абвгдеёжзийклмнопрстуфхцчшщъыьэюяўқғҳ",
+    ["a","b","v","g","d","e","yo","zh","z","i","y","k","l","m","n","o","p","r","s","t","u","f",
+     "h","ts","ch","sh","sch","","y","","e","yu","ya","o","q","g","h"]))
+
+
+def _size_key_from_name(name: str) -> str:
+    s = "".join(_TRANSLIT.get(ch, ch) for ch in (name or "").lower())
+    s = "".join(ch if ch.isascii() and ch.isalnum() else "_" for ch in s)
+    s = "_".join(p for p in s.split("_") if p)
+    return s[:20] or "size"
+
+
+def _is_public_type(t: dict, sized: set) -> bool:
+    return t["service_key"] not in sized or bool(t.get("size_key"))
+
+
+async def get_public_services() -> list:
+    if not pool:
+        return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM services WHERE COALESCE(active, TRUE) ORDER BY order_idx, key")
+        return [dict(r) for r in rows]
+
+
+async def get_public_service_types(service_key: str = None) -> list:
+    active = {s["key"] for s in await get_public_services()}
+    types = [t for t in await get_service_types(service_key) if t["service_key"] in active]
+    sized = {t["service_key"] for t in types if t.get("size_key")}
+    return [t for t in types if _is_public_type(t, sized)]
+
+
+async def get_public_prices() -> dict:
+    """get_all_prices без скрытых услуг и без базовых вариантов у услуг с размерами."""
+    # порядок вариантов — как в admin (order_idx), а не по алфавиту ключа: staff/сайт
+    # строят выпадающий список в порядке ключей этого объекта
+    allowed = [(t["service_key"], t["type_key"]) for t in await get_public_service_types()]
+    prices = await get_all_prices()
+    out: dict = {}
+    for svc, tp in allowed:
+        info = (prices.get(svc) or {}).get(tp)
+        if info:
+            out.setdefault(svc, {})[tp] = info
+    return out
+
+
+async def save_service_size(service_key: str, name_ru: str, name_uz: str,
+                            size_key: str | None = None) -> str:
+    """Создаёт (size_key=None) или переименовывает размер — сразу пару вариантов
+    standard_<размер> и express_<размер>. Возвращает size_key."""
+    async with pool.acquire() as conn:
+        if not size_key:
+            base = _size_key_from_name(name_ru)
+            used = {r["size_key"] for r in await conn.fetch(
+                "SELECT DISTINCT size_key FROM service_types WHERE service_key=$1 AND size_key IS NOT NULL",
+                service_key)}
+            size_key, n = base, 2
+            while size_key in used:
+                size_key = f"{base[:17]}_{n}"; n += 1
+        next_idx = await conn.fetchval(
+            "SELECT COALESCE(MAX(order_idx), 0) + 1 FROM service_types WHERE service_key=$1", service_key)
+        # существующие ключи пары не меняем (могут стоять в позициях заказов, напр.
+        # старый «smal» у Одеяла) — генерируем только недостающие
+        existing = {r["speed_key"]: r["type_key"] for r in await conn.fetch(
+            "SELECT speed_key, type_key FROM service_types WHERE service_key=$1 AND size_key=$2",
+            service_key, size_key)}
+        for i, (speed, sp_ru, sp_uz) in enumerate(SPEEDS):
+            type_key = existing.get(speed) or f"{speed}_{size_key}"
+            await conn.execute("""
+                INSERT INTO service_types (service_key, type_key, name_ru, name_uz, order_idx,
+                                           speed_key, size_key, size_name_ru, size_name_uz)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (service_key, type_key) DO UPDATE SET
+                    name_ru = EXCLUDED.name_ru, name_uz = EXCLUDED.name_uz,
+                    size_name_ru = EXCLUDED.size_name_ru, size_name_uz = EXCLUDED.size_name_uz
+            """, service_key, type_key, f"{sp_ru} — {name_ru}", f"{sp_uz} — {name_uz}",
+                next_idx + i, speed, size_key, name_ru, name_uz)
+    return size_key
+
+
+async def delete_service_size(service_key: str, size_key: str) -> int:
+    """Удаляет пару вариантов размера и их цены. Позиции заказов хранят снимок
+    (ключи/цену/минимумы) — на открытые заказы не влияет."""
+    async with pool.acquire() as conn:
+        keys = [r["type_key"] for r in await conn.fetch(
+            "SELECT type_key FROM service_types WHERE service_key=$1 AND size_key=$2",
+            service_key, size_key)]
+        if keys:
+            await conn.execute("DELETE FROM prices WHERE service_key=$1 AND type_key = ANY($2::text[])",
+                               service_key, keys)
+            await conn.execute("DELETE FROM service_types WHERE service_key=$1 AND type_key = ANY($2::text[])",
+                               service_key, keys)
+        return len(keys)
+
+
+async def set_service_active(key: str, active: bool) -> bool:
+    async with pool.acquire() as conn:
+        r = await conn.execute("UPDATE services SET active=$2 WHERE key=$1", key, active)
+        return r == "UPDATE 1"
+
+
+async def service_in_use(key: str) -> bool:
+    """Есть ли заказы/позиции с этой услугой — тогда только «Скрыть», не удалять."""
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval("""
+            SELECT EXISTS(SELECT 1 FROM order_items WHERE service_key=$1)
+                OR EXISTS(SELECT 1 FROM orders WHERE service=$1)
+        """, key))
 
 # ══════════════════════════════════════
 #  ЕДИНИЦЫ ИЗМЕРЕНИЯ (общая таблица с ботом)
