@@ -334,6 +334,7 @@ async def _send_debt_reminders():
                 f"💸 Долг по заказу {d['order_num']}\n"
                 f"👤 {d.get('client_first_name','')} {d.get('client_last_name','')}\n"
                 f"📞 {d.get('client_phone') or '—'}\n"
+                + (f"📞 (запасной) {d['client_phone2']}\n" if d.get('client_phone2') else "") +
                 f"💰 {int(d['debt_amount']):,} сум\n"
                 f"📅 Срок: {due_date.strftime('%d.%m.%Y')}"
             ).replace(',', ' ')
@@ -385,6 +386,7 @@ async def _send_postpone_reminders():
             f"📋 Заказ {o.get('order_num')}\n"
             f"👤 {client}\n"
             f"📞 {o.get('client_phone') or '—'}\n"
+            + (f"📞 (запасной) {o['client_phone2']}\n" if o.get('client_phone2') else "") +
             f"📝 Причина: {o.get('postpone_reason') or '—'}\n"
             f"👷 Отложил: {o.get('postponed_by_name') or '—'}\n\n"
             f"Нужно созвониться с клиентом — согласовать доставку или отложить ещё."
@@ -435,6 +437,7 @@ async def _route_rollover_worker():
         next_midnight = (now + _td(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
         await asyncio.sleep((next_midnight - now).total_seconds())
         try:
+            await db.recalc_route_statuses()   # выполненные — закрыть, а не переносить
             n = await db.roll_forward_stale_routes()
             if n:
                 logging.info(f"route rollover: перенесено маршрутов на сегодня: {n}")
@@ -1013,12 +1016,13 @@ def create_token(user_id: int, phone: str) -> str:
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-def create_staff_token(staff_id: int, login: str, role: str) -> str:
+def create_staff_token(staff_id: int, login: str, role: str, sid: int) -> str:
     payload = {
         "sub": str(staff_id),
         "login": login,
         "role": role,
         "type": "staff",
+        "sid": sid,   # staff_sessions.id — завершённая сессия не пускает (2026-10-17)
         "exp": datetime.now(timezone.utc) + timedelta(days=JWT_EXPIRE_DAYS),
     }
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
@@ -1104,10 +1108,30 @@ async def get_current_staff(authorization: str = Header(None)):
                 "branch": None, "tg_username": None, "position": None}
     if payload.get("type") != "staff":
         raise HTTPException(status_code=401, detail="Требуется токен сотрудника")
-    staff = await db.get_staff_by_id(int(payload["sub"]))
+    staff = await _staff_from_payload(payload)
+    if not staff:
+        raise HTTPException(status_code=401, detail="Сессия завершена — войдите заново")
+    return staff
+
+
+async def _staff_from_payload(payload: dict) -> dict | None:
+    """Действующий сотрудник по staff-JWT: активен И сессия (sid) не завершена.
+    Токены без sid (выданы до 2026-10-17) не принимаются — один повторный вход у всех,
+    иначе старые телефоны жили бы ещё до 30 дней. Возвращает staff + «_sid»."""
+    if payload.get("type") != "staff" or not payload.get("sid"):
+        return None
+    try:
+        staff_id, sid = int(payload["sub"]), int(payload["sid"])
+    except (TypeError, ValueError):
+        return None
+    staff = await db.get_staff_by_id(staff_id)
     if not staff or not staff["active"]:
-        raise HTTPException(status_code=401, detail="Сотрудник не найден или деактивирован")
-    return dict(staff)
+        return None
+    if not await db.check_staff_session(sid, staff_id):
+        return None
+    out = dict(staff)
+    out["_sid"] = sid
+    return out
 
 
 def require_perm(permission: str):
@@ -1195,7 +1219,7 @@ def _staff_public(s: dict) -> dict:
     }
 
 @app.post("/api/staff/login")
-async def staff_login(req: StaffLoginRequest):
+async def staff_login(req: StaffLoginRequest, request: Request):
     staff = await db.get_staff_by_login(req.login)
     if not staff:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
@@ -1212,7 +1236,13 @@ async def staff_login(req: StaffLoginRequest):
     if not valid:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
-    token = create_staff_token(staff["id"], staff["login"], staff["role"])
+    if not staff.get("active", True):
+        raise HTTPException(status_code=401, detail="Сотрудник деактивирован")
+    # IP — первый из X-Forwarded-For (Railway за прокси), иначе адрес соединения
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+         or (request.client.host if request.client else "")
+    sid = await db.create_staff_session(staff["id"], request.headers.get("user-agent"), ip)
+    token = create_staff_token(staff["id"], staff["login"], staff["role"], sid)
     pub = _staff_public(dict(staff))
     pub["must_change_password"] = bool(staff.get("must_change_password"))
     return {"ok": True, "token": token, "staff": pub}
@@ -1222,9 +1252,14 @@ async def staff_me(staff=Depends(get_current_staff)):
     return {"ok": True, "staff": _staff_public(staff)}
 
 @app.get("/api/staff/list")
-async def staff_list(role: str = None, _=Depends(get_current_staff)):
+async def staff_list(role: str = None, me=Depends(get_current_staff)):
     rows = await db.get_all_staff()
     staff = [_staff_public(dict(r)) for r in rows]
+    # Пароли открытым текстом (🔑 в admin.html → Сотрудники) — только админу. Раньше
+    # этот список с паролями ВСЕХ, включая админов, получал любой сотрудник (2026-10-17).
+    if me.get("role") != "admin":
+        for s in staff:
+            s.pop("plain_password", None)
     if role:
         staff = [s for s in staff if s.get("role") == role]
     return {"ok": True, "staff": staff}
@@ -1500,6 +1535,8 @@ async def list_routes(date: str | None = None, driver_id: int | None = None,
                       me=Depends(get_current_staff)):
     if me.get("role") not in ("admin","logistics","manager"):
         raise HTTPException(status_code=403)
+    # сначала закрыть выполненные (иначе завершённые по факту маршруты переносятся на сегодня)
+    await db.recalc_route_statuses()
     await db.roll_forward_stale_routes()
     rows = await db.get_routes(date=date, driver_id=driver_id, branch=branch, status=status)
     for r in rows:
@@ -1520,6 +1557,7 @@ async def create_route(body: dict, me=Depends(get_current_staff)):
 async def get_route(route_id: int, me=Depends(get_current_staff)):
     if me.get("role") not in ("admin","logistics","manager","driver"):
         raise HTTPException(status_code=403)
+    await db.recalc_route_statuses()
     route = await db.get_route(route_id)
     if not route: raise HTTPException(status_code=404)
     if route.get("date"): route["date"] = str(route["date"])
@@ -1538,7 +1576,8 @@ async def update_route(route_id: int, body: dict, me=Depends(get_current_staff))
 
 @app.delete("/api/admin/routes/{route_id}")
 async def delete_route(route_id: int, me=Depends(get_current_staff)):
-    if me.get("role") not in ("admin","logistics"):
+    # manager — для кнопки «🗑 Удалить маршрут» в staff → Доставка (2026-10-17)
+    if me.get("role") not in ("admin","logistics","manager"):
         raise HTTPException(status_code=403)
     route = await db.get_route(route_id)
     if route:
@@ -2017,7 +2056,36 @@ async def staff_change_password(staff_id: int, body: dict, me=Depends(get_curren
     if len(new_pw) < 6:
         raise HTTPException(status_code=400, detail=bi("Минимум 6 символов","Kamida 6 ta belgi"))
     await db.update_staff_password(staff_id, pwd_context.hash(new_pw[:72]), plain=new_pw)
+    # Смена пароля завершает все сессии этого логина (старые телефоны вылетают на вход).
+    # Если сотрудник меняет СВОЙ пароль — текущую сессию оставляем.
+    keep = me.get("_sid") if me.get("id") == staff_id else None
+    ended = await db.revoke_staff_sessions(staff_id, "password_changed", except_sid=keep)
+    return {"ok": True, "sessions_ended": ended}
+
+
+# ── Активные сессии сотрудника (admin.html → карточка сотрудника) ──────────
+@app.get("/api/admin/staff/{staff_id}/sessions")
+async def staff_sessions_list(staff_id: int, _=Depends(require_perm("staff"))):
+    rows = await db.list_staff_sessions(staff_id)
+    for r in rows:
+        for k in ("created_at", "last_seen_at"):
+            if r.get(k): r[k] = r[k].isoformat()
+    return {"ok": True, "sessions": rows}
+
+
+@app.delete("/api/admin/staff/{staff_id}/sessions/{sid}")
+async def staff_session_revoke(staff_id: int, sid: int, _=Depends(require_perm("staff"))):
+    if not await db.revoke_staff_sessions(staff_id, "revoked_by_admin", sid=sid):
+        raise HTTPException(status_code=404, detail="Сессия не найдена или уже завершена")
     return {"ok": True}
+
+
+@app.post("/api/admin/staff/{staff_id}/sessions/revoke-all")
+async def staff_sessions_revoke_all(staff_id: int, me=Depends(require_perm("staff"))):
+    """«Выйти на всех устройствах». Свою текущую сессию (если admin завершает себе) не трогаем."""
+    keep = me.get("_sid") if me.get("id") == staff_id else None
+    ended = await db.revoke_staff_sessions(staff_id, "revoked_by_admin", except_sid=keep)
+    return {"ok": True, "sessions_ended": ended}
 
 
 # ══════════════════════════════════════
@@ -2554,6 +2622,7 @@ async def staff_orders(status: str = None, branch: str = None, limit: int = 50, 
     if staff.get("hide_client_phone"):
         for o in result:
             o["client_phone"] = ""
+            o["client_phone2"] = ""   # запасной тоже скрыт (раньше утекал)
     return {"ok": True, "orders": result, "total": total, "limit": limit, "offset": offset}
 
 @app.get("/api/staff/orders/own")
@@ -2565,6 +2634,7 @@ async def staff_own_orders(status: str = None, limit: int = 50, offset: int = 0,
     if staff.get("hide_client_phone"):
         for o in result:
             o["client_phone"] = ""
+            o["client_phone2"] = ""   # запасной тоже скрыт (раньше утекал)
     return {"ok": True, "orders": result, "total": total, "limit": limit, "offset": offset}
 
 @app.post("/api/staff/orders/create")
@@ -2690,9 +2760,9 @@ async def _get_admin_or_staff_clients(authorization: str = Header(None)):
         return True
     if payload.get("type") != "staff":
         raise HTTPException(status_code=403, detail="Нет доступа")
-    staff = await db.get_staff_by_id(int(payload["sub"]))
-    if not staff or not staff["active"]:
-        raise HTTPException(status_code=403, detail="Нет доступа")
+    staff = await _staff_from_payload(payload)
+    if not staff:
+        raise HTTPException(status_code=401, detail="Сессия завершена — войдите заново")
     role = staff.get("role") or ""
     perms = ROLE_PERMISSIONS.get(role, [])
     if "clients" in perms or role == "admin":
@@ -4075,6 +4145,7 @@ async def agent_change_password(body: dict, staff=Depends(get_current_staff)):
     hashed = pwd_context.hash(new_pw[:72])
     await db.update_staff_password(staff["id"], hashed, plain=new_pw)
     await db.clear_staff_temp_password(staff["id"])
+    await db.revoke_staff_sessions(staff["id"], "password_changed", except_sid=staff.get("_sid"))
     return {"ok": True}
 
 
@@ -4490,6 +4561,7 @@ async def admin_get_order(order_id: int, staff=Depends(get_current_staff)):
     if staff.get("hide_client_phone"):
         order = dict(order)
         order["client_phone"] = ""
+        order["client_phone2"] = ""
     return {"ok": True, "order": order}
 
 _ORDER_EDITABLE_STATUSES = {"new","confirmed","pickup","received","washing","drying","packing","ready"}
@@ -4779,20 +4851,9 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             logging.warning(f"agent commission failed order={order_id}: {_ce}")
 
     try:
-        async with db.pool.acquire() as _c:
-            if status == "delivered":
-                await _c.execute(
-                    "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status!='done'",
-                    order_id)
-            elif status == "cancelled":
-                await _c.execute(
-                    "UPDATE route_orders SET stop_status='skipped' WHERE order_id=$1 AND stop_status='pending'",
-                    order_id)
-            else:
-                # Любой активный статус (delivery, ready, washing и т.д.) — сбросить 'done' на 'pending'
-                await _c.execute(
-                    "UPDATE route_orders SET stop_status='pending' WHERE order_id=$1 AND stop_status='done'",
-                    order_id)
+        # по цели остановки (забор/доставка), см. db.sync_route_stops_for_order —
+        # раньше любой активный статус сбрасывал «Выполнено» и у ЗАБОРА (2026-10-17)
+        await db.sync_route_stops_for_order(order_id, status)
     except Exception as _e:
         logging.warning(f"route_orders sync failed order={order_id}: {_e}")
 
@@ -7135,6 +7196,10 @@ async def serve_order_photo(
     except Exception:
         raise HTTPException(status_code=401)
 
+    # staff-токен — только действующий сотрудник с живой сессией (не уволенный/не вышедший)
+    if payload.get("type") == "staff" and not await _staff_from_payload(payload):
+        raise HTTPException(status_code=401)
+
     row = await db.get_photo_by_id(photo_id)
     if not row:
         raise HTTPException(status_code=404)
@@ -7166,6 +7231,9 @@ async def serve_item_media(
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
     except Exception:
+        raise HTTPException(status_code=401)
+
+    if payload.get("type") == "staff" and not await _staff_from_payload(payload):
         raise HTTPException(status_code=401)
 
     row = await db.get_item_media_by_id(media_id)
@@ -8017,6 +8085,7 @@ async def staff_order_sms_sent(order_id: int, kind: str = "pickup", staff=Depend
 async def get_my_route(staff=Depends(get_current_staff)):
     if not _can_drive(staff):
         raise HTTPException(403, "Нет доступа")
+    await db.recalc_route_statuses()
     await db.roll_forward_stale_routes()
     routes = await db.get_routes_today(staff.get("branch"))
     payment_events = []
@@ -8222,7 +8291,7 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
     # Данные заказа + вычисляем долг так же как фронт (items_total - discount - paid)
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("""
-            SELECT o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
+            SELECT o.order_num, o.client_first_name, o.client_last_name, o.client_phone, o.client_phone2,
                    o.short_address, o.address,
                    COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
                             COALESCE(o.total_price,0)) AS items_total,
@@ -8251,6 +8320,7 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
              f"📋 Заказ: <b>{order_num}</b>",
              f"👤 Клиент: <b>{client}</b>"]
     if phone: lines.append(f"📞 {phone}")
+    if row["client_phone2"]: lines.append(f"📞 (запасной) {row['client_phone2']}")
     lines.append(f"📍 {addr}")
     lines.append("")
     if total > 0: lines.append(f"💰 Сумма: <b>{_fmtd(total)} с</b>")
@@ -8460,6 +8530,8 @@ def _fmt_stop_text_api(info: dict, num: int) -> str:
     pay_line = f"💰 {_f(net)} · Опл: {_f(paid)} · Долг: {_f(debt)}"
     contact = f"👤 {h(client)}"
     if phone: contact += f" 📞{h(phone)}"
+    # запасной номер — тот же формат, что _build_stop_text при первой отправке в канал
+    if info.get("client_phone2"): contact += f" 📞2{h(info['client_phone2'])}"
     count_str = f" / {item_count}" if item_count else ""
     return f"📦 #{num}·{h(order_num)}{count_str} 📍{h(addr)}\n{contact}\n{pay_line}"
 
@@ -9892,10 +9964,17 @@ async def ws_chat_client(websocket: WebSocket, code: str):
 async def ws_chat_staff(websocket: WebSocket, token: str):
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        staff_id = int(payload.get("sub"))
     except Exception:
         await websocket.close(code=4001)
         return
+    # Раньше подходил ЛЮБОЙ JWT с числовым sub (в т.ч. клиентский токен сайта —
+    # подключался к чату как сотрудник с тем же id). Теперь — только staff-токен
+    # с живой сессией (2026-10-17).
+    staff = await _staff_from_payload(payload)
+    if not staff:
+        await websocket.close(code=4001)
+        return
+    staff_id = staff["id"]
 
     await _chat.connect_staff(staff_id, websocket)
     staff_row = await db.get_staff_by_id(staff_id)

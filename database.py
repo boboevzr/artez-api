@@ -53,6 +53,12 @@ async def init_db():
     # забирают соединение из этого же пула, поднят запас.
     pool = await asyncpg.create_pool(DB_URL, min_size=1, max_size=20)
     await create_tables()
+    # Разово при старте: зависшие маршруты (забор «Ожидает», хотя заказ уже в мойке) —
+    # остановки и статусы маршрутов по статусам заказов (2026-10-17)
+    try:
+        await recalc_route_statuses()
+    except Exception as e:
+        logging.warning(f"recalc_route_statuses at startup: {e}")
     # Загружаем timezone из settings в кеш
     try:
         await get_timezone_setting()
@@ -356,6 +362,20 @@ async def create_tables():
         # Уведомления о новых пользователях сайта
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_new_users BOOLEAN DEFAULT FALSE",
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS blocked BOOLEAN DEFAULT FALSE",
+        # Сессии сотрудников (2026-10-17): каждый вход staff — строка; номер сессии в
+        # JWT (sid). Завершённая сессия (revoked_at) = токен больше не пускает, даже
+        # если его 30 дней ещё не истекли (смена пароля, «Выйти на всех устройствах»).
+        """CREATE TABLE IF NOT EXISTS staff_sessions (
+            id           SERIAL PRIMARY KEY,
+            staff_id     INTEGER NOT NULL REFERENCES staff(id) ON DELETE CASCADE,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            user_agent   TEXT,
+            ip           TEXT,
+            revoked_at   TIMESTAMPTZ,
+            revoked_reason TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_staff_sessions_staff ON staff_sessions(staff_id) WHERE revoked_at IS NULL",
         # «Был в боте» (пишет бот, _ClientActivityMiddleware); старым — примерно, из updated_at
         "ALTER TABLE clients ADD COLUMN IF NOT EXISTS last_seen_at TIMESTAMP",
         "UPDATE clients SET last_seen_at = updated_at WHERE last_seen_at IS NULL AND updated_at IS NOT NULL",
@@ -659,6 +679,17 @@ async def create_tables():
             created_at   TIMESTAMPTZ DEFAULT NOW()
         )""",
         "CREATE INDEX IF NOT EXISTS idx_place_categories_project ON place_categories(project)",
+        # Цель остановки (2026-10-17): 'pickup' — забрать у клиента, 'delivery' — привезти.
+        # Раньше не хранилась: в смешанном маршруте этап угадывался по статусу заказа,
+        # а смена статуса заказа откатывала «Выполнено» у ЗАБОРА обратно в «Ожидает».
+        "ALTER TABLE route_orders ADD COLUMN IF NOT EXISTS leg VARCHAR(10)",
+        """UPDATE route_orders ro SET leg = CASE
+                WHEN r.type = 'pickup'   THEN 'pickup'
+                WHEN r.type = 'delivery' THEN 'delivery'
+                WHEN o.status IN ('ready','delivery','delivered') THEN 'delivery'
+                ELSE 'pickup' END
+             FROM routes r, orders o
+            WHERE ro.leg IS NULL AND r.id = ro.route_id AND o.id = ro.order_id""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -3200,6 +3231,48 @@ async def get_all_commissions(year: int = None, month: int = None) -> list:
         rows = await conn.fetch(sql, *args)
         return [dict(r) for r in rows]
 
+# ── Сессии сотрудников (2026-10-17) ─────────────────────────────────────────
+async def create_staff_session(staff_id: int, user_agent: str = None, ip: str = None) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "INSERT INTO staff_sessions (staff_id, user_agent, ip) VALUES ($1, $2, $3) RETURNING id",
+            staff_id, (user_agent or "")[:300] or None, (ip or "")[:64] or None)
+
+
+async def check_staff_session(sid: int, staff_id: int) -> bool:
+    """Сессия жива? Заодно «последняя активность» — не чаще раза в 2 минуты
+    (запрос сотрудника не должен на каждый вызов писать в БД)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT revoked_at IS NULL AS alive, last_seen_at < NOW() - INTERVAL '2 minutes' AS stale "
+            "FROM staff_sessions WHERE id=$1 AND staff_id=$2", sid, staff_id)
+        if not row or not row["alive"]:
+            return False
+        if row["stale"]:
+            await conn.execute("UPDATE staff_sessions SET last_seen_at=NOW() WHERE id=$1", sid)
+        return True
+
+
+async def list_staff_sessions(staff_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, created_at, last_seen_at, user_agent, ip FROM staff_sessions "
+            "WHERE staff_id=$1 AND revoked_at IS NULL ORDER BY last_seen_at DESC", staff_id)
+        return [dict(r) for r in rows]
+
+
+async def revoke_staff_sessions(staff_id: int, reason: str, sid: int | None = None,
+                                except_sid: int | None = None) -> int:
+    """Завершить одну сессию (sid) или все сессии сотрудника (кроме except_sid)."""
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "UPDATE staff_sessions SET revoked_at=NOW(), revoked_reason=$2 "
+            "WHERE staff_id=$1 AND revoked_at IS NULL "
+            "AND ($3::int IS NULL OR id=$3) AND ($4::int IS NULL OR id<>$4)",
+            staff_id, reason, sid, except_sid)
+        return int(res.split()[-1]) if res else 0
+
+
 async def update_staff_password(staff_id: int, password_hash: str, plain: str = None):
     if not pool: return
     async with pool.acquire() as conn:
@@ -5739,14 +5812,82 @@ async def add_orders_to_route(route_id: int, order_ids: list[int]) -> int:
         count = 0
         for i, oid in enumerate(order_ids):
             try:
+                # leg — цель остановки: тип маршрута, у смешанного — по статусу заказа
+                # на момент добавления (Готов/Доставка — привезти, иначе — забрать)
                 await conn.execute("""
-                    INSERT INTO route_orders (route_id, order_id, sort_order)
-                    VALUES ($1,$2,$3) ON CONFLICT DO NOTHING
+                    INSERT INTO route_orders (route_id, order_id, sort_order, leg)
+                    SELECT $1, $2, $3, CASE
+                        WHEN r.type = 'pickup'   THEN 'pickup'
+                        WHEN r.type = 'delivery' THEN 'delivery'
+                        WHEN o.status IN ('ready','delivery','delivered') THEN 'delivery'
+                        ELSE 'pickup' END
+                    FROM routes r, orders o WHERE r.id = $1 AND o.id = $2
+                    ON CONFLICT DO NOTHING
                 """, route_id, oid, (cur_max or 0) + i + 1)
                 count += 1
             except Exception:
                 pass
+        # добавили остановки в завершённый маршрут — он снова в работе
+        if count:
+            await conn.execute("UPDATE routes SET status='active', updated_at=NOW() WHERE id=$1 AND status='done'", route_id)
         return count
+
+
+# ── Статусы остановок и маршрутов (2026-10-17) ───────────────────────────────
+# Забор выполнен, когда заказ дошёл до «Вывоз» и дальше — назад не откатывается при
+# смене статуса в мастерской. Доставка выполнена при «Доставлен»; заказ снова в
+# работе (вернули) — доставка снова «Ожидает». Маршрут: первое действие → «В работе»,
+# все остановки выполнены → «Завершён»; есть пропущенные — остаётся «В работе».
+_PICKED_STATUSES = ('pickup', 'received', 'washing', 'drying', 'packing', 'ready', 'delivery', 'delivered')
+
+
+async def sync_route_stops_for_order(order_id: int, status: str) -> None:
+    """Остановки заказа во ВСЕХ его маршрутах — по цели остановки (leg), а не одним
+    правилом для всех (раньше любая смена статуса сбрасывала «Выполнено» и у забора)."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        if status == 'cancelled':
+            await conn.execute(
+                "UPDATE route_orders SET stop_status='skipped' WHERE order_id=$1 AND stop_status='pending'", order_id)
+        else:
+            if status in _PICKED_STATUSES:
+                await conn.execute(
+                    "UPDATE route_orders SET stop_status='done' "
+                    "WHERE order_id=$1 AND COALESCE(leg,'pickup')='pickup' AND stop_status<>'done'", order_id)
+            if status == 'delivered':
+                await conn.execute(
+                    "UPDATE route_orders SET stop_status='done' "
+                    "WHERE order_id=$1 AND leg='delivery' AND stop_status<>'done'", order_id)
+            else:
+                await conn.execute(
+                    "UPDATE route_orders SET stop_status='pending' "
+                    "WHERE order_id=$1 AND leg='delivery' AND stop_status='done'", order_id)
+    await recalc_route_statuses()
+
+
+async def recalc_route_statuses() -> None:
+    """Самовосстановление открытых маршрутов (вызывается при смене статуса заказа и при
+    чтении маршрутов — так подхватываются и изменения из бота): остановки по статусу
+    заказа, затем статус маршрута. Только открытые (planned/active) маршруты."""
+    if not pool: return
+    async with pool.acquire() as conn:
+        await conn.execute(f"""
+            UPDATE route_orders ro SET stop_status='done'
+              FROM orders o, routes r
+             WHERE o.id = ro.order_id AND r.id = ro.route_id
+               AND r.status IN ('planned','active') AND ro.stop_status <> 'done'
+               AND ((COALESCE(ro.leg,'pickup') = 'pickup' AND o.status IN {_PICKED_STATUSES})
+                 OR (ro.leg = 'delivery' AND o.status = 'delivered'))""")
+        await conn.execute("""
+            UPDATE routes r SET status='done', updated_at=NOW()
+             WHERE r.status IN ('planned','active')
+               AND EXISTS (SELECT 1 FROM route_orders ro WHERE ro.route_id = r.id)
+               AND NOT EXISTS (SELECT 1 FROM route_orders ro WHERE ro.route_id = r.id AND ro.stop_status <> 'done')""")
+        await conn.execute("""
+            UPDATE routes r SET status='active', updated_at=NOW()
+             WHERE r.status = 'planned'
+               AND EXISTS (SELECT 1 FROM route_orders ro WHERE ro.route_id = r.id
+                           AND (ro.stop_status IN ('done','skipped') OR ro.driver_confirmed))""")
 
 async def remove_order_from_route(route_id: int, order_id: int) -> bool:
     if not pool: return False
@@ -6709,7 +6850,7 @@ async def get_orders_with_debt() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT o.id, o.order_num, o.status, o.debt_due_date, o.debt_approved_at,
-                   o.client_first_name, o.client_last_name, o.client_phone,
+                   o.client_first_name, o.client_last_name, o.client_phone, o.client_phone2,
                    TRIM(COALESCE(sr.last_name,'') || ' ' || COALESCE(sr.first_name,'')) AS responsible_name,
                    sr.id AS responsible_id,
                    GREATEST(0,
@@ -6856,7 +6997,7 @@ async def get_order_channel_info(order_id: int) -> dict | None:
         row = await conn.fetchrow("""
             SELECT r.id AS route_id, r.branch, r.tg_delivery_msg_ids,
                    ro.sort_order,
-                   o.order_num, o.client_first_name, o.client_last_name, o.client_phone,
+                   o.order_num, o.client_first_name, o.client_last_name, o.client_phone, o.client_phone2,
                    o.address, o.short_address,
                    COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                               FROM order_items WHERE order_id=o.id),
@@ -6936,7 +7077,7 @@ async def get_routes_today(branch: str | None = None) -> list:
         rows = await conn.fetch(f"""
             SELECT r.id AS route_id, r.name, r.date::text, r.type, r.status AS route_status, r.branch,
                    TRIM(COALESCE(s.first_name,'') || ' ' || COALESCE(s.last_name,'')) AS driver_name,
-                   ro.sort_order, ro.stop_status, ro.driver_confirmed,
+                   ro.sort_order, ro.stop_status, ro.driver_confirmed, ro.leg,
                    o.id AS order_id, o.order_num, o.status AS order_status,
                    o.client_first_name, o.client_last_name, o.client_phone, o.client_phone2,
                    o.address, o.short_address, o.delivery_address, o.delivery_short_address,
@@ -6970,6 +7111,7 @@ async def get_routes_today(branch: str | None = None) -> list:
                 "sort_order":     row["sort_order"],
                 "stop_status":    row["stop_status"],
                 "driver_confirmed": bool(row["driver_confirmed"]),
+                "leg":            row["leg"],            # 'pickup' | 'delivery' — цель остановки
                 "order_status":   row["order_status"],
                 "client_first_name": row["client_first_name"],
                 "client_last_name":  row.get("client_last_name"),
