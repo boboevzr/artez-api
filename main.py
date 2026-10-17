@@ -8087,6 +8087,36 @@ async def driver_returned(order_id: int, reason_index: int = Body(..., embed=Tru
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
 
+@app.post("/api/staff/my-route/stops/{order_id}/resume")
+async def driver_resume_stop(order_id: int, staff=Depends(get_current_staff)):
+    """«↩️ Вернуть в маршрут» — клиент вышел на связь после «Не забрал»/«Вернул»:
+    skipped → pending (статус заказа не трогаем — returned уже вернул его в ready,
+    not-taken его не менял). Только пока маршрут не закрыт и заказ не отменён."""
+    if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    name = _driver_name(staff)
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT ro.stop_status, r.status AS route_status, o.status AS order_status
+               FROM route_orders ro
+               JOIN routes r ON r.id = ro.route_id
+               JOIN orders o ON o.id = ro.order_id
+               WHERE ro.order_id=$1
+               ORDER BY ro.route_id DESC LIMIT 1""", order_id)
+        if not row: raise HTTPException(404, "Остановка не найдена")
+        if row["stop_status"] != "skipped":
+            raise HTTPException(400, "Остановка не пропущена")
+        if row["route_status"] == "done":
+            raise HTTPException(400, "Маршрут уже закрыт")
+        if row["order_status"] == "cancelled":
+            raise HTTPException(400, "Заказ отменён")
+        await conn.execute(
+            "UPDATE route_orders SET stop_status='pending', driver_confirmed=FALSE WHERE order_id=$1", order_id)
+        await conn.execute(
+            "INSERT INTO order_activity (order_id, staff_id, staff_name, action, details) VALUES ($1,$2,$3,$4,$5)",
+            order_id, staff["id"], name, "resumed", "↩️ Вернул в маршрут: клиент вышел на связь")
+    asyncio.create_task(_update_api_channel_stop(order_id))
+    return {"ok": True}
+
 @app.post("/api/staff/my-route/stops/{order_id}/deliver")
 async def driver_deliver(
     order_id: int,
