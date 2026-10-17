@@ -2063,6 +2063,16 @@ async def staff_change_password(staff_id: int, body: dict, me=Depends(get_curren
     return {"ok": True, "sessions_ended": ended}
 
 
+# ── Все активные сессии (admin.html → Сотрудники → «🔐 Сессии») ─────────────
+@app.get("/api/admin/staff-sessions")
+async def all_staff_sessions(_=Depends(require_perm("staff"))):
+    rows = await db.list_all_staff_sessions()
+    for r in rows:
+        for k in ("created_at", "last_seen_at"):
+            if r.get(k): r[k] = r[k].isoformat()
+    return {"ok": True, "sessions": rows}
+
+
 # ── Активные сессии сотрудника (admin.html → карточка сотрудника) ──────────
 @app.get("/api/admin/staff/{staff_id}/sessions")
 async def staff_sessions_list(staff_id: int, _=Depends(require_perm("staff"))):

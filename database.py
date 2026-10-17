@@ -3253,6 +3253,18 @@ async def check_staff_session(sid: int, staff_id: int) -> bool:
         return True
 
 
+async def list_all_staff_sessions() -> list[dict]:
+    """Все активные сессии всех сотрудников — для admin.html → «🔐 Сессии»."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT ss.id, ss.staff_id, ss.created_at, ss.last_seen_at, ss.user_agent, ss.ip,
+                   s.login, s.role, s.first_name, s.last_name, s.position, s.active
+            FROM staff_sessions ss JOIN staff s ON s.id = ss.staff_id
+            WHERE ss.revoked_at IS NULL
+            ORDER BY ss.last_seen_at DESC""")
+        return [dict(r) for r in rows]
+
+
 async def list_staff_sessions(staff_id: int) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
