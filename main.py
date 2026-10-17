@@ -334,7 +334,7 @@ async def _send_debt_reminders():
                 f"💸 Долг по заказу {d['order_num']}\n"
                 f"👤 {d.get('client_first_name','')} {d.get('client_last_name','')}\n"
                 f"📞 {d.get('client_phone') or '—'}\n"
-                + (f"📞 (запасной) {d['client_phone2']}\n" if d.get('client_phone2') else "") +
+                + (f"📞 {d['client_phone2']}\n" if d.get('client_phone2') else "") +
                 f"💰 {int(d['debt_amount']):,} сум\n"
                 f"📅 Срок: {due_date.strftime('%d.%m.%Y')}"
             ).replace(',', ' ')
@@ -386,7 +386,7 @@ async def _send_postpone_reminders():
             f"📋 Заказ {o.get('order_num')}\n"
             f"👤 {client}\n"
             f"📞 {o.get('client_phone') or '—'}\n"
-            + (f"📞 (запасной) {o['client_phone2']}\n" if o.get('client_phone2') else "") +
+            + (f"📞 {o['client_phone2']}\n" if o.get('client_phone2') else "") +
             f"📝 Причина: {o.get('postpone_reason') or '—'}\n"
             f"👷 Отложил: {o.get('postponed_by_name') or '—'}\n\n"
             f"Нужно созвониться с клиентом — согласовать доставку или отложить ещё."
@@ -1667,7 +1667,7 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
         if s.get("client_phone"):
             line += f"\n   📞 {s['client_phone']}"
         if s.get("client_phone2"):
-            line += f"\n   📞 (запасной) {s['client_phone2']}"
+            line += f"\n   📞 {s['client_phone2']}"
         lines.append(line)
 
     lines += ["", f"Всего точек: {len(stops)}"]
@@ -1788,7 +1788,7 @@ def _build_stop_text(route: dict, stop: dict, num: int, template: str) -> str:
     addr   = _stop_address(stop)
     phone  = f"📞 {stop['client_phone']}\n" if stop.get("client_phone") else ""
     if stop.get("client_phone2"):
-        phone += f"📞 (запасной) {stop['client_phone2']}\n"
+        phone += f"📞 {stop['client_phone2']}\n"
     loc    = _parse_loc_str(_stop_location(stop))
     map_link = f"🗺 https://maps.google.com/?q={loc[0]},{loc[1]}\n" if loc else ""
     status = _ORDER_STATUS_RU.get(stop.get("order_status", ""), "—")
@@ -1829,7 +1829,7 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
 
     contact = f"👤 {h(client)}"
     if phone: contact += f" 📞{h(phone)}"
-    if phone2: contact += f" 📞2{h(phone2)}"
+    if phone2: contact += f" 📞{h(phone2)}"
 
     total = float(stop.get("items_total") or stop.get("total_price") or 0)
     disc  = (float(stop.get("discount_sum") or 0) + float(stop.get("delivery_discount") or 0)
@@ -8320,7 +8320,7 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
              f"📋 Заказ: <b>{order_num}</b>",
              f"👤 Клиент: <b>{client}</b>"]
     if phone: lines.append(f"📞 {phone}")
-    if row["client_phone2"]: lines.append(f"📞 (запасной) {row['client_phone2']}")
+    if row["client_phone2"]: lines.append(f"📞 {row['client_phone2']}")
     lines.append(f"📍 {addr}")
     lines.append("")
     if total > 0: lines.append(f"💰 Сумма: <b>{_fmtd(total)} с</b>")
@@ -8531,7 +8531,7 @@ def _fmt_stop_text_api(info: dict, num: int) -> str:
     contact = f"👤 {h(client)}"
     if phone: contact += f" 📞{h(phone)}"
     # запасной номер — тот же формат, что _build_stop_text при первой отправке в канал
-    if info.get("client_phone2"): contact += f" 📞2{h(info['client_phone2'])}"
+    if info.get("client_phone2"): contact += f" 📞{h(info['client_phone2'])}"
     count_str = f" / {item_count}" if item_count else ""
     return f"📦 #{num}·{h(order_num)}{count_str} 📍{h(addr)}\n{contact}\n{pay_line}"
 
