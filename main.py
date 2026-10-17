@@ -1794,7 +1794,7 @@ def _build_stop_text_short(stop: dict, num: int) -> str:
 
     total = float(stop.get("items_total") or stop.get("total_price") or 0)
     disc  = (float(stop.get("discount_sum") or 0) + float(stop.get("delivery_discount") or 0)
-             + float(stop.get("manual_discount") or 0))
+             + float(stop.get("manual_discount") or 0) + float(stop.get("client_discount") or 0))
     net   = max(0.0, total - disc)
     paid  = float(stop.get("paid_amount") or 0)
     debt  = max(0.0, net - paid)
@@ -4552,6 +4552,14 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "total_price":   None,
     }, source="staff", staff_name=staff_label)
     await db.update_lead_status(lead_id, "converted")
+    # Скидка 5% «заявка через бот/сайт» (реклама 2026-10-17): заказ создаётся с
+    # source="staff", поэтому канал заявки берём из лида.
+    if lead.get("source") in ("site", "bot"):
+        async with db.pool.acquire() as conn:
+            oid = await conn.fetchval(
+                "UPDATE orders SET client_discount_online=TRUE WHERE order_num=$1 RETURNING id", order_num)
+        if oid:
+            await db.recalc_client_discount(oid)
     # Промо-акция: заказ считается "использованием" одноразового окна только если
     # лид пришёл с сайта/бота и привязан к зарегистрированному пользователю.
     if lead.get("source") in ("site", "bot") and lead.get("client_phone"):
@@ -4979,6 +4987,9 @@ async def admin_get_order_items(order_id: int, staff=Depends(get_current_staff))
     # клиентском кабинете (см. db.get_order_items_billing); карточка заказа в admin.html
     # раньше просто суммировала total_sum по позициям, вообще без учёта минимумов.
     # Мойщик видит только цену по прайсу — договорная цена и скидка скрыты НА СЕРВЕРЕ.
+    # Самовосстановление скидки клиента: позиции мог создать бот (create_pickup_items),
+    # где пересчёта нет — карточку открывают до любых денежных действий по заказу.
+    await db.recalc_client_discount(order_id)
     billing = await db.get_order_items_billing(order_id, as_list_price=staff.get("role") == "washer")
     return {"ok": True, "items": billing["items"], "groups": billing["groups"], "order_total": billing["order_total"]}
 
@@ -6476,7 +6487,7 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
             o = await _c.fetchrow("""
                 SELECT o.status,
                        COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),0) AS items_total,
-                       COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS disc,
+                       COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0)+COALESCE(o.client_discount,0) AS disc,
                        COALESCE((SELECT SUM(amount) FROM order_payments
                                  WHERE order_id=o.id AND confirmed=TRUE),0) AS paid_conf
                 FROM orders o WHERE o.id=$1
@@ -8020,6 +8031,7 @@ async def driver_route_undo_pickup(order_id: int, staff=Depends(get_current_staf
         await conn.execute(
             "UPDATE route_orders SET stop_status='pending', driver_confirmed=FALSE WHERE order_id=$1", order_id)
     await db.update_order_status(order_id, "confirmed", note=f"Маршрут: не забирал — позиции удалены ({name})")
+    await db.recalc_client_discount(order_id)
     asyncio.create_task(_update_api_channel_stop(order_id))
     return {"ok": True}
 
@@ -8164,7 +8176,7 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
                    o.short_address, o.address,
                    COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
                             COALESCE(o.total_price,0)) AS items_total,
-                   COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS disc,
+                   COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0)+COALESCE(o.client_discount,0) AS disc,
                    COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=$1
                               AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
                                    OR (method<>'cash' AND confirmed=TRUE))),0) AS paid
@@ -8390,7 +8402,7 @@ def _fmt_stop_text_api(info: dict, num: int) -> str:
     phone  = info.get("client_phone") or ""
     total  = float(info.get("items_total") or info.get("total_price") or 0)
     disc   = (float(info.get("discount_sum") or 0) + float(info.get("delivery_discount") or 0)
-              + float(info.get("manual_discount") or 0))
+              + float(info.get("manual_discount") or 0) + float(info.get("client_discount") or 0))
     net    = max(0.0, total - disc)
     paid   = float(info.get("paid_amount") or 0)
     debt   = max(0.0, net - paid)

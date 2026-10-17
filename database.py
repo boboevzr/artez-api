@@ -1075,6 +1075,21 @@ async def create_tables():
         ALTER TABLE leads  ADD COLUMN IF NOT EXISTS delivery_type VARCHAR(10) DEFAULT 'courier';
         """)
 
+    # ── Скидки клиента (реклама 2026-10-17): 5% заявка через бот/сайт, 10% пенсионер/
+    # инвалид — сумма client_discount считается СЕРВЕРОМ (recalc_client_discount).
+    # client_discount_enabled: у уже существующих заказов FALSE (ADD ... DEFAULT FALSE
+    # проставляет его всем текущим строкам), а SET DEFAULT TRUE — только новым:
+    # открытые заказы и выданные чеки не пересчитываются (решение пользователя).
+    async with pool.acquire() as c:
+        await c.execute("""
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_discount         NUMERIC(12,2) DEFAULT 0;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_discount_pct     NUMERIC(5,2)  DEFAULT 0;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_discount_kind    VARCHAR(20);
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_discount_online  BOOLEAN DEFAULT FALSE;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_discount_enabled BOOLEAN DEFAULT FALSE;
+        ALTER TABLE orders ALTER COLUMN client_discount_enabled SET DEFAULT TRUE;
+        """)
+
     # ── Шаг 11: флаг pending position request ────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
@@ -3893,7 +3908,9 @@ async def set_crm_client_discount_category(client_id: int, category: str | None,
                 WHERE id = $1
                 RETURNING *
             """, client_id)
-        return dict(row) if row else None
+    if row:
+        await recalc_client_discount_by_phone(row["phone"])
+    return dict(row) if row else None
 
 
 async def save_crm_client_discount_photo(client_id: int, file_id: str) -> dict | None:
@@ -4445,7 +4462,9 @@ async def create_order_item(order_id: int, service: str, sqm: float,
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             f"INSERT INTO order_items ({', '.join(cols)}) VALUES ({ph}) RETURNING *", *vals)
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(order_id)
+    return dict(row) if row else {}
 
 async def create_empty_items(order_id: int, count: int) -> list:
     if not pool: return []
@@ -4458,6 +4477,8 @@ async def create_empty_items(order_id: int, count: int) -> list:
             """, order_id)
             if row:
                 result.append(dict(row))
+    if result:
+        await recalc_client_discount(order_id)
     return result
 
 async def _service_key_label(service_key: str, service_type: str | None) -> tuple[str, str, str, str] | None:
@@ -4513,13 +4534,17 @@ async def update_order_item(item_id: int, **kwargs) -> dict:
         row = await conn.fetchrow(
             f"UPDATE order_items SET {set_parts} WHERE id=$1 RETURNING *",
             item_id, *list(fields.values()))
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(row["order_id"])
+    return dict(row) if row else {}
 
 async def delete_order_item(item_id: int) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
-        res = await conn.execute("DELETE FROM order_items WHERE id=$1", item_id)
-        return res == "DELETE 1"
+        order_id = await conn.fetchval("DELETE FROM order_items WHERE id=$1 RETURNING order_id", item_id)
+    if order_id:
+        await recalc_client_discount(order_id)
+    return order_id is not None
 
 async def delete_order(order_id: int) -> bool:
     if not pool: return False
@@ -4570,14 +4595,95 @@ async def update_order(order_id: int, **kwargs) -> dict:
         row = await conn.fetchrow(
             f"UPDATE orders SET {set_parts} WHERE id=$1 RETURNING *",
             order_id, *list(fields.values()))
-        return dict(row) if row else {}
+    if row:
+        # смена самовывоза/доставки/скидок/телефона меняет право на скидку клиента
+        await recalc_client_discount(order_id)
+        row = await get_order_by_id(order_id)
+    return dict(row) if row else {}
 
 async def update_order_discount(order_id: int, discount_sum: float) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "UPDATE orders SET discount_sum=$2 WHERE id=$1 RETURNING *", order_id, discount_sum)
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(order_id)
+    return dict(row) if row else {}
+
+
+# ── Скидки клиента (реклама 2026-10-17) ─────────────────────────────────────
+# 5% — заявка через бот/сайт (orders.source, либо лид с бота/сайта, сконвертированный
+# оператором — client_discount_online), 10% — пенсионер/инвалид (категория в
+# crm_clients, подтверждённая сотрудником по фото документа). Решения пользователя:
+# не суммируются между собой (берётся большая), не складываются со скидками за
+# самовывоз/самостоятельную доставку (discount_sum/delivery_discount), только новые
+# заказы (client_discount_enabled), процент категории фиксированный 10%.
+CLIENT_DISCOUNT_ONLINE_PCT   = 5.0
+CLIENT_DISCOUNT_CATEGORY_PCT = 10.0
+
+
+async def recalc_client_discount(order_id: int) -> dict | None:
+    """Пересчитывает orders.client_discount(+_pct, _kind) от итога позиций с
+    минимумами (get_order_items_billing — та же сумма, что в карточке заказа).
+    Вызывается после любых изменений позиций/скидок заказа. Доставленные и
+    отменённые заказы не трогаем — их суммы уже финальные."""
+    if not pool or not order_id:
+        return None
+    async with pool.acquire() as conn:
+        o = await conn.fetchrow("""
+            SELECT o.id, o.status, o.source, o.client_discount_enabled, o.client_discount_online,
+                   o.pickup_type, o.self_pickup_discount, o.delivery_type, o.delivery_discount_pct,
+                   COALESCE(o.discount_sum,0) AS discount_sum,
+                   COALESCE(o.delivery_discount,0) AS delivery_discount,
+                   COALESCE(o.client_discount,0) AS client_discount,
+                   COALESCE(o.client_discount_pct,0) AS client_discount_pct,
+                   o.client_discount_kind,
+                   (SELECT cc.discount_category FROM crm_clients cc
+                     WHERE cc.phone = o.client_phone
+                       AND cc.discount_category IN ('pensioner','disabled')
+                     LIMIT 1) AS category
+            FROM orders o WHERE o.id=$1
+        """, order_id)
+    if not o or not o["client_discount_enabled"] or o["status"] in ("delivered", "cancelled"):
+        return None
+
+    has_old = (float(o["discount_sum"]) > 0 or float(o["delivery_discount"]) > 0
+               or (o["pickup_type"] == "self" and float(o["self_pickup_discount"] or 0) > 0)
+               or (o["delivery_type"] == "self"
+                   and (float(o["delivery_discount_pct"] or 0) > 0
+                        or float(await get_config("delivery_discount_pct") or 0) > 0)))
+    kind, pct = None, 0.0
+    if not has_old:
+        if o["category"]:
+            kind, pct = o["category"], CLIENT_DISCOUNT_CATEGORY_PCT
+        elif o["client_discount_online"] or o["source"] in ("bot", "site"):
+            kind, pct = "online", CLIENT_DISCOUNT_ONLINE_PCT
+
+    amount = 0.0
+    if pct:
+        base = (await get_order_items_billing(order_id))["order_total"]
+        amount = float(int(base * pct / 100 + 0.5))  # half-up, как Math.round в staff/admin
+    if (amount == float(o["client_discount"]) and pct == float(o["client_discount_pct"])
+            and kind == o["client_discount_kind"]):
+        return {"kind": kind, "pct": pct, "amount": amount}
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE orders SET client_discount=$2, client_discount_pct=$3, client_discount_kind=$4 WHERE id=$1",
+            order_id, amount, pct, kind)
+        await _recalc_payment_status(conn, order_id)
+    return {"kind": kind, "pct": pct, "amount": amount}
+
+
+async def recalc_client_discount_by_phone(phone: str) -> None:
+    """После смены категории клиента (пенсионер/инвалид) — пересчитать его открытые заказы."""
+    if not pool or not phone:
+        return
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id FROM orders WHERE client_phone=$1 AND client_discount_enabled "
+            "AND status NOT IN ('delivered','cancelled')", phone)
+    for r in rows:
+        await recalc_client_discount(r["id"])
 
 async def confirm_item_measure(item_id: int) -> dict:
     if not pool: return {}
@@ -4596,7 +4702,9 @@ async def save_measure_dims(item_id: int, width_cm: float, length_cm: float) -> 
             WHERE id=$1 AND measure_status != 'approved'
             RETURNING *
         """, item_id, width_cm, length_cm, sqm)
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(row["order_id"])
+    return dict(row) if row else {}
 
 async def save_measure_qty(item_id: int, quantity: float) -> dict:
     if not pool: return {}
@@ -4607,7 +4715,9 @@ async def save_measure_qty(item_id: int, quantity: float) -> dict:
             WHERE id=$1 AND measure_status != 'approved'
             RETURNING *
         """, item_id, round(quantity, 3))
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(row["order_id"])
+    return dict(row) if row else {}
 
 async def update_item_washer(item_id: int, washer_login: str) -> dict:
     if not pool: return {}
@@ -5090,7 +5200,7 @@ async def add_order_payment(order_id: int, amount: float, method: str, purpose: 
                 COALESCE(NULLIF((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                                   FROM order_items WHERE order_id=o.id), 0),
                          COALESCE(o.total_price,0), 0)
-                - COALESCE(o.discount_sum,0) - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                - COALESCE(o.discount_sum,0) - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0) - COALESCE(o.client_discount,0)
                 - COALESCE((SELECT SUM(amount) FROM order_payments
                              WHERE order_id=o.id AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)),0)
             ) AS debt_before
@@ -5127,14 +5237,14 @@ async def _recalc_payment_status(conn, order_id: int):
         "SELECT COALESCE(SUM(amount),0) AS paid FROM order_payments WHERE order_id=$1 AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)", order_id)
     paid = float(total_row['paid'])
     order = await conn.fetchrow("""
-        SELECT total_price, discount_sum, delivery_discount, manual_discount,
+        SELECT total_price, discount_sum, delivery_discount, manual_discount, client_discount,
                COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                          FROM order_items WHERE order_id=$1), 0) AS items_total
         FROM orders WHERE id=$1
     """, order_id)
     if order:
         base = float(order['total_price'] or 0) or float(order['items_total'] or 0)
-        net = base - float(order['discount_sum'] or 0) - float(order['delivery_discount'] or 0) - float(order['manual_discount'] or 0)
+        net = base - float(order['discount_sum'] or 0) - float(order['delivery_discount'] or 0) - float(order['manual_discount'] or 0) - float(order['client_discount'] or 0)
         status = 'paid' if paid >= net and net > 0 else ('partial' if paid > 0 else 'unpaid')
         await conn.execute("UPDATE orders SET payment_status=$1 WHERE id=$2", status, order_id)
 
@@ -5291,7 +5401,9 @@ async def direct_approve_measure(item_id: int, width_cm: float, length_cm: float
                    measure_status='approved', reject_note=NULL
              WHERE id=$1 RETURNING *
         """, item_id, width_cm, length_cm, sqm)
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(row["order_id"])
+    return dict(row) if row else {}
 
 async def direct_approve_measure_qty(item_id: int, quantity: float) -> dict:
     if not pool: return {}
@@ -5302,7 +5414,9 @@ async def direct_approve_measure_qty(item_id: int, quantity: float) -> dict:
                    measure_status='approved', reject_note=NULL
              WHERE id=$1 RETURNING *
         """, item_id, round(quantity, 3))
-        return dict(row) if row else {}
+    if row:
+        await recalc_client_discount(row["order_id"])
+    return dict(row) if row else {}
 
 async def reject_item_measure(item_id: int, note: str) -> dict:
     if not pool: return {}
@@ -5403,7 +5517,7 @@ async def get_route(route_id: int) -> dict | None:
                    o.service, o.branch,
                    o.pickup_date, o.deadline,
                    o.total_price, o.prepaid_amount, o.payment_status,
-                   o.discount_sum, o.delivery_discount, o.manual_discount,
+                   o.discount_sum, o.delivery_discount, o.manual_discount, o.client_discount,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id=o.id
@@ -5517,6 +5631,7 @@ async def get_channel_stop_full(order_id: int) -> dict | None:
                    COALESCE(o.discount_sum, 0) AS discount_sum,
                    COALESCE(o.delivery_discount, 0) AS delivery_discount,
                    COALESCE(o.manual_discount, 0) AS manual_discount,
+                   COALESCE(o.client_discount, 0) AS client_discount,
                    COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
                               FROM order_items WHERE order_id=o.id), 0) AS items_total,
                    COALESCE((SELECT SUM(amount) FROM order_payments
@@ -5863,7 +5978,7 @@ async def get_cash_dashboard() -> dict:
                                   FROM order_items WHERE order_id=o.id), 0),
                          COALESCE(o.total_price,0), 0)
                 - COALESCE(o.discount_sum,0)
-                - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0) - COALESCE(o.client_discount,0)
                 - COALESCE((SELECT SUM(op.amount) FROM order_payments op
                              WHERE op.order_id = o.id
                                AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)), 0)
@@ -5882,7 +5997,7 @@ async def get_cash_dashboard() -> dict:
                                       FROM order_items WHERE order_id=o.id), 0),
                              COALESCE(o.total_price,0), 0)
                     - COALESCE(o.discount_sum,0)
-                    - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                    - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0) - COALESCE(o.client_discount,0)
                     - COALESCE((SELECT SUM(op.amount) FROM order_payments op
                                  WHERE op.order_id = o.id
                                    AND NOT (op.confirmed = FALSE AND op.confirmed_at IS NOT NULL)), 0)
@@ -6374,7 +6489,7 @@ async def get_order_debt_amount(order_id: int) -> float:
         row = await conn.fetchrow("""
             SELECT GREATEST(0,
                 COALESCE(o.total_price,0) - COALESCE(o.discount_sum,0)
-                - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0) - COALESCE(o.client_discount,0)
                 - COALESCE((SELECT SUM(amount) FROM order_payments
                              WHERE order_id=o.id AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)),0)
             ) AS debt FROM orders o WHERE o.id=$1
@@ -6440,7 +6555,7 @@ async def get_orders_with_debt() -> list:
                                     FROM order_items WHERE order_id=o.id), 0),
                            COALESCE(o.total_price,0), 0)
                   - COALESCE(o.discount_sum,0)
-                  - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0)
+                  - COALESCE(o.delivery_discount,0) - COALESCE(o.manual_discount,0) - COALESCE(o.client_discount,0)
                 ) AS net_raw
               ) net
              WHERE o.debt_responsible_id IS NOT NULL
@@ -6546,7 +6661,7 @@ async def get_pending_debt_approvals() -> list:
                    COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),
                             COALESCE(o.total_price,0)) AS order_total,
                    COALESCE(o.discount_sum, 0) + COALESCE(o.delivery_discount, 0)
-                       + COALESCE(o.manual_discount, 0) AS total_discount,
+                       + COALESCE(o.manual_discount, 0) + COALESCE(o.client_discount, 0) AS total_discount,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id = o.id
                                 AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
@@ -6575,6 +6690,7 @@ async def get_order_channel_info(order_id: int) -> dict | None:
                    COALESCE(o.discount_sum,0) AS discount_sum,
                    COALESCE(o.delivery_discount,0) AS delivery_discount,
                    COALESCE(o.manual_discount,0) AS manual_discount,
+                   COALESCE(o.client_discount,0) AS client_discount,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id),0)::int AS item_count,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id=o.id
@@ -6653,7 +6769,7 @@ async def get_routes_today(branch: str | None = None) -> list:
                    o.location, o.location_address,
                    o.delivery_location, o.delivery_location_address,
                    COALESCE(o.total_price,0) AS total_price,
-                   COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0) AS total_discount,
+                   COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0)+COALESCE(o.client_discount,0) AS total_discount,
                    COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=o.id
                               AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
                                    OR (method<>'cash' AND confirmed=TRUE))), 0) AS paid_amount,
