@@ -8903,9 +8903,31 @@ SITE_SETTINGS_DEFAULTS = {
     # Карты менеджеров для оплаты Click/перевода — JSON [{number,name}], до 10.
     # НЕ публичный ключ: читается только admin.html (печать бумажки водителю).
     "manager_cards": "[]",
+    # Цвета кнопок главного меню бота (Bot API style) — JSON {ключ: ""|success|danger|primary}.
+    # Нормализуется _normalize_button_styles (тот же набор и умолчания, что в artez_bot).
+    "bot_button_styles": "",
 }
 
 MAX_MANAGER_CARDS = 10
+
+# Цвета кнопок бота (2026-10-18): тот же набор ключей и умолчаний, что BTN_STYLE_DEFAULTS
+# в artez_bot/bot.py. Всегда все ключи; не прислали / неизвестный цвет — по умолчанию.
+BOT_BUTTON_STYLE_VALUES = ("", "success", "danger", "primary")
+BOT_BUTTON_STYLE_DEFAULTS = {
+    "reg_start": "success", "webapp": "primary", "order": "success", "status": "primary",
+    "prices": "", "calc": "", "profile": "", "operator": "",
+}
+
+
+def _normalize_button_styles(raw) -> dict:
+    try:
+        data = _json.loads(raw) if isinstance(raw, str) and raw.strip() else (raw or {})
+    except (ValueError, TypeError):
+        data = {}
+    if not isinstance(data, dict):
+        data = {}
+    return {k: (data[k] if k in data and data[k] in BOT_BUTTON_STYLE_VALUES else d)
+            for k, d in BOT_BUTTON_STYLE_DEFAULTS.items()}
 
 async def _get_cfg(key: str) -> str:
     """БД → env-fallback из SITE_SETTINGS_DEFAULTS."""
@@ -8997,6 +9019,12 @@ class SiteSettings(BaseModel):
     site_maintenance_mode:   str | None = None
     bot_maintenance_mode:    str | None = None
     manager_cards:           str | None = None
+    bot_button_styles:       str | None = None
+
+    @field_validator("bot_button_styles")
+    @classmethod
+    def _validate_bot_button_styles(cls, v):
+        return None if v is None else _json.dumps(_normalize_button_styles(v), ensure_ascii=False)
 
     @field_validator("manager_cards")
     @classmethod
@@ -9029,6 +9057,7 @@ class SiteSettings(BaseModel):
 @app.get("/api/admin/settings/site")
 async def get_admin_site_settings(_=Depends(get_admin)):
     result = {key: await _get_cfg(key) for key in SITE_SETTINGS_DEFAULTS}
+    result["bot_button_styles"] = _json.dumps(_normalize_button_styles(result.get("bot_button_styles")), ensure_ascii=False)
     return {"ok": True, "settings": result}
 
 @app.put("/api/admin/settings/site")
