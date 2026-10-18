@@ -8906,6 +8906,8 @@ SITE_SETTINGS_DEFAULTS = {
     # Цвета кнопок главного меню бота (Bot API style) — JSON {ключ: ""|success|danger|primary}.
     # Нормализуется _normalize_button_styles (тот же набор и умолчания, что в artez_bot).
     "bot_button_styles": "",
+    # Цвета кнопок внутри разделов бота по правилу (🟢 подтвердить, 🔴 отменить, 🔵 оплатить)
+    "bot_inner_button_colors": "true",
 }
 
 MAX_MANAGER_CARDS = 10
@@ -9020,6 +9022,12 @@ class SiteSettings(BaseModel):
     bot_maintenance_mode:    str | None = None
     manager_cards:           str | None = None
     bot_button_styles:       str | None = None
+    bot_inner_button_colors: str | None = None
+
+    @field_validator("bot_inner_button_colors")
+    @classmethod
+    def _validate_bot_inner_button_colors(cls, v):
+        return None if v is None else ("false" if str(v).strip().lower() in ("false", "0", "off", "") else "true")
 
     @field_validator("bot_button_styles")
     @classmethod
