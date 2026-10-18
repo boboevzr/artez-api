@@ -96,6 +96,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 @app.on_event("startup")
 async def startup():
     await db.init_db()
+    try:
+        _bot_inner_colors["on"] = (await db.get_config("bot_inner_button_colors") or "true") != "false"
+    except Exception as e:
+        logging.warning(f"bot_inner_button_colors load: {e}")
     await db.ensure_plans_table()
     await db.ensure_chat_tables()
     await db.ensure_chat_templates()
@@ -703,7 +707,7 @@ async def _notify_new_lead(lead: dict, staff: dict):
     keyboard = None
     if lead_id and not lead.get("assigned_to"):
         keyboard = {"inline_keyboard": [[
-            {"text": "✋ Взять лид", "callback_data": f"take_lead_{lead_id}"}
+            _tg_btn("✋ Взять лид", "ok", callback_data=f"take_lead_{lead_id}")
         ]]}
 
     try:
@@ -1702,6 +1706,23 @@ async def _is_route_closed_for_order(order_id: int) -> bool:
         return False
 
 
+# ── Цвета кнопок постов бота (2026-10-18, этап 3) ─────────────────────────────
+# То же правило, что btn_ok/btn_no/btn_pay в artez_bot: 🟢 подтвердить/взять/забрал,
+# 🔴 отменить/отклонить/не забрал, 🔵 оплата; остальное — обычные. Цвет задаётся у
+# каждой кнопки поста здесь (kind), выключатель — config bot_inner_button_colors
+# (admin → «🎨 Цвета кнопок бота»). Его пишет только этот процесс (PUT
+# /admin/settings/site), поэтому держим в памяти: читаем при старте, обновляем при сохранении.
+_TG_BTN_STYLE = {"ok": "success", "no": "danger", "pay": "primary"}
+_bot_inner_colors = {"on": True}
+
+
+def _tg_btn(text: str, kind: str | None = None, **kw) -> dict:
+    b = {"text": text, **kw}
+    if kind and _bot_inner_colors["on"]:
+        b["style"] = _TG_BTN_STYLE[kind]
+    return b
+
+
 def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
     """Inline-клавиатура для сообщения в канале водителей."""
     h = {"text": "📋 История", "callback_data": f"rp:{order_id}:history"}
@@ -1711,26 +1732,26 @@ def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
         return {"inline_keyboard": [[p, h, r]]}
     if status == "confirmed":
         return {"inline_keyboard": [
-            [{"text": "✅ Забрал", "callback_data": f"rp:{order_id}:take"},
+            [_tg_btn("✅ Забрал", "ok", callback_data=f"rp:{order_id}:take"),
              {"text": "⏭ Пропустить", "callback_data": f"rp:{order_id}:skip"}],
             [p, h, r],
         ]}
     elif status == "pickup":
         return {"inline_keyboard": [
-            [{"text": "🏭 Сдал в мастерскую", "callback_data": f"rp:{order_id}:deliver"}],
-            [{"text": "↩️ Не забирал", "callback_data": f"rp:{order_id}:undo"}],
+            [_tg_btn("🏭 Сдал в мастерскую", "ok", callback_data=f"rp:{order_id}:deliver")],
+            [_tg_btn("↩️ Не забирал", "no", callback_data=f"rp:{order_id}:undo")],
             [p, h, r],
         ]}
     elif status == "ready":
         return {"inline_keyboard": [
             [{"text": "🚗 Везу клиенту", "callback_data": f"rp:{order_id}:take_delivery"},
-             {"text": "❌ Не забрал", "callback_data": f"rp:{order_id}:ntaken"}],
+             _tg_btn("❌ Не забрал", "no", callback_data=f"rp:{order_id}:ntaken")],
             [p, h, r],
         ]}
     elif status == "delivery":
         return {"inline_keyboard": [
-            [{"text": "✅ Доставил клиенту", "callback_data": f"rp:{order_id}:mark_delivered"}],
-            [{"text": "💳 Оплата", "callback_data": f"rp:{order_id}:pay_init"}],
+            [_tg_btn("✅ Доставил клиенту", "ok", callback_data=f"rp:{order_id}:mark_delivered")],
+            [_tg_btn("💳 Оплата", "pay", callback_data=f"rp:{order_id}:pay_init")],
             [{"text": "🔙 Вернул в мастерскую", "callback_data": f"rp:{order_id}:retback"}],
             [p, h, r],
         ]}
@@ -1738,7 +1759,7 @@ def _route_pickup_kb(order_id: int, status: str, closed: bool = False) -> dict:
         return {"inline_keyboard": [[p, h, r]]}
     elif status == "skipped":
         return {"inline_keyboard": [
-            [{"text": "↩️ Отменить пропуск", "callback_data": f"rp:{order_id}:unskip"}],
+            [_tg_btn("↩️ Отменить пропуск", "no", callback_data=f"rp:{order_id}:unskip")],
             [p, h, r],
         ]}
     else:
@@ -5815,8 +5836,8 @@ async def staff_cash_handover(
         msg_id = await _send_tg_with_kb(
             tg_chat, dm_text,
             keyboard={"inline_keyboard": [[
-                {"text": "✅ Подтвердить", "callback_data": f"cash_confirm:{handover_id}"},
-                {"text": "❌ Отклонить",   "callback_data": f"cash_reject:{handover_id}"},
+                _tg_btn("✅ Подтвердить", "ok", callback_data=f"cash_confirm:{handover_id}"),
+                _tg_btn("❌ Отклонить", "no",   callback_data=f"cash_reject:{handover_id}"),
             ]]},
         )
         if msg_id:
@@ -5954,8 +5975,8 @@ async def admin_safe_deposit(
                 f"Сумма: {fmt_amt} сум"
                 + (f"\n📝 {note}" if note else ""))
         kb = {"inline_keyboard": [[
-            {"text": "✅ Подтвердить", "callback_data": f"safe_confirm_{handover_id}"},
-            {"text": "❌ Отклонить",   "callback_data": f"safe_reject_{handover_id}"},
+            _tg_btn("✅ Подтвердить", "ok", callback_data=f"safe_confirm_{handover_id}"),
+            _tg_btn("❌ Отклонить", "no",   callback_data=f"safe_reject_{handover_id}"),
         ]]}
         msg_id = await _send_tg_with_kb(str(tg_id), text, kb)
         if msg_id:
@@ -8346,8 +8367,8 @@ async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)
     text = "\n".join(lines)
 
     approve_kb = {"inline_keyboard": [
-        [{"text": "✅ Разрешить закрыть в долг", "callback_data": f"debt_approve:{order_id}"}],
-        [{"text": "❌ Отказать",                 "callback_data": f"debt_reject:{order_id}"}],
+        [_tg_btn("✅ Разрешить закрыть в долг", "ok", callback_data=f"debt_approve:{order_id}")],
+        [_tg_btn("❌ Отказать", "no",                 callback_data=f"debt_reject:{order_id}")],
     ]}
     # Все approvers (с или без tg_id)
     async with db.pool.acquire() as conn:
@@ -8602,7 +8623,7 @@ async def approve_debt_approval_ep(
                     else:
                         new_text = _fmt_stop_text_api(ch_info, ch_info["stop_num"])
                         kb = {"inline_keyboard": [
-                            [{"text": "↩️ Отменить «Доставлен»", "callback_data": f"rp:{order_id}:undo_delivered"}],
+                            [_tg_btn("↩️ Отменить «Доставлен»", "no", callback_data=f"rp:{order_id}:undo_delivered")],
                             [{"text": "📦 Позиции", "callback_data": f"rp:{order_id}:items"},
                              {"text": "📋 История", "callback_data": f"rp:{order_id}:history"},
                              {"text": "🔄 Обновить", "callback_data": f"rp:{order_id}:refresh"}],
@@ -9073,6 +9094,8 @@ async def save_site_settings(body: SiteSettings, _=Depends(get_admin)):
     data = {k: v for k, v in body.dict().items() if v is not None}
     for key, val in data.items():
         await db.set_config(key, val)
+    if "bot_inner_button_colors" in data:
+        _bot_inner_colors["on"] = data["bot_inner_button_colors"] != "false"
     return {"ok": True}
 
 @app.get("/api/staff/print-template")
