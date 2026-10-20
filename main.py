@@ -2597,6 +2597,12 @@ async def bulk_status_leads(body: dict, staff=Depends(require_perm("leads"))):
 
 @app.post("/api/staff/orders/bulk-status")
 async def bulk_status_orders(body: dict, staff=Depends(require_perm("orders"))):
+    # Прямой UPDATE в обход правил смены статуса (права по ролям, синк маршрутов/канала,
+    # уведомления клиенту, комиссия агента). staff.html им больше не пользуется — массовая
+    # смена идёт по одному через PATCH /admin/orders/{id}/status (2026-10-20). Оставлен
+    # только админу, чтобы любой с правом «orders» не мог обойти правила.
+    if staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Массовая смена статуса — только по одному заказу (админ)")
     status = body.get("status")
     valid = {"new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"}
     if status not in valid:
