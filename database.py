@@ -59,6 +59,11 @@ async def init_db():
         await recalc_route_statuses()
     except Exception as e:
         logging.warning(f"recalc_route_statuses at startup: {e}")
+    # Разово при старте: скидка «бот/сайт» заказам из лидов, оформленным через «Стал заказом» (2026-10-20)
+    try:
+        await backfill_online_discount_from_leads()
+    except Exception as e:
+        logging.warning(f"backfill_online_discount_from_leads at startup: {e}")
     # Загружаем timezone из settings в кеш
     try:
         await get_timezone_setting()
@@ -4930,6 +4935,42 @@ async def recalc_client_discount(order_id: int) -> dict | None:
             order_id, amount, pct, kind)
         await _recalc_payment_status(conn, order_id)
     return {"kind": kind, "pct": pct, "amount": amount}
+
+
+async def mark_order_online_from_lead(lead_source: str | None, order_num: str | None) -> None:
+    """Заказ из лида с бота/сайта — скидка «заявка через бот/сайт». Заказ создаётся
+    оператором (source='staff'), поэтому канал берём из лида. Вызывается при ЛЮБОМ
+    оформлении лида в заказ: кнопка «Конвертировать» (/convert) и «Стал заказом» с
+    номером заказа (форма «Новый заказ» в staff) — раньше только в первом (2026-10-20)."""
+    if not pool or not order_num or lead_source not in ("site", "bot"):
+        return
+    async with pool.acquire() as conn:
+        oid = await conn.fetchval(
+            "UPDATE orders SET client_discount_online=TRUE WHERE order_num=$1 RETURNING id", order_num)
+    if oid:
+        await recalc_client_discount(oid)
+
+
+async def backfill_online_discount_from_leads() -> int:
+    """Разово при старте: заказы, оформленные из лидов бота/сайта путём «Стал заказом»
+    до исправления (флаг не ставился) — проставить флаг и пересчитать скидку.
+    Только новые заказы (client_discount_enabled) и не доставленные/не отменённые;
+    повторный запуск ничего не меняет (берём только где флага ещё нет)."""
+    if not pool:
+        return 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            UPDATE orders o SET client_discount_online=TRUE
+              FROM leads l
+             WHERE l.converted_order = o.order_num AND l.source IN ('site','bot')
+               AND o.client_discount_enabled AND NOT COALESCE(o.client_discount_online, FALSE)
+               AND o.status NOT IN ('delivered','cancelled')
+            RETURNING o.id, o.order_num""")
+    for r in rows:
+        await recalc_client_discount(r["id"])
+    if rows:
+        logging.info(f"online discount backfill: {[r['order_num'] for r in rows]}")
+    return len(rows)
 
 
 async def recalc_client_discount_by_phone(phone: str) -> None:

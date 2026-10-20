@@ -2289,6 +2289,13 @@ async def update_lead_status(lead_id: int, body: dict,
     order_num = body.get("order_num")
     if status == "converted" and order_num:
         await db.convert_lead_to_order(lead_id, order_num, operator_id or 0)
+        # заказ оформлен формой «Новый заказ» из лида — скидка «бот/сайт», как и в /convert
+        # (раньше здесь не ставилась — 2026-10-20)
+        try:
+            _lead = await db.get_lead_by_id(lead_id)
+            await db.mark_order_online_from_lead((_lead or {}).get("source"), order_num)
+        except Exception as e:
+            logging.warning(f"mark_order_online_from_lead lead={lead_id}: {e}")
     else:
         scheduled_at_pre = body.get("scheduled_at")
         from datetime import datetime as _dt
@@ -4711,14 +4718,8 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
         "total_price":   None,
     }, source="staff", staff_name=staff_label)
     await db.update_lead_status(lead_id, "converted")
-    # Скидка 5% «заявка через бот/сайт» (реклама 2026-10-17): заказ создаётся с
-    # source="staff", поэтому канал заявки берём из лида.
-    if lead.get("source") in ("site", "bot"):
-        async with db.pool.acquire() as conn:
-            oid = await conn.fetchval(
-                "UPDATE orders SET client_discount_online=TRUE WHERE order_num=$1 RETURNING id", order_num)
-        if oid:
-            await db.recalc_client_discount(oid)
+    # Скидка 5% «заявка через бот/сайт»: заказ создаётся с source="staff", канал — из лида
+    await db.mark_order_online_from_lead(lead.get("source"), order_num)
     # Промо-акция: заказ считается "использованием" одноразового окна только если
     # лид пришёл с сайта/бота и привязан к зарегистрированному пользователю.
     if lead.get("source") in ("site", "bot") and lead.get("client_phone"):
