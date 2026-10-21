@@ -8936,6 +8936,8 @@ SITE_SETTINGS_DEFAULTS = {
     "bot_button_styles": "",
     # Цвета кнопок внутри разделов бота по правилу (🟢 подтвердить, 🔴 отменить, 🔵 оплатить)
     "bot_inner_button_colors": "true",
+    # Шаг стрелок ▲▼ у поля «Цена за» позиции (staff/admin), сум — целое 1…1 000 000
+    "item_price_step": "500",
 }
 
 MAX_MANAGER_CARDS = 10
@@ -8980,6 +8982,7 @@ async def get_site_settings():
         "site_video_enabled", "site_video_placement",
         "sms_registration_enabled",
         "order_rules", "site_maintenance_mode",
+        "item_price_step",
     ]
     result = {}
     for key in PUBLIC_KEYS:
@@ -9051,6 +9054,20 @@ class SiteSettings(BaseModel):
     manager_cards:           str | None = None
     bot_button_styles:       str | None = None
     bot_inner_button_colors: str | None = None
+    item_price_step:         str | None = None
+
+    @field_validator("item_price_step")
+    @classmethod
+    def _validate_item_price_step(cls, v):
+        if v is None:
+            return v
+        try:
+            n = int(float(str(v).strip()))
+        except (ValueError, TypeError):
+            raise ValueError("Шаг цены — целое число")
+        if not 1 <= n <= 1_000_000:
+            raise ValueError("Шаг цены — от 1 до 1 000 000 сум")
+        return str(n)
 
     @field_validator("bot_inner_button_colors")
     @classmethod
