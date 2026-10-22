@@ -312,6 +312,16 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS postponed_until DATE DEFAULT NULL",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS postpone_reason TEXT DEFAULT NULL",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS postponed_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        # Согласованная с клиентом доставка (2026-10-22): день + окно времени + примечание
+        # оператора. Без времени — «в течение дня». Сводка/контроль — _delivery_digest_worker.
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_date DATE DEFAULT NULL",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_from TIME DEFAULT NULL",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_to TIME DEFAULT NULL",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_note TEXT DEFAULT NULL",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_set_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_set_at TIMESTAMPTZ DEFAULT NULL",
+        # Получать ли TG-сводку доставок; NULL = по роли (admin/manager/logistics/callcenter)
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_delivery_digest BOOLEAN DEFAULT NULL",
         # Маршруты: хранить TG message_id отправленных сообщений водителям
         "ALTER TABLE routes ADD COLUMN IF NOT EXISTS tg_delivery_msg_ids JSONB DEFAULT NULL",
         # Маршруты логистики
@@ -4658,6 +4668,67 @@ async def set_order_postpone(order_id: int, until_date, reason: str, staff_id: i
         """, order_id, until_date, reason, staff_id)
         return dict(row) if row else {}
 
+_DELIVERY_SLOT_STATUSES = ("packing", "ready", "delivery")
+
+async def set_order_delivery_slot(order_id: int, day, t_from, t_to, note: str, staff_id: int) -> dict:
+    """Согласованная доставка: день + окно. Снимает отсрочку — клиент назвал дату."""
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE orders SET delivery_date=$2, delivery_from=$3, delivery_to=$4,
+                   delivery_note=$5, delivery_set_by=$6, delivery_set_at=NOW(),
+                   postponed_until=NULL, postpone_reason=NULL, postponed_by=NULL
+            WHERE id=$1 AND status = ANY($7::text[]) RETURNING *
+        """, order_id, day, t_from, t_to, note or None, staff_id, list(_DELIVERY_SLOT_STATUSES))
+        return dict(row) if row else {}
+
+async def clear_order_delivery_slot(order_id: int) -> dict:
+    if not pool: return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            UPDATE orders SET delivery_date=NULL, delivery_from=NULL, delivery_to=NULL,
+                   delivery_note=NULL, delivery_set_by=NULL, delivery_set_at=NULL
+            WHERE id=$1 RETURNING *
+        """, order_id)
+        return dict(row) if row else {}
+
+async def get_delivery_digest_orders() -> list:
+    """Заказы «Готов»/«Доставка» для сводки доставок: с согласованной датой ≤ завтра
+    (просроченные тоже) и «Готов» без даты/отсрочки (не согласовано). in_route —
+    стоит ли в активном маршруте. Даты — по Ташкенту."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT o.id, o.order_num, o.branch, o.status, o.client_first_name, o.client_last_name,
+                   o.short_address, o.address, o.delivery_short_address,
+                   o.delivery_date, o.delivery_from, o.delivery_to, o.delivery_note,
+                   o.postponed_until,
+                   (SELECT EXTRACT(EPOCH FROM NOW() - MAX(h.created_at)) / 86400
+                      FROM order_status_history h
+                     WHERE h.order_num = o.order_num AND h.new_status = 'ready') AS ready_days,
+                   EXISTS (SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id
+                            WHERE ro.order_id = o.id AND r.status NOT IN ('done','cancelled')) AS in_route
+            FROM orders o
+            WHERE o.status IN ('ready','delivery')
+              AND (o.delivery_date <= (NOW() AT TIME ZONE 'Asia/Tashkent')::date + 1
+                   OR (o.status = 'ready' AND o.delivery_date IS NULL AND o.postponed_until IS NULL))
+            ORDER BY o.delivery_date NULLS LAST, o.delivery_from NULLS LAST, o.id
+        """)
+        return [dict(r) for r in rows]
+
+async def get_delivery_digest_recipients() -> list:
+    """Кому слать сводку доставок: активные с TG; флаг notify_delivery_digest,
+    а если не задан — по роли (admin/manager/logistics/callcenter)."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, role, branch, tg_id FROM staff
+            WHERE active = TRUE AND tg_id IS NOT NULL
+              AND COALESCE(notify_delivery_digest,
+                           role IN ('admin','manager','logistics','callcenter'))
+        """)
+        return [dict(r) for r in rows]
+
 async def get_orders_for_postpone_reminder() -> list:
     """Заказы, у которых отсрочка доставки истекает завтра — для ежедневного
     напоминания администраторам/менеджерам созвониться с клиентом."""
@@ -5833,6 +5904,7 @@ async def get_route(route_id: int) -> dict | None:
                    ro.driver_confirmed,
                    o.service, o.branch,
                    o.pickup_date, o.deadline,
+                   o.delivery_date, o.delivery_from, o.delivery_to, o.delivery_note,
                    o.total_price, o.prepaid_amount, o.payment_status,
                    o.discount_sum, o.delivery_discount, o.manual_discount, o.client_discount,
                    COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
@@ -7153,6 +7225,7 @@ async def get_routes_today(branch: str | None = None) -> list:
                    o.address, o.short_address, o.delivery_address, o.delivery_short_address,
                    o.location, o.location_address,
                    o.delivery_location, o.delivery_location_address,
+                   o.delivery_date, o.delivery_from, o.delivery_to, o.delivery_note,
                    COALESCE(o.total_price,0) AS total_price,
                    COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0)+COALESCE(o.client_discount,0) AS total_discount,
                    COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=o.id
@@ -7195,6 +7268,11 @@ async def get_routes_today(branch: str | None = None) -> list:
                 "location_address": row.get("location_address"),
                 "delivery_location":       row.get("delivery_location"),
                 "delivery_location_address": row.get("delivery_location_address"),
+                # согласованное с клиентом окно доставки (2026-10-22)
+                "delivery_date":  row.get("delivery_date"),
+                "delivery_from":  row.get("delivery_from"),
+                "delivery_to":    row.get("delivery_to"),
+                "delivery_note":  row.get("delivery_note"),
                 "total_price":    float(row["total_price"]),
                 "total_discount": float(row["total_discount"]),
                 "paid_amount":    float(row["paid_amount"]),

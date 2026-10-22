@@ -111,6 +111,7 @@ async def startup():
     asyncio.create_task(_measure_review_worker())
     asyncio.create_task(_debt_reminder_worker())
     asyncio.create_task(_postpone_reminder_worker())
+    asyncio.create_task(_delivery_digest_worker())
     asyncio.create_task(_route_rollover_worker())
     await db.ensure_sms_dispatch_table()
     await db.ensure_sms_operator_prices()
@@ -413,6 +414,124 @@ async def _postpone_reminder_worker():
             await _send_postpone_reminders()
         except Exception as e:
             logging.warning(f"postpone reminder error: {e}")
+
+# ── Сводка и контроль согласованных доставок (2026-10-22) ─────────────────────
+# 08:30 — сводка на сегодня (просрочено / до обеда / после обеда / в течение дня /
+# не в маршруте / завтра / не согласовано); 11:00 и 16:00 — контроль: окно сегодня
+# уже прошло или закончится в ближайшие 2 часа, а заказ ещё не доставлен.
+# Получатели — get_delivery_digest_recipients (тумблер в карточке сотрудника).
+_DELIVERY_DIGEST_TIMES = ((8, 30, "digest"), (11, 0, "control"), (16, 0, "control"))
+_DIGEST_LIST_MAX = 15
+_NOT_AGREED_DAYS = 2
+
+
+def _slot_str(o: dict) -> str:
+    f, t = o.get("delivery_from"), o.get("delivery_to")
+    if f and t:
+        return f"{f.strftime('%H:%M')}–{t.strftime('%H:%M')}"
+    if f:
+        return f"с {f.strftime('%H:%M')}"
+    if t:
+        return f"до {t.strftime('%H:%M')}"
+    return "в течение дня"
+
+
+def _digest_line(o: dict, with_date: bool = False) -> str:
+    num = (o.get("order_num") or "").replace("ARTEZ-", "")
+    client = " ".join(p for p in [o.get("client_first_name"), o.get("client_last_name")] if p).strip() or "—"
+    addr = o.get("delivery_short_address") or o.get("short_address") or o.get("address") or "—"
+    d = o.get("delivery_date")
+    when = (d.strftime("%d.%m") + " " if with_date and d else "") + _slot_str(o)
+    tail = "" if o.get("in_route") else " · ⚠️ не в маршруте"
+    note = f"\n     📝 {o['delivery_note']}" if o.get("delivery_note") else ""
+    return f"  • {num} — {client}, {addr} · 🕘 {when}{tail}{note}"
+
+
+def _digest_block(title: str, rows: list, with_date: bool = False) -> str:
+    if not rows:
+        return ""
+    lines = [_digest_line(o, with_date) for o in rows[:_DIGEST_LIST_MAX]]
+    if len(rows) > _DIGEST_LIST_MAX:
+        lines.append(f"  … ещё {len(rows) - _DIGEST_LIST_MAX}")
+    return f"{title} ({len(rows)}):\n" + "\n".join(lines)
+
+
+def _build_delivery_digest(orders: list, now, kind: str) -> str:
+    from datetime import timedelta as _td
+    today = now.date()
+    cur_t = now.time().replace(tzinfo=None)
+    soon_t = (now + _td(hours=2)).time().replace(tzinfo=None)
+    agreed  = [o for o in orders if o.get("delivery_date")]
+    overdue = [o for o in agreed if o["delivery_date"] < today]
+    today_o = [o for o in agreed if o["delivery_date"] == today]
+    if kind == "control":
+        late = [o for o in today_o if o.get("delivery_to") and o["delivery_to"] <= soon_t]
+        if not (late or overdue):
+            return ""
+        parts = [f"⏰ Контроль доставок · {now.strftime('%d.%m %H:%M')}",
+                 _digest_block("🔴 Окно прошло / заканчивается", late),
+                 _digest_block("🔴 Просрочено с прошлых дней", overdue, with_date=True)]
+        return "\n\n".join(p for p in parts if p)
+    noon = cur_t.replace(hour=13, minute=0)
+    am   = [o for o in today_o if o.get("delivery_from") and o["delivery_from"] < noon]
+    pm   = [o for o in today_o if o.get("delivery_from") and o["delivery_from"] >= noon]
+    anyt = [o for o in today_o if not o.get("delivery_from")]
+    tomorrow = [o for o in agreed if o["delivery_date"] == today + _td(days=1)]
+    not_agreed = []
+    for o in orders:
+        if o.get("delivery_date"):
+            continue
+        rd = o.get("ready_days")
+        if rd is None or float(rd) >= _NOT_AGREED_DAYS:
+            not_agreed.append(o)
+    if not (overdue or today_o or tomorrow or not_agreed):
+        return ""
+    parts = [f"📅 Доставки на сегодня · {now.strftime('%d.%m')}",
+             _digest_block("🔴 Просрочено", overdue, with_date=True),
+             _digest_block("☀️ До обеда", am),
+             _digest_block("🌇 После обеда", pm),
+             _digest_block("🕘 В течение дня", anyt),
+             f"📆 Завтра: {len(tomorrow)}" if tomorrow else "",
+             (f"❓ Готовы, но доставка не согласована ({_NOT_AGREED_DAYS}+ дн.) — позвонить ({len(not_agreed)}): "
+              + ", ".join((o.get("order_num") or "").replace("ARTEZ-", "") for o in not_agreed[:30])
+              + (" …" if len(not_agreed) > 30 else "")) if not_agreed else ""]
+    return "\n\n".join(p for p in parts if p)
+
+
+async def _send_delivery_digest(kind: str):
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    now = _dt.now(_tz(_td(hours=5)))
+    orders = await db.get_delivery_digest_orders()
+    recipients = await db.get_delivery_digest_recipients()
+    if not orders or not recipients:
+        return
+    for rcp in recipients:
+        # админ и сотрудник без филиала — все заказы; остальные — свой филиал
+        mine = orders if (rcp.get("role") == "admin" or not rcp.get("branch")) \
+            else [o for o in orders if o.get("branch") == rcp["branch"]]
+        text = _build_delivery_digest(mine, now, kind)
+        if text:
+            await send_tg(rcp["tg_id"], text[:4000])
+
+
+async def _delivery_digest_worker():
+    from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+    _TZ5 = _tz(_td(hours=5))
+    while True:
+        now = _dt.now(_TZ5)
+        nxt = None
+        for h, m, kind in _DELIVERY_DIGEST_TIMES:
+            t = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            if t <= now:
+                t += _td(days=1)
+            if nxt is None or t < nxt[0]:
+                nxt = (t, kind)
+        await asyncio.sleep((nxt[0] - now).total_seconds())
+        try:
+            await _send_delivery_digest(nxt[1])
+        except Exception as e:
+            logging.warning(f"delivery digest error: {e}")
+
 
 async def _salary_accrual_worker():
     """Запускает автоначисление зарплат 1-го числа каждого месяца в 00:05 Ташкент."""
@@ -1212,6 +1331,10 @@ def _staff_public(s: dict) -> dict:
         "can_approve_debt":    s.get("can_approve_debt", False),
         "can_drive":           s.get("can_drive", False),
         "notify_new_users":    s.get("notify_new_users", False),
+        # NULL = по роли (см. db.get_delivery_digest_recipients) — отдаём итоговое значение
+        "notify_delivery_digest": (s.get("notify_delivery_digest")
+                                   if s.get("notify_delivery_digest") is not None
+                                   else s["role"] in ("admin", "manager", "logistics", "callcenter")),
         "order_stages":        s.get("order_stages") or None,
         "gender":              s.get("gender", "M"),
         "birth_date":          str(s["birth_date"]) if s.get("birth_date") else None,
@@ -2659,8 +2782,15 @@ async def staff_orders(status: str = None, branch: str = None, limit: int = 50, 
     visible = set()
     for stage in stages:
         visible |= _STAGE_STATUSES.get(stage, set())
+    statuses = list(visible) if stages else None
+    # status="ready,delivery" — несколько статусов (вкладка «📅 Доставка», 2026-10-22);
+    # с ограничением по этапам — пересечение, как и для одиночного статуса
+    if status and "," in status:
+        want = {s.strip() for s in status.split(",") if s.strip()}
+        statuses = list(want & visible) if stages else list(want)
+        status = None
     result, total = await db.get_admin_orders(
-        status=status, statuses=list(visible) if stages else None,
+        status=status, statuses=statuses,
         branch=branch, limit=limit, offset=offset, search=search,
         search_phone=not staff.get("hide_client_phone"))
     if staff.get("hide_client_phone"):
@@ -4967,6 +5097,47 @@ async def postpone_order_delivery(order_id: int,
     name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
     await db.add_order_activity(order_id, staff.get("id"), name, "postponed",
                                  f"⏸ Доставка отложена до {until.strftime('%d.%m.%Y')}" + (f": {reason}" if reason else ""))
+    return {"ok": True, "order": order}
+
+
+@app.post("/api/admin/orders/{order_id}/delivery-slot")
+async def set_order_delivery_slot_ep(order_id: int,
+                                     date: str = Body(..., embed=True),
+                                     time_from: str | None = Body(None, embed=True),
+                                     time_to: str | None = Body(None, embed=True),
+                                     note: str = Body("", embed=True),
+                                     staff=Depends(require_perm("orders"))):
+    """Согласованная с клиентом доставка: день + окно времени (+ примечание оператора).
+    Каждое изменение — в историю заказа; сводка и контроль — _delivery_digest_worker."""
+    from datetime import date as _date, time as _time, datetime as _dt, timezone as _tz, timedelta as _td
+    try:
+        day = _date.fromisoformat(date)
+        t_from = _time.fromisoformat(time_from) if time_from else None
+        t_to = _time.fromisoformat(time_to) if time_to else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Неверный формат даты или времени")
+    if day < _dt.now(_tz(_td(hours=5))).date():
+        raise HTTPException(status_code=400, detail="Дата доставки уже прошла")
+    if t_from and t_to and t_from >= t_to:
+        raise HTTPException(status_code=400, detail="Время «с» должно быть раньше «до»")
+    note = (note or "").strip()[:500]
+    order = await db.set_order_delivery_slot(order_id, day, t_from, t_to, note, staff.get("id"))
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден или не в статусе Упаковка/Готов/Доставка")
+    name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
+    await db.add_order_activity(order_id, staff.get("id"), name, "delivery_slot",
+                                f"📅 Доставка согласована: {day.strftime('%d.%m.%Y')} {_slot_str(order)}"
+                                + (f" · {note}" if note else ""))
+    return {"ok": True, "order": order}
+
+
+@app.delete("/api/admin/orders/{order_id}/delivery-slot")
+async def clear_order_delivery_slot_ep(order_id: int, staff=Depends(require_perm("orders"))):
+    order = await db.clear_order_delivery_slot(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
+    await db.add_order_activity(order_id, staff.get("id"), name, "delivery_slot", "📅 Согласованная доставка снята")
     return {"ok": True, "order": order}
 
 
@@ -7755,7 +7926,9 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_drive:            bool = Body(False, embed=True),
     can_view_timesheet:   bool = Body(False, embed=True),
     hide_client_phone:    bool = Body(False, embed=True),
-    order_stages:         str  = Body(None,  embed=True)):
+    order_stages:         str  = Body(None,  embed=True),
+    # None — не прислали (старая админка) → оставить как есть
+    notify_delivery_digest: bool | None = Body(None, embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -7766,7 +7939,8 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_edit_confirmed=$9, can_send_pickup=$10, can_edit_delivery=$11,
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
                    can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17,
-                   hide_client_phone=$18, can_edit_price=$19
+                   hide_client_phone=$18, can_edit_price=$19,
+                   notify_delivery_digest=COALESCE($20, notify_delivery_digest)
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
@@ -7774,13 +7948,14 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users,
                          can_approve_debt, can_drive, can_view_timesheet, hide_client_phone,
-                         can_edit_price""",
+                         can_edit_price, notify_delivery_digest""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
             can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt,
-            can_drive, can_view_timesheet, hide_client_phone, can_edit_price)
+            can_drive, can_view_timesheet, hide_client_phone, can_edit_price,
+            notify_delivery_digest)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
