@@ -3797,6 +3797,238 @@ async def admin_reset_promo_tracking(promo_id: int, _=Depends(_get_admin)):
     return {"ok": True, "deleted": deleted}
 
 
+# ── Розыгрыш акции (2026-10-23) ──────────────────────────────────────────────
+# aksiya.html — одна страница для всех: условия, обратный отсчёт, живая трансляция,
+# прошлые победители; с ?admin=1 и токеном админа — панель запуска. Победителя выбирает
+# сервер (secrets.choice) при «Начать»; клиенты видят прокрутку до reveal_at и только
+# после него — номер (маскированный). Переиграть — только аннулировав запуск с причиной.
+DRAW_SPIN_SECONDS = 15
+_DRAW_LIVE_WINDOW = timedelta(minutes=30)   # сколько «живой» запуск показывается на сцене
+_draw_live_cache: dict = {}                 # (promo_id, test) → (expires_monotonic, payload)
+_draw_music_cache: dict = {}                # file_id → bytes (много зрителей — не качать каждый раз)
+
+
+def _mask_draw_phone(ph: str) -> str:
+    d = "".join(ch for ch in str(ph or "") if ch.isdigit())
+    if len(d) != 12:
+        return "+998 ** ***-**-**"
+    return f"+{d[:3]} {d[3:5]} ***-{d[8:10]}-{d[10:12]}"
+
+
+async def _draw_promo_id(promo_id: int | None) -> int | None:
+    if promo_id:
+        return promo_id
+    pub = await db.get_active_promotion_public()
+    return (pub or {}).get("id")
+
+
+@app.get("/api/promo/draw/live")
+async def promo_draw_live(test: int = 0, promo_id: int | None = None):
+    """Публично: месяцы и даты розыгрышей, «живой» запуск (прокрутка до reveal_at, номер
+    победителя — только после), прошлые победители. Номера только маскированные."""
+    import time as _time
+    pid = await _draw_promo_id(promo_id)
+    if not pid:
+        return {"ok": True, "promo": None}
+    key = (pid, bool(test))
+    hit = _draw_live_cache.get(key)
+    now = datetime.now(timezone.utc)
+    if hit and hit[0] > _time.monotonic():
+        payload = dict(hit[1])
+    else:
+        promo = await db.get_promotion(pid)
+        months = await db.promo_draw_months(pid)
+        runs = [r for r in await db.promo_draw_runs(pid) if r["status"] == "done"]
+        payload = {
+            "promo": {k: promo.get(k) for k in ("id", "title_ru", "title_uz", "text_ru", "text_uz",
+                                                 "starts_at", "ends_at")} if promo else None,
+            "months": [{"period": m["period"], "draw_at": m["draw_at"]} for m in months],
+            "_runs": runs,
+        }
+        _draw_live_cache[key] = (_time.monotonic() + 1.0, payload)
+        payload = dict(payload)
+    runs = payload.pop("_runs")
+    done = {r["period"]: r for r in runs if not r["is_test"]}
+    payload["winners"] = [{"period": r["period"], "winner": _mask_draw_phone(r["winner_phone"]),
+                           "at": r["reveal_at"]} for r in runs
+                          if not r["is_test"] and r["reveal_at"] <= now]
+    for m in payload["months"]:
+        m["done"] = m["period"] in done and done[m["period"]]["reveal_at"] <= now
+    live = None
+    for r in runs:   # новые сверху
+        if bool(r["is_test"]) != bool(test) or now - r["started_at"] > _DRAW_LIVE_WINDOW:
+            continue
+        parts = r["participants"] if isinstance(r["participants"], list) else _json.loads(r["participants"] or "[]")
+        reel = [_mask_draw_phone(p["phone"]) for p in parts[:60]]
+        live = {"id": r["id"], "period": r["period"], "is_test": r["is_test"],
+                "started_at": r["started_at"], "reveal_at": r["reveal_at"],
+                "count": len(parts), "reel": reel,
+                "winner": _mask_draw_phone(r["winner_phone"]) if r["reveal_at"] <= now else None}
+        break
+    payload["live"] = live
+    payload["server_now"] = now
+    payload["ok"] = True
+    return payload
+
+
+@app.get("/api/admin/promo-draw/{promo_id}")
+async def admin_promo_draw(promo_id: int, _=Depends(_get_admin)):
+    promo = await db.get_promotion(promo_id)
+    if not promo:
+        raise HTTPException(status_code=404, detail="Акция не найдена")
+    months = await db.promo_draw_months(promo_id)
+    for m in months:
+        m["participants"] = len(await db.promo_draw_participants(promo_id, m["period"]))
+        run = await db.promo_draw_active_run(promo_id, m["period"], False)
+        m["run"] = ({"id": run["id"], "winner_phone": run["winner_phone"], "winner_info": run["winner_info"],
+                     "reveal_at": run["reveal_at"]} if run else None)
+    runs = [{k: r[k] for k in ("id", "period", "is_test", "status", "started_at", "reveal_at",
+                               "winner_phone", "winner_info", "void_reason", "voided_at")}
+            for r in await db.promo_draw_runs(promo_id)]
+    return {"ok": True, "promo": {"id": promo["id"], "title_ru": promo["title_ru"]},
+            "months": months, "runs": runs[:30], "testers": await db.list_promo_testers(),
+            "music": {k: bool(await db.get_config(f"promo_draw_music_{k}")) for k in ("spin", "win")}}
+
+
+@app.put("/api/admin/promo-draw/{promo_id}/month")
+async def admin_promo_draw_month(promo_id: int, period: str = Body(..., embed=True),
+                                 draw_at: str | None = Body(None, embed=True), _=Depends(_get_admin)):
+    import re as _re
+    if not _re.fullmatch(r"\d{4}-\d{2}", period or ""):
+        raise HTTPException(status_code=400, detail="Неверный месяц")
+    await db.set_promo_draw_month(promo_id, period, _parse_promo_dt(draw_at) if draw_at else None)
+    _draw_live_cache.clear()
+    return {"ok": True}
+
+
+@app.post("/api/admin/promo-draw/{promo_id}/start")
+async def admin_promo_draw_start(promo_id: int, period: str | None = Body(None, embed=True),
+                                 test: bool = Body(False, embed=True), _=Depends(_get_admin)):
+    """Запуск: сервер выбирает победителя сейчас, наружу он откроется в reveal_at."""
+    import secrets as _secrets
+    if not await db.get_promotion(promo_id):
+        raise HTTPException(status_code=404, detail="Акция не найдена")
+    if test:
+        parts, period = await db.promo_tester_participants(), None
+        if not parts:
+            raise HTTPException(status_code=400, detail="Добавьте тестировщиков")
+    else:
+        if not period or period not in {m["period"] for m in await db.promo_draw_months(promo_id)}:
+            raise HTTPException(status_code=400, detail="Выберите месяц акции")
+        parts = await db.promo_draw_participants(promo_id, period)
+        if not parts:
+            raise HTTPException(status_code=400, detail="В этом месяце нет участников (доставленных или оплаченных заказов)")
+    win = _secrets.choice(parts)
+    reveal_at = datetime.now(timezone.utc) + timedelta(seconds=DRAW_SPIN_SECONDS)
+    run = await db.create_promo_draw_run(promo_id, period, test, parts, win["phone"],
+                                         ", ".join(win["orders"]), reveal_at)
+    if not run:
+        raise HTTPException(status_code=409, detail="Розыгрыш этого месяца уже проведён — переиграть можно, аннулировав его с причиной")
+    _draw_live_cache.clear()
+    return {"ok": True, "run_id": run["id"], "reveal_at": reveal_at, "count": len(parts)}
+
+
+@app.post("/api/admin/promo-draw/runs/{run_id}/void")
+async def admin_promo_draw_void(run_id: int, reason: str = Body(..., embed=True), _=Depends(_get_admin)):
+    reason = (reason or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(status_code=400, detail="Укажите причину")
+    if not await db.void_promo_draw_run(run_id, reason[:500]):
+        raise HTTPException(status_code=404, detail="Запуск не найден или уже аннулирован")
+    _draw_live_cache.clear()
+    return {"ok": True}
+
+
+@app.get("/api/admin/promo-testers")
+async def admin_promo_testers(_=Depends(_get_admin)):
+    return {"ok": True, "testers": await db.list_promo_testers()}
+
+
+@app.post("/api/admin/promo-testers")
+async def admin_add_promo_tester(name: str = Body(..., embed=True), phone: str = Body(..., embed=True),
+                                 _=Depends(_get_admin)):
+    ph = db._draw_phone(phone)
+    name = (name or "").strip()[:100]
+    if not ph or not name:
+        raise HTTPException(status_code=400, detail="Имя и телефон +998XXXXXXXXX")
+    return {"ok": True, "tester": await db.add_promo_tester(name, ph)}
+
+
+@app.delete("/api/admin/promo-testers/{tester_id}")
+async def admin_delete_promo_tester(tester_id: int, _=Depends(_get_admin)):
+    await db.delete_promo_tester(tester_id)
+    return {"ok": True}
+
+
+MAX_DRAW_MUSIC_BYTES = 19_000_000  # лимит Telegram getFile (20 МБ)
+
+@app.post("/api/admin/promo-draw-music/{kind}")
+async def admin_upload_draw_music(kind: str, file: UploadFile = File(...), _=Depends(_get_admin)):
+    """Музыка розыгрыша: spin — во время прокрутки (по кругу), win — на объявлении победителя.
+    Хранится в TG-медиаканале, как видео сайта."""
+    if kind not in ("spin", "win"):
+        raise HTTPException(status_code=404)
+    ctype = file.content_type or ""
+    if not ctype.startswith("audio/"):
+        raise HTTPException(status_code=400, detail="Файл должен быть аудио (mp3, m4a, ogg…)")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    data = await file.read()
+    if len(data) > MAX_DRAW_MUSIC_BYTES:
+        raise HTTPException(status_code=400, detail="Файл слишком большой (макс. 19 МБ)")
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("document", data, filename=file.filename or f"draw-{kind}.mp3", content_type=ctype)
+    form.add_field("caption", f"Promo draw music ({kind})")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument", data=form,
+                          timeout=aiohttp.ClientTimeout(total=60)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description', 'upload failed')}")
+    msg = result["result"]
+    media = msg.get("audio") or msg.get("document") or msg.get("voice") or {}
+    if not media.get("file_id"):
+        raise HTTPException(status_code=502, detail="Telegram не вернул file_id")
+    await db.set_config(f"promo_draw_music_{kind}", media["file_id"])
+    await db.set_config(f"promo_draw_music_{kind}_type", ctype)
+    return {"ok": True}
+
+
+@app.delete("/api/admin/promo-draw-music/{kind}")
+async def admin_delete_draw_music(kind: str, _=Depends(_get_admin)):
+    if kind not in ("spin", "win"):
+        raise HTTPException(status_code=404)
+    await db.set_config(f"promo_draw_music_{kind}", "")
+    return {"ok": True}
+
+
+@app.get("/api/promo/draw-music/{kind}")
+async def public_draw_music(kind: str, request: Request):
+    if kind not in ("spin", "win"):
+        raise HTTPException(status_code=404)
+    file_id = await db.get_config(f"promo_draw_music_{kind}")
+    if not file_id or not BOT_TOKEN:
+        raise HTTPException(status_code=404, detail="Музыка не загружена")
+    content = _draw_music_cache.get(file_id)
+    if content is None:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                             params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                data = await r.json()
+            if not data.get("ok"):
+                raise HTTPException(status_code=502, detail="Файл не найден в Telegram")
+            async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}",
+                             timeout=aiohttp.ClientTimeout(total=60)) as fr:
+                content = await fr.read()
+        if len(_draw_music_cache) >= 4:    # старые версии файлов после перезагрузки музыки
+            _draw_music_cache.clear()
+        _draw_music_cache[file_id] = content
+    ctype = await db.get_config(f"promo_draw_music_{kind}_type") or "audio/mpeg"
+    return _video_range_response(content, request, media_type=ctype)
+
+
 class UpdateProfileRequest(BaseModel):
     first_name: str
     address: str | None = None

@@ -322,6 +322,35 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivery_set_at TIMESTAMPTZ DEFAULT NULL",
         # Получать ли TG-сводку доставок; NULL = по роли (admin/manager/logistics/callcenter)
         "ALTER TABLE staff ADD COLUMN IF NOT EXISTS notify_delivery_digest BOOLEAN DEFAULT NULL",
+        # Розыгрыш акции (2026-10-23): дата розыгрыша по месяцам (настройки акции), запуски
+        # (снимок участников, победитель, переигровка только с причиной), тестировщики.
+        """CREATE TABLE IF NOT EXISTS promo_draw_months (
+            promo_id  INTEGER NOT NULL,                -- promotions.id (без FK: promotions создаётся ниже в create_tables)
+            period    VARCHAR(7) NOT NULL,          -- 'YYYY-MM' — за какой месяц заказы
+            draw_at   TIMESTAMPTZ,                  -- когда розыгрыш (обратный отсчёт)
+            PRIMARY KEY (promo_id, period)
+        )""",
+        """CREATE TABLE IF NOT EXISTS promo_draw_runs (
+            id            SERIAL PRIMARY KEY,
+            promo_id      INTEGER NOT NULL,         -- promotions.id
+            period        VARCHAR(7),               -- NULL у тестового
+            is_test       BOOLEAN NOT NULL DEFAULT FALSE,
+            status        VARCHAR(10) NOT NULL DEFAULT 'done',   -- done | void
+            started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            reveal_at     TIMESTAMPTZ NOT NULL,     -- раньше этого момента победитель наружу не отдаётся
+            participants  JSONB NOT NULL,           -- снимок: полные номера (только для админа)
+            winner_phone  VARCHAR(20) NOT NULL,
+            winner_info   TEXT,                     -- заказы победителя за месяц (для админа)
+            void_reason   TEXT,
+            voided_at     TIMESTAMPTZ
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_promo_draw_runs_promo ON promo_draw_runs(promo_id, is_test, status)",
+        """CREATE TABLE IF NOT EXISTS promo_testers (
+            id          SERIAL PRIMARY KEY,
+            name        VARCHAR(100) NOT NULL,
+            phone       VARCHAR(20) NOT NULL UNIQUE,
+            created_at  TIMESTAMPTZ DEFAULT NOW()
+        )""",
         # Маршруты: хранить TG message_id отправленных сообщений водителям
         "ALTER TABLE routes ADD COLUMN IF NOT EXISTS tg_delivery_msg_ids JSONB DEFAULT NULL",
         # Маршруты логистики
@@ -1983,6 +2012,155 @@ async def apply_promo_to_order(order_num: str, user_id: int) -> int | None:
                 WHERE promotion_id=$2 AND user_id=$3 AND used_order_id IS NULL
             """, order_row["id"], promo_id, user_id)
             return promo_id
+
+
+# ── Розыгрыш акции (2026-10-23) ──────────────────────────────────────────────
+# Участник месяца — телефон с заказом, созданным в этом месяце (и в сроки акции), который
+# доставлен ИЛИ полностью оплачен, не отменён; один телефон — один шанс. Только ARTEZ
+# (company_id 1 — база общая с SaaS). Победителя выбирает сервер (secrets), снимок
+# участников хранится в promo_draw_runs; наружу до reveal_at победитель не отдаётся.
+
+def _draw_phone(p: str | None) -> str | None:
+    d = "".join(ch for ch in str(p or "") if ch.isdigit())
+    if len(d) == 9:
+        d = "998" + d
+    return d if len(d) == 12 and d.startswith("998") else None
+
+
+async def get_promotion(promo_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM promotions WHERE id=$1", promo_id)
+        return dict(row) if row else None
+
+
+async def promo_draw_participants(promo_id: int, period: str) -> list:
+    """[{phone, orders:[order_num…]}] — участники месяца period ('YYYY-MM')."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT o.client_phone, o.order_num
+              FROM orders o, promotions p
+             WHERE p.id = $1
+               AND COALESCE(o.company_id, 1) = 1
+               AND o.status <> 'cancelled'
+               AND (o.status = 'delivered' OR o.payment_status = 'paid')
+               AND o.created_at >= GREATEST(p.starts_at, ($2 || '-01')::timestamp AT TIME ZONE 'Asia/Tashkent')
+               AND o.created_at <  LEAST(p.ends_at, (($2 || '-01')::date + INTERVAL '1 month')::timestamp AT TIME ZONE 'Asia/Tashkent')
+             ORDER BY o.id
+        """, promo_id, period)
+    by: dict = {}
+    for r in rows:
+        ph = _draw_phone(r["client_phone"])
+        if ph:
+            by.setdefault(ph, []).append(r["order_num"])
+    return [{"phone": ph, "orders": nums} for ph, nums in by.items()]
+
+
+async def promo_tester_participants() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT name, phone FROM promo_testers ORDER BY id")
+    out = []
+    for r in rows:
+        ph = _draw_phone(r["phone"])
+        if ph:
+            out.append({"phone": ph, "orders": [f"тест: {r['name']}"]})
+    return out
+
+
+async def promo_draw_months(promo_id: int) -> list:
+    """Месяцы акции (от starts_at до ends_at по Ташкенту) + дата розыгрыша из настроек."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT to_char(m, 'YYYY-MM') AS period, d.draw_at
+              FROM promotions p
+              CROSS JOIN LATERAL generate_series(date_trunc('month', p.starts_at AT TIME ZONE 'Asia/Tashkent'),
+                                                 date_trunc('month', p.ends_at   AT TIME ZONE 'Asia/Tashkent'),
+                                                 INTERVAL '1 month') AS m
+              LEFT JOIN promo_draw_months d ON d.promo_id = p.id AND d.period = to_char(m, 'YYYY-MM')
+             WHERE p.id = $1
+             ORDER BY m
+        """, promo_id)
+        return [dict(r) for r in rows]
+
+
+async def set_promo_draw_month(promo_id: int, period: str, draw_at) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO promo_draw_months (promo_id, period, draw_at) VALUES ($1, $2, $3)
+            ON CONFLICT (promo_id, period) DO UPDATE SET draw_at = EXCLUDED.draw_at
+        """, promo_id, period, draw_at)
+
+
+async def promo_draw_runs(promo_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM promo_draw_runs WHERE promo_id=$1 ORDER BY id DESC", promo_id)
+        return [dict(r) for r in rows]
+
+
+async def promo_draw_active_run(promo_id: int, period: str | None, is_test: bool) -> dict | None:
+    """Действующий (не аннулированный) запуск месяца; для теста — последний тестовый."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        if is_test:
+            row = await conn.fetchrow("""SELECT * FROM promo_draw_runs WHERE promo_id=$1 AND is_test
+                                         AND status='done' ORDER BY id DESC LIMIT 1""", promo_id)
+        else:
+            row = await conn.fetchrow("""SELECT * FROM promo_draw_runs WHERE promo_id=$1 AND NOT is_test
+                                         AND period=$2 AND status='done' ORDER BY id DESC LIMIT 1""",
+                                      promo_id, period)
+        return dict(row) if row else None
+
+
+async def create_promo_draw_run(promo_id: int, period: str | None, is_test: bool, participants: list,
+                                winner_phone: str, winner_info: str, reveal_at) -> dict:
+    import json as _j
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # один действующий официальный розыгрыш на месяц (переиграть — только через void)
+            await conn.execute("SELECT pg_advisory_xact_lock(hashtext('promo_draw:' || $1::int::text))", promo_id)
+            if not is_test:
+                busy = await conn.fetchval("""SELECT 1 FROM promo_draw_runs WHERE promo_id=$1
+                                              AND NOT is_test AND period=$2 AND status='done'""", promo_id, period)
+                if busy:
+                    return {}
+            row = await conn.fetchrow("""
+                INSERT INTO promo_draw_runs (promo_id, period, is_test, reveal_at, participants,
+                                             winner_phone, winner_info)
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7) RETURNING *
+            """, promo_id, period, is_test, reveal_at, _j.dumps(participants, ensure_ascii=False),
+                 winner_phone, winner_info)
+            return dict(row)
+
+
+async def void_promo_draw_run(run_id: int, reason: str) -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""UPDATE promo_draw_runs SET status='void', void_reason=$2, voided_at=NOW()
+                                     WHERE id=$1 AND status='done' RETURNING *""", run_id, reason)
+        return dict(row) if row else {}
+
+
+async def list_promo_testers() -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        return [dict(r) for r in await conn.fetch("SELECT * FROM promo_testers ORDER BY id")]
+
+
+async def add_promo_tester(name: str, phone: str) -> dict:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""INSERT INTO promo_testers (name, phone) VALUES ($1, $2)
+                                     ON CONFLICT (phone) DO UPDATE SET name = EXCLUDED.name RETURNING *""",
+                                  name, phone)
+        return dict(row)
+
+
+async def delete_promo_tester(tester_id: int) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM promo_testers WHERE id=$1", tester_id)
 
 
 async def list_promotions() -> list:
