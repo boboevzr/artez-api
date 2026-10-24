@@ -3843,6 +3843,7 @@ async def promo_draw_live(test: int = 0, promo_id: int | None = None):
             "promo": {k: promo.get(k) for k in ("id", "title_ru", "title_uz", "text_ru", "text_uz",
                                                  "starts_at", "ends_at")} if promo else None,
             "months": [{"period": m["period"], "draw_at": m["draw_at"]} for m in months],
+            "countdown_at": (await db.get_config(f"promo_draw_countdown_{pid}")) or None,
             "_runs": runs,
         }
         _draw_live_cache[key] = (_time.monotonic() + 1.0, payload)
@@ -3886,6 +3887,7 @@ async def admin_promo_draw(promo_id: int, _=Depends(_get_admin)):
                                "winner_phone", "winner_info", "void_reason", "voided_at")}
             for r in await db.promo_draw_runs(promo_id)]
     return {"ok": True, "promo": {"id": promo["id"], "title_ru": promo["title_ru"]},
+            "countdown_at": (await db.get_config(f"promo_draw_countdown_{promo_id}")) or None,
             "months": months, "runs": runs[:30], "testers": await db.list_promo_testers(),
             "music": {k: bool(await db.get_config(f"promo_draw_music_{k}")) for k in ("spin", "win")}}
 
@@ -3901,6 +3903,15 @@ async def admin_promo_draw_month(promo_id: int, period: str = Body(..., embed=Tr
     return {"ok": True}
 
 
+@app.put("/api/admin/promo-draw/{promo_id}/countdown")
+async def admin_promo_draw_countdown(promo_id: int, at: str | None = Body(None, embed=True), _=Depends(_get_admin)):
+    """Дата и время итога акции — обратный отсчёт на aksiya.html (Ташкент, если без зоны)."""
+    dt = _parse_promo_dt(at) if at else None
+    await db.set_config(f"promo_draw_countdown_{promo_id}", dt.isoformat() if dt else "")
+    _draw_live_cache.clear()
+    return {"ok": True, "countdown_at": dt}
+
+
 @app.post("/api/admin/promo-draw/{promo_id}/start")
 async def admin_promo_draw_start(promo_id: int, period: str | None = Body(None, embed=True),
                                  test: bool = Body(False, embed=True), _=Depends(_get_admin)):
@@ -3908,12 +3919,21 @@ async def admin_promo_draw_start(promo_id: int, period: str | None = Body(None, 
     import secrets as _secrets
     if not await db.get_promotion(promo_id):
         raise HTTPException(status_code=404, detail="Акция не найдена")
+    months = {m["period"] for m in await db.promo_draw_months(promo_id)}
     if test:
-        parts, period = await db.promo_tester_participants(), None
+        # репетиция (2026-10-24): победитель — случайный НАСТОЯЩИЙ клиент (выбранного месяца или всей
+        # акции), но в официальные не попадает и виден только на aksiya.html?test=1. Тестировщики —
+        # запасной список, если реальных участников ещё нет.
+        parts = []
+        for p in ([period] if period in months else sorted(months)):
+            parts += [x for x in await db.promo_draw_participants(promo_id, p) if x["phone"] not in {y["phone"] for y in parts}]
         if not parts:
-            raise HTTPException(status_code=400, detail="Добавьте тестировщиков")
+            parts = await db.promo_tester_participants()
+        if not parts:
+            raise HTTPException(status_code=400, detail="Нет участников: ни доставленных/оплаченных заказов, ни тестировщиков")
+        period = period if period in months else None
     else:
-        if not period or period not in {m["period"] for m in await db.promo_draw_months(promo_id)}:
+        if not period or period not in months:
             raise HTTPException(status_code=400, detail="Выберите месяц акции")
         parts = await db.promo_draw_participants(promo_id, period)
         if not parts:
