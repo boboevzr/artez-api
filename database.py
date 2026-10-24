@@ -2016,8 +2016,8 @@ async def apply_promo_to_order(order_num: str, user_id: int) -> int | None:
 
 # ── Розыгрыш акции (2026-10-23) ──────────────────────────────────────────────
 # Участник месяца — телефон с заказом, созданным в этом месяце (и в сроки акции), который
-# доставлен ИЛИ полностью оплачен, не отменён; один телефон — один шанс. Только ARTEZ
-# (company_id 1 — база общая с SaaS). Победителя выбирает сервер (secrets), снимок
+# доставлен ИЛИ полностью оплачен, не отменён; один телефон — один шанс.
+# Победителя выбирает сервер (secrets), снимок
 # участников хранится в promo_draw_runs; наружу до reveal_at победитель не отдаётся.
 
 def _draw_phone(p: str | None) -> str | None:
@@ -2042,7 +2042,6 @@ async def promo_draw_participants(promo_id: int, period: str) -> list:
             SELECT o.client_phone, o.order_num
               FROM orders o, promotions p
              WHERE p.id = $1
-               AND COALESCE(o.company_id, 1) = 1
                AND o.status <> 'cancelled'
                AND (o.status = 'delivered' OR o.payment_status = 'paid')
                AND o.created_at >= GREATEST(p.starts_at, ($2 || '-01')::timestamp AT TIME ZONE 'Asia/Tashkent')
@@ -4888,7 +4887,6 @@ async def get_delivery_digest_orders() -> list:
                             WHERE ro.order_id = o.id AND r.status NOT IN ('done','cancelled')) AS in_route
             FROM orders o
             WHERE o.status IN ('ready','delivery')
-              AND COALESCE(o.company_id, 1) = 1   -- база общая с SaaS (Cleano): ARTEZ — компания 1
               AND (o.delivery_date <= (NOW() AT TIME ZONE 'Asia/Tashkent')::date + 1
                    OR (o.status = 'ready' AND o.delivery_date IS NULL AND o.postponed_until IS NULL))
             ORDER BY o.delivery_date NULLS LAST, o.delivery_from NULLS LAST, o.id
@@ -4903,7 +4901,6 @@ async def get_delivery_digest_recipients() -> list:
         rows = await conn.fetch("""
             SELECT id, role, branch, tg_id FROM staff
             WHERE active = TRUE AND tg_id IS NOT NULL
-              AND COALESCE(company_id, 1) = 1   -- только сотрудники ARTEZ (база общая с SaaS)
               AND COALESCE(notify_delivery_digest,
                            role IN ('admin','manager','logistics','callcenter'))
         """)
@@ -4919,7 +4916,6 @@ async def get_orders_for_postpone_reminder() -> list:
             FROM orders o
             LEFT JOIN staff s ON s.id = o.postponed_by
             WHERE o.status='ready' AND o.postponed_until = (CURRENT_DATE + INTERVAL '1 day')::date
-              AND COALESCE(o.company_id, 1) = 1   -- база общая с SaaS: остальные компании напоминает SaaS API
         """)
         return [dict(r) for r in rows]
 
@@ -4930,7 +4926,6 @@ async def get_order_managers(branch: str | None) -> list:
         rows = await conn.fetch("""
             SELECT id, first_name, last_name, tg_id FROM staff
             WHERE active=TRUE AND tg_id IS NOT NULL
-              AND COALESCE(company_id, 1) = 1   -- только ARTEZ: база общая с SaaS (раньше — админы всех компаний)
               AND (role='admin' OR (role='manager' AND (branch=$1 OR branch IS NULL)))
         """, branch)
         return [dict(r) for r in rows]
