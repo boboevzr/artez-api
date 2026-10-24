@@ -345,6 +345,17 @@ async def create_tables():
             voided_at     TIMESTAMPTZ
         )""",
         "CREATE INDEX IF NOT EXISTS idx_promo_draw_runs_promo ON promo_draw_runs(promo_id, is_test, status)",
+        # После объявления (2026-10-24): звонок в эфире → подтвердил / не ответил (журнал звонков),
+        # автопоздравление SMS+TG, вручение (наличные в офисе / перевод на карту), фото вручения.
+        # winner_status: pending → confirmed → handed; переигровка «не вышел на связь» — 3 звонка и 48 ч.
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS winner_status VARCHAR(12) NOT NULL DEFAULT 'pending'",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS call_log JSONB NOT NULL DEFAULT '[]'::jsonb",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS notify_result TEXT",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS prize_method VARCHAR(10)",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS handed_at TIMESTAMPTZ",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS photo_file_id TEXT",
+        "ALTER TABLE promo_draw_runs ADD COLUMN IF NOT EXISTS void_no_answer BOOLEAN NOT NULL DEFAULT FALSE",
         """CREATE TABLE IF NOT EXISTS promo_testers (
             id          SERIAL PRIMARY KEY,
             name        VARCHAR(100) NOT NULL,
@@ -2136,11 +2147,47 @@ async def create_promo_draw_run(promo_id: int, period: str | None, is_test: bool
             return dict(row)
 
 
-async def void_promo_draw_run(run_id: int, reason: str) -> dict:
+async def void_promo_draw_run(run_id: int, reason: str, no_answer: bool = False) -> dict:
     async with pool.acquire() as conn:
-        row = await conn.fetchrow("""UPDATE promo_draw_runs SET status='void', void_reason=$2, voided_at=NOW()
-                                     WHERE id=$1 AND status='done' RETURNING *""", run_id, reason)
+        row = await conn.fetchrow("""UPDATE promo_draw_runs SET status='void', void_reason=$2, voided_at=NOW(),
+                                            void_no_answer=$3
+                                     WHERE id=$1 AND status='done' RETURNING *""", run_id, reason, no_answer)
         return dict(row) if row else {}
+
+
+async def get_promo_draw_run(run_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM promo_draw_runs WHERE id=$1", run_id)
+        return dict(row) if row else None
+
+
+async def update_promo_draw_run(run_id: int, **fields) -> dict:
+    """Статус победителя/вручение/фото/поздравление. call_entry — дописать звонок в журнал."""
+    import json as _j
+    entry = fields.pop("call_entry", None)
+    allowed = {"winner_status", "notified_at", "notify_result", "prize_method", "handed_at", "photo_file_id"}
+    sets, vals = [], [run_id]
+    for k, v in fields.items():
+        if k in allowed:
+            vals.append(v); sets.append(f"{k}=${len(vals)}")
+    if entry is not None:
+        vals.append(_j.dumps([entry], ensure_ascii=False)); sets.append(f"call_log = call_log || ${len(vals)}::jsonb")
+    if not sets:
+        return await get_promo_draw_run(run_id) or {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(f"UPDATE promo_draw_runs SET {', '.join(sets)} WHERE id=$1 RETURNING *", *vals)
+        return dict(row) if row else {}
+
+
+async def promo_draw_winner_orders(phone_digits: str, order_nums: list) -> list:
+    """Заказы победителя (для экрана звонка у админа): номер, дата, статус, имя клиента."""
+    if not pool or not order_nums: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT order_num, created_at, status, client_first_name, client_last_name, address, short_address
+              FROM orders WHERE order_num = ANY($1::text[]) ORDER BY id""", order_nums)
+        return [dict(r) for r in rows]
 
 
 async def list_promo_testers() -> list:

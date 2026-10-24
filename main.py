@@ -3806,6 +3806,57 @@ DRAW_SPIN_SECONDS = 15
 _DRAW_LIVE_WINDOW = timedelta(minutes=30)   # сколько «живой» запуск показывается на сцене
 _draw_live_cache: dict = {}                 # (promo_id, test) → (expires_monotonic, payload)
 _draw_music_cache: dict = {}                # file_id → bytes (много зрителей — не качать каждый раз)
+# После объявления (2026-10-24): звонок в эфире, автопоздравление SMS+TG (только официальный
+# розыгрыш — тестовый выбирает НАСТОЯЩИХ клиентов), переигровка «не вышел на связь» —
+# не раньше 48 ч и минимум 3 неотвеченных звонков.
+DRAW_CALLER_PHONE_DEFAULT = "+998947380444"
+DRAW_NO_ANSWER_HOURS = 48
+DRAW_MIN_CALLS = 3
+_DRAW_SMS = ("ARTEZ: Tabriklaymiz! Siz 500 000 so'm yutdingiz. Sizga {phone} raqamidan qo'ng'iroq qilamiz. "
+             "Karta ma'lumotini so'ragan boshqa raqamlarga javob bermang.")
+_DRAW_TG = ("🎉 Поздравляем! Вы выиграли 500 000 сум в розыгрыше ARTEZ.\n"
+            "Мы позвоним вам с номера {phone}. Приз — наличными в офисе или переводом на карту.\n"
+            "⚠️ Не сообщайте данные карты и коды тем, кто звонит с других номеров.\n\n"
+            "🎉 Tabriklaymiz! Siz ARTEZ oʻyinida 500 000 soʻm yutdingiz.\n"
+            "Sizga {phone} raqamidan qoʻngʻiroq qilamiz. Sovgʻa — ofisda naqd yoki kartaga oʻtkazma.\n"
+            "⚠️ Boshqa raqamlardan qoʻngʻiroq qilganlarga karta maʼlumotlari va kodlarni aytmang.")
+
+
+async def _draw_caller_phone() -> str:
+    return (await db.get_config("promo_draw_caller_phone")) or DRAW_CALLER_PHONE_DEFAULT
+
+
+async def _draw_notify_winner(run_id: int, wait: bool = True) -> str:
+    """Поздравление победителю официального розыгрыша: SMS + Telegram (если клиент есть в боте).
+    wait=True — дождаться объявления (reveal_at) + 15 с, чтобы не опередить эфир."""
+    run = await db.get_promo_draw_run(run_id)
+    if not run or run["is_test"] or run["status"] != "done":
+        return "skip"
+    if wait:
+        delay = (run["reveal_at"] - datetime.now(timezone.utc)).total_seconds() + 15
+        if delay > 0:
+            await asyncio.sleep(delay)
+        run = await db.get_promo_draw_run(run_id)
+        if not run or run["status"] != "done" or run["notified_at"]:
+            return "skip"
+    caller = await _draw_caller_phone()
+    phone = "+" + run["winner_phone"]
+    sms_ok = False
+    try:
+        sms_ok = await send_sms(phone, _DRAW_SMS.format(phone=caller))
+    except Exception as e:
+        logging.warning(f"draw sms run={run_id}: {e}")
+    tg_res = "нет в боте"
+    try:
+        tg_id = await db.get_tg_id_by_phone(phone) or await db.get_tg_id_by_phone(run["winner_phone"])
+        if tg_id:
+            await send_tg(tg_id, _DRAW_TG.format(phone=caller))
+            tg_res = "отправлено"
+    except Exception as e:
+        tg_res = f"ошибка: {e}"
+    result = f"SMS: {'отправлено' if sms_ok else 'не ушло'} · Telegram: {tg_res}"
+    await db.update_promo_draw_run(run_id, notified_at=datetime.now(timezone.utc), notify_result=result)
+    return result
 
 
 def _mask_draw_phone(ph: str) -> str:
@@ -3838,21 +3889,29 @@ async def promo_draw_live(test: int = 0, promo_id: int | None = None):
     else:
         promo = await db.get_promotion(pid)
         months = await db.promo_draw_months(pid)
-        runs = [r for r in await db.promo_draw_runs(pid) if r["status"] == "done"]
+        all_runs = await db.promo_draw_runs(pid)
+        runs = [r for r in all_runs if r["status"] == "done"]
+        no_answer = [r for r in all_runs if r["status"] == "void" and r.get("void_no_answer") and not r["is_test"]]
         payload = {
             "promo": {k: promo.get(k) for k in ("id", "title_ru", "title_uz", "text_ru", "text_uz",
                                                  "starts_at", "ends_at")} if promo else None,
             "months": [{"period": m["period"], "draw_at": m["draw_at"]} for m in months],
             "countdown_at": (await db.get_config(f"promo_draw_countdown_{pid}")) or None,
             "_runs": runs,
+            "_no_answer": no_answer,
+            "caller_phone": await _draw_caller_phone(),
         }
         _draw_live_cache[key] = (_time.monotonic() + 1.0, payload)
         payload = dict(payload)
     runs = payload.pop("_runs")
+    no_answer = payload.pop("_no_answer", [])
     done = {r["period"]: r for r in runs if not r["is_test"]}
     payload["winners"] = [{"period": r["period"], "winner": _mask_draw_phone(r["winner_phone"]),
-                           "at": r["reveal_at"]} for r in runs
+                           "at": r["reveal_at"], "status": r.get("winner_status") or "pending",
+                           "photo": f"/promo/draw/photo/{r['id']}" if r.get("photo_file_id") else None,
+                           "deadline": r["reveal_at"] + timedelta(hours=DRAW_NO_ANSWER_HOURS)} for r in runs
                           if not r["is_test"] and r["reveal_at"] <= now]
+    payload["no_answer"] = [{"period": r["period"], "winner": _mask_draw_phone(r["winner_phone"])} for r in no_answer]
     for m in payload["months"]:
         m["done"] = m["period"] in done and done[m["period"]]["reveal_at"] <= now
     live = None
@@ -3862,6 +3921,7 @@ async def promo_draw_live(test: int = 0, promo_id: int | None = None):
         parts = r["participants"] if isinstance(r["participants"], list) else _json.loads(r["participants"] or "[]")
         reel = [_mask_draw_phone(p["phone"]) for p in parts[:60]]
         live = {"id": r["id"], "period": r["period"], "is_test": r["is_test"],
+                "status": r.get("winner_status") or "pending",
                 "started_at": r["started_at"], "reveal_at": r["reveal_at"],
                 "count": len(parts), "reel": reel,
                 "winner": _mask_draw_phone(r["winner_phone"]) if r["reveal_at"] <= now else None}
@@ -3881,8 +3941,7 @@ async def admin_promo_draw(promo_id: int, _=Depends(_get_admin)):
     for m in months:
         m["participants"] = len(await db.promo_draw_participants(promo_id, m["period"]))
         run = await db.promo_draw_active_run(promo_id, m["period"], False)
-        m["run"] = ({"id": run["id"], "winner_phone": run["winner_phone"], "winner_info": run["winner_info"],
-                     "reveal_at": run["reveal_at"]} if run else None)
+        m["run"] = _draw_run_admin(run) if run else None
     runs = [{k: r[k] for k in ("id", "period", "is_test", "status", "started_at", "reveal_at",
                                "winner_phone", "winner_info", "void_reason", "voided_at")}
             for r in await db.promo_draw_runs(promo_id)]
@@ -3945,18 +4004,160 @@ async def admin_promo_draw_start(promo_id: int, period: str | None = Body(None, 
     if not run:
         raise HTTPException(status_code=409, detail="Розыгрыш этого месяца уже проведён — переиграть можно, аннулировав его с причиной")
     _draw_live_cache.clear()
+    if not test:
+        asyncio.create_task(_draw_notify_winner(run["id"]))
     return {"ok": True, "run_id": run["id"], "reveal_at": reveal_at, "count": len(parts)}
 
 
 @app.post("/api/admin/promo-draw/runs/{run_id}/void")
-async def admin_promo_draw_void(run_id: int, reason: str = Body(..., embed=True), _=Depends(_get_admin)):
+async def admin_promo_draw_void(run_id: int, reason: str = Body("", embed=True),
+                                no_answer: bool = Body(False, embed=True), _=Depends(_get_admin)):
     reason = (reason or "").strip()
-    if len(reason) < 3:
+    if no_answer:
+        run = await db.get_promo_draw_run(run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Запуск не найден")
+        calls = run["call_log"] if isinstance(run["call_log"], list) else _json.loads(run["call_log"] or "[]")
+        missed = [c for c in calls if not c.get("answered")]
+        hours = (datetime.now(timezone.utc) - run["reveal_at"]).total_seconds() / 3600
+        if run["winner_status"] != "pending":
+            raise HTTPException(status_code=400, detail="Победитель уже вышел на связь")
+        if len(missed) < DRAW_MIN_CALLS or hours < DRAW_NO_ANSWER_HOURS:
+            raise HTTPException(status_code=400, detail=(
+                f"По правилам: не раньше {DRAW_NO_ANSWER_HOURS} ч после розыгрыша и минимум {DRAW_MIN_CALLS} звонка "
+                f"(сейчас: {hours:.0f} ч, неотвеченных звонков: {len(missed)})"))
+        reason = f"не вышел на связь: {len(missed)} звонков за {hours:.0f} ч" + (f" · {reason}" if reason else "")
+    elif len(reason) < 3:
         raise HTTPException(status_code=400, detail="Укажите причину")
-    if not await db.void_promo_draw_run(run_id, reason[:500]):
+    if not await db.void_promo_draw_run(run_id, reason[:500], no_answer):
         raise HTTPException(status_code=404, detail="Запуск не найден или уже аннулирован")
     _draw_live_cache.clear()
     return {"ok": True}
+
+
+def _draw_run_admin(run: dict) -> dict:
+    calls = run["call_log"] if isinstance(run["call_log"], list) else _json.loads(run["call_log"] or "[]")
+    return {k: run.get(k) for k in ("id", "period", "is_test", "status", "reveal_at", "winner_phone", "winner_info",
+                                    "winner_status", "notified_at", "notify_result", "prize_method", "handed_at",
+                                    "void_reason")} | {
+        "calls": calls, "has_photo": bool(run.get("photo_file_id")),
+        "no_answer_after": run["reveal_at"] + timedelta(hours=DRAW_NO_ANSWER_HOURS)}
+
+
+@app.get("/api/admin/promo-draw/runs/{run_id}")
+async def admin_promo_draw_run(run_id: int, _=Depends(_get_admin)):
+    """Экран звонка победителю: полный номер, его заказы, журнал звонков, статус."""
+    run = await db.get_promo_draw_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Запуск не найден")
+    nums = [x.strip() for x in (run["winner_info"] or "").split(",") if x.strip() and not x.strip().startswith("тест")]
+    return {"ok": True, "run": _draw_run_admin(run), "orders": await db.promo_draw_winner_orders(run["winner_phone"], nums),
+            "caller_phone": await _draw_caller_phone(), "min_calls": DRAW_MIN_CALLS, "no_answer_hours": DRAW_NO_ANSWER_HOURS}
+
+
+@app.post("/api/admin/promo-draw/runs/{run_id}/call")
+async def admin_promo_draw_call(run_id: int, answered: bool = Body(..., embed=True),
+                                note: str = Body("", embed=True), _=Depends(_get_admin)):
+    """Звонок победителю: дозвонились (→ подтвердил) или не ответил (в журнал)."""
+    run = await db.get_promo_draw_run(run_id)
+    if not run or run["status"] != "done":
+        raise HTTPException(status_code=404, detail="Запуск не найден или аннулирован")
+    entry = {"at": datetime.now(timezone.utc).isoformat(), "answered": bool(answered), "note": (note or "").strip()[:300]}
+    fields = {"call_entry": entry}
+    if answered and run["winner_status"] == "pending":
+        fields["winner_status"] = "confirmed"
+    row = await db.update_promo_draw_run(run_id, **fields)
+    _draw_live_cache.clear()
+    return {"ok": True, "run": _draw_run_admin(row)}
+
+
+@app.post("/api/admin/promo-draw/runs/{run_id}/handed")
+async def admin_promo_draw_handed(run_id: int, method: str = Body(..., embed=True), _=Depends(_get_admin)):
+    """Приз вручён: cash — наличными в офисе, card — переводом на карту."""
+    if method not in ("cash", "card"):
+        raise HTTPException(status_code=400, detail="Способ: наличные или перевод на карту")
+    run = await db.get_promo_draw_run(run_id)
+    if not run or run["status"] != "done" or run["is_test"]:
+        raise HTTPException(status_code=404, detail="Официальный запуск не найден")
+    row = await db.update_promo_draw_run(run_id, winner_status="handed", prize_method=method,
+                                         handed_at=datetime.now(timezone.utc))
+    _draw_live_cache.clear()
+    return {"ok": True, "run": _draw_run_admin(row)}
+
+
+@app.post("/api/admin/promo-draw/runs/{run_id}/notify")
+async def admin_promo_draw_notify(run_id: int, _=Depends(_get_admin)):
+    """Повторно отправить поздравление (SMS + Telegram) — без ожидания."""
+    res = await _draw_notify_winner(run_id, wait=False)
+    if res == "skip":
+        raise HTTPException(status_code=400, detail="Только для действующего официального розыгрыша")
+    return {"ok": True, "result": res}
+
+
+MAX_DRAW_PHOTO_BYTES = 10_000_000
+
+@app.post("/api/admin/promo-draw/runs/{run_id}/photo")
+async def admin_promo_draw_photo(run_id: int, file: UploadFile = File(...), consent: str = Form(""),
+                                 _=Depends(_get_admin)):
+    """Фото вручения на страницу акции — только с согласия победителя."""
+    if consent != "1":
+        raise HTTPException(status_code=400, detail="Отметьте, что победитель согласен на публикацию фото")
+    if not (file.content_type or "").startswith("image/"):
+        raise HTTPException(status_code=400, detail="Нужен файл изображения")
+    run = await db.get_promo_draw_run(run_id)
+    if not run or run["status"] != "done" or run["is_test"]:
+        raise HTTPException(status_code=404, detail="Официальный запуск не найден")
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
+    data = await file.read()
+    if len(data) > MAX_DRAW_PHOTO_BYTES:
+        raise HTTPException(status_code=400, detail="Фото слишком большое (макс. 10 МБ)")
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field("photo", data, filename=file.filename or "winner.jpg", content_type=file.content_type)
+    form.add_field("caption", f"Promo draw winner photo (run {run_id})")
+    async with aiohttp.ClientSession() as s:
+        async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/sendPhoto", data=form,
+                          timeout=aiohttp.ClientTimeout(total=60)) as r:
+            result = await r.json()
+    if not result.get("ok"):
+        raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description', 'upload failed')}")
+    file_id = result["result"]["photo"][-1]["file_id"]   # самый крупный размер
+    row = await db.update_promo_draw_run(run_id, photo_file_id=file_id)
+    _draw_live_cache.clear()
+    return {"ok": True, "run": _draw_run_admin(row)}
+
+
+@app.delete("/api/admin/promo-draw/runs/{run_id}/photo")
+async def admin_promo_draw_photo_delete(run_id: int, _=Depends(_get_admin)):
+    row = await db.update_promo_draw_run(run_id, photo_file_id=None)
+    _draw_live_cache.clear()
+    return {"ok": True, "run": _draw_run_admin(row) if row else None}
+
+
+@app.get("/api/promo/draw/photo/{run_id}")
+async def public_promo_draw_photo(run_id: int, request: Request):
+    """Фото вручения — публично, только у официального действующего розыгрыша."""
+    run = await db.get_promo_draw_run(run_id)
+    if not run or run["is_test"] or run["status"] != "done" or not run.get("photo_file_id") or not BOT_TOKEN:
+        raise HTTPException(status_code=404)
+    file_id = run["photo_file_id"]
+    content = _draw_music_cache.get(file_id)
+    if content is None:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+                             params={"file_id": file_id}, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                data = await r.json()
+            if not data.get("ok"):
+                raise HTTPException(status_code=502, detail="Файл не найден в Telegram")
+            async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}",
+                             timeout=aiohttp.ClientTimeout(total=60)) as fr:
+                content = await fr.read()
+        if len(_draw_music_cache) >= 8:
+            _draw_music_cache.clear()
+        _draw_music_cache[file_id] = content
+    return Response(content=content, media_type="image/jpeg", headers={"Cache-Control": "public, max-age=3600"})
 
 
 @app.get("/api/admin/promo-testers")
