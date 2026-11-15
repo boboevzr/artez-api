@@ -91,7 +91,7 @@ async def create_tables():
             phone           VARCHAR(20) NOT NULL,
             code            VARCHAR(20) NOT NULL,
             purpose         VARCHAR(20) DEFAULT 'register'
-                            CHECK (purpose IN ('register','login','reset','reset_attempt')),
+                            CHECK (purpose IN ('register','login','reset','reset_attempt','app_login','app_attempt')),
             expires_at      TIMESTAMP NOT NULL,
             used            BOOLEAN DEFAULT FALSE,
             created_at      TIMESTAMP DEFAULT NOW()
@@ -659,7 +659,7 @@ async def create_tables():
         # при каждой попытке ввести код сброса пароля.
         "ALTER TABLE sms_codes ALTER COLUMN code TYPE VARCHAR(20)",
         "ALTER TABLE sms_codes DROP CONSTRAINT IF EXISTS sms_codes_purpose_check",
-        "ALTER TABLE sms_codes ADD CONSTRAINT sms_codes_purpose_check CHECK (purpose IN ('register','login','reset','reset_attempt'))",
+        "ALTER TABLE sms_codes ADD CONSTRAINT sms_codes_purpose_check CHECK (purpose IN ('register','login','reset','reset_attempt','app_login','app_attempt'))",
         # Логистика: регионы обслуживания (3 уровня — населённый пункт → тип
         # застройки → конкретный объект). polygon пока не используется (будущий этап).
         """CREATE TABLE IF NOT EXISTS service_regions (
@@ -745,6 +745,46 @@ async def create_tables():
                 ELSE 'pickup' END
              FROM routes r, orders o
             WHERE ro.leg IS NULL AND r.id = ro.route_id AND o.id = ro.order_id""",
+        # Мобильное приложение (2026-11-15): сессии «пропуск 15 мин + ключ обновления 30 дн»
+        # (ключ меняется при каждом обновлении) и устройства со входом по PIN / Face ID.
+        # kind: 'client' (users.id) | 'staff' (staff.id; staff_sid — строка staff_sessions).
+        """CREATE TABLE IF NOT EXISTS app_sessions (
+            id           BIGSERIAL PRIMARY KEY,
+            kind         VARCHAR(10) NOT NULL,
+            subject_id   INTEGER NOT NULL,
+            staff_sid    INTEGER,
+            device_id    BIGINT,
+            method       VARCHAR(16) NOT NULL,
+            refresh_hash TEXT NOT NULL UNIQUE,
+            prev_hash    TEXT,
+            rotated_at   TIMESTAMPTZ,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            expires_at   TIMESTAMPTZ NOT NULL,
+            revoked_at   TIMESTAMPTZ,
+            user_agent   TEXT,
+            ip           TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_app_sessions_prev ON app_sessions(prev_hash) WHERE prev_hash IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_app_sessions_subject ON app_sessions(kind, subject_id) WHERE revoked_at IS NULL",
+        "CREATE INDEX IF NOT EXISTS idx_app_sessions_staff_sid ON app_sessions(staff_sid) WHERE staff_sid IS NOT NULL",
+        """CREATE TABLE IF NOT EXISTS app_devices (
+            id              BIGSERIAL PRIMARY KEY,
+            kind            VARCHAR(10) NOT NULL,
+            subject_id      INTEGER NOT NULL,
+            token_hash      TEXT NOT NULL UNIQUE,
+            prev_token_hash TEXT,
+            rotated_at      TIMESTAMPTZ,
+            pin_hash        TEXT NOT NULL,
+            pin_failed      INTEGER NOT NULL DEFAULT 0,
+            biometric       BOOLEAN NOT NULL DEFAULT FALSE,
+            name            TEXT,
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_used_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            revoked_at      TIMESTAMPTZ
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_app_devices_prev ON app_devices(prev_token_hash) WHERE prev_token_hash IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_app_devices_subject ON app_devices(kind, subject_id) WHERE revoked_at IS NULL",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1582,6 +1622,8 @@ async def update_user_password(user_id: int, password_hash: str):
         await conn.execute("""
             UPDATE users SET password_hash=$2, must_change_password=FALSE, updated_at=NOW() WHERE id=$1
         """, user_id, password_hash)
+    # Пароль сменили/сбросили — входы в приложение (сессии и PIN/Face ID) больше не действуют.
+    await app_revoke_subject("client", user_id)
 
 
 async def set_user_must_change_password(user_id: int, value: bool):
@@ -3514,14 +3556,35 @@ async def list_staff_sessions(staff_id: int) -> list[dict]:
 
 async def revoke_staff_sessions(staff_id: int, reason: str, sid: int | None = None,
                                 except_sid: int | None = None) -> int:
-    """Завершить одну сессию (sid) или все сессии сотрудника (кроме except_sid)."""
-    async with pool.acquire() as conn:
-        res = await conn.execute(
+    """Завершить одну сессию (sid) или все сессии сотрудника (кроме except_sid).
+    Заодно гасит сессии приложения на этих sid и их устройства с PIN/Face ID (2026-11-15) —
+    иначе после смены пароля или «Выйти на всех устройствах» в приложение можно было бы
+    снова войти по PIN. «Все сессии» гасят и все устройства сотрудника (кроме текущего)."""
+    async with pool.acquire() as conn, conn.transaction():
+        rows = await conn.fetch(
             "UPDATE staff_sessions SET revoked_at=NOW(), revoked_reason=$2 "
             "WHERE staff_id=$1 AND revoked_at IS NULL "
-            "AND ($3::int IS NULL OR id=$3) AND ($4::int IS NULL OR id<>$4)",
+            "AND ($3::int IS NULL OR id=$3) AND ($4::int IS NULL OR id<>$4) RETURNING id",
             staff_id, reason, sid, except_sid)
-        return int(res.split()[-1]) if res else 0
+        sids = [r["id"] for r in rows]
+        if sids:
+            devs = await conn.fetch(
+                "UPDATE app_sessions SET revoked_at=NOW() WHERE staff_sid = ANY($1::int[]) "
+                "AND revoked_at IS NULL RETURNING device_id", sids)
+            dev_ids = [d["device_id"] for d in devs if d["device_id"]]
+            if dev_ids:
+                await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE id = ANY($1::bigint[]) "
+                                   "AND revoked_at IS NULL", dev_ids)
+        if sid is None:
+            keep_dev = None
+            if except_sid:
+                keep_dev = await conn.fetchval(
+                    "SELECT device_id FROM app_sessions WHERE staff_sid=$1 AND revoked_at IS NULL "
+                    "ORDER BY id DESC LIMIT 1", except_sid)
+            await conn.execute(
+                "UPDATE app_devices SET revoked_at=NOW() WHERE kind='staff' AND subject_id=$1 "
+                "AND revoked_at IS NULL AND ($2::bigint IS NULL OR id<>$2)", staff_id, keep_dev)
+        return len(sids)
 
 
 async def update_staff_password(staff_id: int, password_hash: str, plain: str = None):
@@ -3531,6 +3594,152 @@ async def update_staff_password(staff_id: int, password_hash: str, plain: str = 
             "UPDATE staff SET password_hash=$2, plain_password=$3, updated_at=NOW() WHERE id=$1",
             staff_id, password_hash, plain
         )
+
+
+# ── Мобильное приложение: сессии и устройства PIN / Face ID (2026-11-15) ─────────
+# В БД лежат только sha256 ключей (refresh / device token), сами ключи — у телефона.
+APP_REFRESH_DAYS = 30
+APP_GRACE_SEC = 60          # старый ключ принимается повторно только сразу после замены (ответ потерялся)
+APP_DEVICE_IDLE_DAYS = 30
+APP_DEVICE_MAX_DAYS = 180
+
+
+async def app_session_create(kind: str, subject_id: int, method: str, refresh_hash: str,
+                             staff_sid: int | None = None, device_id: int | None = None,
+                             user_agent: str | None = None, ip: str | None = None) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "INSERT INTO app_sessions (kind, subject_id, staff_sid, device_id, method, refresh_hash, expires_at, "
+            "user_agent, ip) VALUES ($1,$2,$3,$4,$5,$6, NOW() + make_interval(days => $7), $8, $9) RETURNING id",
+            kind, subject_id, staff_sid, device_id, method, refresh_hash, APP_REFRESH_DAYS,
+            (user_agent or "")[:300] or None, (ip or "")[:64] or None)
+
+
+async def app_session_get(session_id: int) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT *, created_at > NOW() - INTERVAL '15 minutes' AS fresh FROM app_sessions "
+            "WHERE id=$1 AND revoked_at IS NULL AND expires_at > NOW()", session_id)
+        return dict(row) if row else None
+
+
+async def app_session_rotate(old_hash: str, new_hash: str) -> dict | None:
+    """Обменять ключ обновления на новый. None — ключ не годится (истёк, отозван, украден).
+    Старый ключ, всплывший позже 60 с после замены, — признак кражи: сессия отзывается."""
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT id, refresh_hash, revoked_at IS NULL AND expires_at > NOW() AS alive, "
+            "rotated_at > NOW() - make_interval(secs => $2) AS in_grace "
+            "FROM app_sessions WHERE refresh_hash=$1 OR prev_hash=$1 ORDER BY id DESC LIMIT 1 FOR UPDATE",
+            old_hash, APP_GRACE_SEC)
+        if not row or not row["alive"]:
+            return None
+        if row["refresh_hash"] != old_hash and not row["in_grace"]:
+            await conn.execute("UPDATE app_sessions SET revoked_at=NOW() WHERE id=$1", row["id"])
+            return None
+        upd = await conn.fetchrow(
+            "UPDATE app_sessions SET prev_hash=refresh_hash, refresh_hash=$2, rotated_at=NOW(), "
+            "last_used_at=NOW() WHERE id=$1 RETURNING *", row["id"], new_hash)
+        return dict(upd)
+
+
+async def app_session_revoke(session_id: int) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE app_sessions SET revoked_at=NOW() WHERE id=$1 AND revoked_at IS NULL RETURNING *", session_id)
+        return dict(row) if row else None
+
+
+async def app_session_by_refresh(refresh_hash: str) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM app_sessions WHERE (refresh_hash=$1 OR prev_hash=$1) AND revoked_at IS NULL "
+            "ORDER BY id DESC LIMIT 1", refresh_hash)
+        return dict(row) if row else None
+
+
+async def app_sessions_of_device(device_id: int) -> list[dict]:
+    """Живые сессии устройства — перед новым входом по PIN их гасим (одна сессия на устройство)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "UPDATE app_sessions SET revoked_at=NOW() WHERE device_id=$1 AND revoked_at IS NULL RETURNING *",
+            device_id)
+        return [dict(r) for r in rows]
+
+
+async def app_device_add(kind: str, subject_id: int, token_hash: str, pin_hash: str,
+                         name: str | None, max_devices: int = 5) -> int:
+    """Новое устройство с PIN; самые давние сверх лимита отключаются."""
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE app_devices SET revoked_at=NOW() WHERE id IN ("
+            " SELECT id FROM app_devices WHERE kind=$1 AND subject_id=$2 AND revoked_at IS NULL "
+            " ORDER BY last_used_at DESC OFFSET $3)", kind, subject_id, max_devices - 1)
+        return await conn.fetchval(
+            "INSERT INTO app_devices (kind, subject_id, token_hash, pin_hash, name) VALUES ($1,$2,$3,$4,$5) "
+            "RETURNING id", kind, subject_id, token_hash, pin_hash, (name or "")[:80] or None)
+
+
+async def app_device_find(token_hash: str) -> dict | None:
+    """Устройство по ключу (текущему или предыдущему). Истёкшее — отключается и не возвращается.
+    Предыдущий ключ вне 60-секундного окна — признак кражи: устройство отключается."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT *, token_hash=$1 AS is_current, "
+            "rotated_at > NOW() - make_interval(secs => $2) AS in_grace, "
+            "(last_used_at < NOW() - make_interval(days => $3) OR created_at < NOW() - make_interval(days => $4)) AS expired "
+            "FROM app_devices WHERE (token_hash=$1 OR prev_token_hash=$1) AND revoked_at IS NULL "
+            "ORDER BY id DESC LIMIT 1", token_hash, APP_GRACE_SEC, APP_DEVICE_IDLE_DAYS, APP_DEVICE_MAX_DAYS)
+        if not row:
+            return None
+        if row["expired"] or (not row["is_current"] and not row["in_grace"]):
+            await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE id=$1", row["id"])
+            return None
+        return dict(row)
+
+
+async def app_device_rotate(device_id: int, new_hash: str, used_prev: bool) -> bool:
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "UPDATE app_devices SET prev_token_hash = CASE WHEN $3 THEN NULL ELSE token_hash END, "
+            "token_hash=$2, pin_failed=0, last_used_at=NOW(), rotated_at=NOW() "
+            "WHERE id=$1 AND revoked_at IS NULL", device_id, new_hash, used_prev)
+        return res.endswith(" 1")
+
+
+async def app_device_fail(device_id: int, max_fails: int = 5) -> int:
+    """Неверный PIN: +1 к счётчику; на max_fails устройство отключается. Возвращает число ошибок."""
+    async with pool.acquire() as conn:
+        n = await conn.fetchval(
+            "UPDATE app_devices SET pin_failed = pin_failed + 1, "
+            "revoked_at = CASE WHEN pin_failed + 1 >= $2 THEN NOW() ELSE revoked_at END "
+            "WHERE id=$1 RETURNING pin_failed", device_id, max_fails)
+        return int(n or max_fails)
+
+
+async def app_device_set(device_id: int, *, biometric: bool | None = None, revoke: bool = False):
+    async with pool.acquire() as conn:
+        if revoke:
+            await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE id=$1 AND revoked_at IS NULL", device_id)
+        elif biometric is not None:
+            await conn.execute("UPDATE app_devices SET biometric=$2 WHERE id=$1", device_id, biometric)
+
+
+async def app_revoke_subject(kind: str, subject_id: int) -> None:
+    """Закрыть все сессии приложения и сбросить все PIN/Face ID человека (смена/сброс пароля)."""
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE app_sessions SET revoked_at=NOW() WHERE kind=$1 AND subject_id=$2 "
+                           "AND revoked_at IS NULL", kind, subject_id)
+        await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE kind=$1 AND subject_id=$2 "
+                           "AND revoked_at IS NULL", kind, subject_id)
+
+
+async def count_recent_codes(phone: str, purpose: str, minutes: int) -> int:
+    """Сколько записей sms_codes с этой целью за последние N минут (счётчик неудачных попыток ввода)."""
+    async with pool.acquire() as conn:
+        return int(await conn.fetchval(
+            "SELECT COUNT(*) FROM sms_codes WHERE phone=$1 AND purpose=$2 "
+            "AND created_at > NOW() - make_interval(mins => $3)", phone, purpose, minutes) or 0)
 
 # ══════════════════════════════════════
 #  ЛИДЫ

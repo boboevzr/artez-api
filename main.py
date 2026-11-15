@@ -1347,11 +1347,29 @@ def _staff_public(s: dict) -> dict:
 
 @app.post("/api/staff/login")
 async def staff_login(req: StaffLoginRequest, request: Request):
-    staff = await db.get_staff_by_login(req.login)
+    staff = await _staff_check_password(req.login, req.password)
+    ip = _request_ip(request)
+    sid = await db.create_staff_session(staff["id"], request.headers.get("user-agent"), ip)
+    token = create_staff_token(staff["id"], staff["login"], staff["role"], sid)
+    pub = _staff_public(dict(staff))
+    pub["must_change_password"] = bool(staff.get("must_change_password"))
+    return {"ok": True, "token": token, "staff": pub}
+
+
+def _request_ip(request: Request) -> str:
+    # IP — последний из X-Forwarded-For (его дописал прокси Railway; левые клиент может подделать)
+    return (request.headers.get("x-forwarded-for") or "").split(",")[-1].strip() \
+        or (request.client.host if request.client else "")
+
+
+async def _staff_check_password(login: str, password: str):
+    """Логин+пароль сотрудника (основной или действующий временный) — общая проверка
+    для staff.html и приложения. Возвращает строку staff или 401."""
+    staff = await db.get_staff_by_login(login)
     if not staff:
         raise HTTPException(status_code=401, detail="Неверный логин или пароль")
 
-    pw = req.password[:72]
+    pw = (password or "")[:72]
     valid = pwd_context.verify(pw, staff["password_hash"])
 
     # Проверяем временный пароль если основной не подошёл
@@ -1365,14 +1383,7 @@ async def staff_login(req: StaffLoginRequest, request: Request):
 
     if not staff.get("active", True):
         raise HTTPException(status_code=401, detail="Сотрудник деактивирован")
-    # IP — последний из X-Forwarded-For (его дописал прокси Railway; левые клиент может подделать)
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[-1].strip() \
-         or (request.client.host if request.client else "")
-    sid = await db.create_staff_session(staff["id"], request.headers.get("user-agent"), ip)
-    token = create_staff_token(staff["id"], staff["login"], staff["role"], sid)
-    pub = _staff_public(dict(staff))
-    pub["must_change_password"] = bool(staff.get("must_change_password"))
-    return {"ok": True, "token": token, "staff": pub}
+    return staff
 
 @app.get("/api/staff/me")
 async def staff_me(staff=Depends(get_current_staff)):
@@ -3599,6 +3610,312 @@ async def forgot_password_confirm(body: dict):
     }
 
 
+# ══════════════════════════════════════
+#  МОБИЛЬНОЕ ПРИЛОЖЕНИЕ: вход, сессии, PIN / Face ID (2026-11-15)
+# ══════════════════════════════════════
+# Пропуск (JWT, 15 мин) того же формата, что у сайта/staff.html — поэтому все прежние
+# эндпоинты (get_current_user / get_current_staff) принимают его как есть; плюс «asid»
+# (строка app_sessions). Ключ обновления — 30 дней, меняется при каждом обновлении.
+# PIN: только сразу после входа по коду/паролю (15 мин); 5 ошибок — устройство сброшено.
+# Face ID: телефон хранит ключ устройства под биометрией и шлёт его без PIN.
+APP_ACCESS_MIN = 15
+APP_PIN_MAX_FAILS = 5
+APP_CODE_MAX_FAILS = 5        # неверных кодов из SMS/Telegram за 15 мин
+
+
+def _sha(s: str) -> str:
+    import hashlib
+    return hashlib.sha256((s or "").encode()).hexdigest()
+
+
+def _scrypt_pin(pin: str) -> str:
+    import hashlib, base64
+    salt = secrets.token_bytes(16)
+    dk = hashlib.scrypt(pin.encode(), salt=salt, n=2**14, r=8, p=1, dklen=32)
+    return f"scrypt$16384$8$1${base64.b64encode(salt).decode()}${base64.b64encode(dk).decode()}"
+
+
+def _scrypt_check(pin: str, stored: str) -> bool:
+    import hashlib, base64, hmac
+    try:
+        _, n, r, p, salt, dk = stored.split("$")
+        got = hashlib.scrypt(pin.encode(), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p), dklen=32)
+        return hmac.compare_digest(got, base64.b64decode(dk))
+    except (ValueError, TypeError):
+        return False
+
+
+def _pin_problem(pin: str) -> tuple[str, str] | None:
+    if not (isinstance(pin, str) and len(pin) == 4 and pin.isdigit()):
+        return "PIN — 4 цифры", "PIN — 4 ta raqam"
+    d = [int(x) for x in pin]
+    steps = {d[i + 1] - d[i] for i in range(3)}
+    if len(set(d)) == 1 or steps in ({1}, {-1}):
+        return "Слишком простой PIN (1111, 1234)", "Juda oddiy PIN (1111, 1234)"
+    return None
+
+
+def _app_err(status: int, code: str, ru: str, uz: str, **extra):
+    """Ошибка с машинным кодом для приложения: detail = {code, message, ...}."""
+    raise HTTPException(status_code=status, detail={"code": code, "message": bi(ru, uz), **extra})
+
+
+def _client_public(u) -> dict:
+    return {"id": u["id"], "phone": u["phone"], "first_name": u.get("first_name"),
+            "address": u.get("address"), "tg_linked": bool(u.get("tg_id"))}
+
+
+async def _app_issue(kind: str, subject, method: str, request: Request,
+                     device_id: int | None = None) -> dict:
+    """Новая сессия приложения: строка app_sessions (+ staff_sessions для сотрудника) и пара ключей."""
+    ua, ip = request.headers.get("user-agent"), _request_ip(request)
+    staff_sid = None
+    if kind == "staff":
+        staff_sid = await db.create_staff_session(subject["id"], f"📱 app · {ua or ''}", ip)
+    refresh = secrets.token_urlsafe(48)
+    asid = await db.app_session_create(kind, subject["id"], method, _sha(refresh), staff_sid=staff_sid,
+                                       device_id=device_id, user_agent=ua, ip=ip)
+    return _app_pair(kind, subject, asid, staff_sid, refresh)
+
+
+def _app_pair(kind: str, subject, asid: int, staff_sid: int | None, refresh: str) -> dict:
+    exp = datetime.now(timezone.utc) + timedelta(minutes=APP_ACCESS_MIN)
+    if kind == "staff":
+        payload = {"sub": str(subject["id"]), "login": subject["login"], "role": subject["role"],
+                   "type": "staff", "sid": staff_sid, "asid": asid, "exp": exp}
+        who = {"staff": _staff_public(dict(subject))}
+    else:
+        payload = {"sub": str(subject["id"]), "phone": subject["phone"], "type": "client",
+                   "asid": asid, "exp": exp}
+        who = {"user": _client_public(subject)}
+    return {"ok": True, "kind": kind, "access_token": jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM),
+            "refresh_token": refresh, "expires_in": APP_ACCESS_MIN * 60, **who}
+
+
+async def _app_subject(kind: str, subject_id: int):
+    """Действующий клиент/сотрудник или None (удалён, не подтверждён, уволен)."""
+    if kind == "staff":
+        s = await db.get_staff_by_id(subject_id)
+        return s if s and s["active"] else None
+    u = await db.get_user_by_id(subject_id)
+    return u if u and u["is_verified"] else None
+
+
+async def _app_current(authorization: str = Header(None)) -> dict:
+    """Пропуск приложения (с asid) клиента или сотрудника → {kind, subject, session}."""
+    if not authorization or not authorization.startswith("Bearer "):
+        _app_err(401, "auth_required", "Не авторизован", "Avtorizatsiya kerak")
+    try:
+        payload = jwt.decode(authorization.removeprefix("Bearer ").strip(), JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        _app_err(401, "auth_expired", "Сессия истекла", "Sessiya tugadi")
+    asid = payload.get("asid")
+    sess = await db.app_session_get(int(asid)) if asid else None
+    kind = "staff" if payload.get("type") == "staff" else "client"
+    if not sess or sess["kind"] != kind or str(sess["subject_id"]) != str(payload.get("sub")):
+        _app_err(401, "auth_expired", "Сессия истекла", "Sessiya tugadi")
+    if kind == "staff":
+        subject = await _staff_from_payload(payload)
+    else:
+        subject = await _app_subject("client", sess["subject_id"])
+    if not subject:
+        _app_err(401, "auth_expired", "Сессия истекла", "Sessiya tugadi")
+    return {"kind": kind, "subject": subject, "session": sess}
+
+
+@app.post("/api/app/auth/code")
+async def app_auth_code(body: dict):
+    """Шаг 1 входа клиента: код в Telegram (если номер привязан к боту) или по SMS.
+    Ответ new=true — номер ещё не клиент: приложение спросит имя перед вводом кода."""
+    phone = normalize_phone(body.get("phone") or "")
+    if not PHONE_RE.match(phone):
+        _app_err(400, "phone_format", "Номер в формате +998XXXXXXXXX", "Raqam +998XXXXXXXXX formatida")
+    user = await db.get_user_by_phone(phone)
+    is_new = not (user and user["is_verified"])
+    tg_id = (user or {}).get("tg_id") or await db.get_tg_id_by_phone(phone)
+    if is_new and not tg_id and await _get_cfg("sms_registration_enabled") == "false":
+        _app_err(403, "tg_required", "Регистрация — через Telegram-бота ARTEZ: нажмите /start и поделитесь номером",
+                 "Ro'yxatdan o'tish — ARTEZ Telegram-boti orqali: /start bosing va raqamingizni ulashing")
+    ok, err = await db.check_sms_rate_limit(phone, "app_login")
+    if not ok:
+        _app_err(429, "rate_limited", err, err)
+    code = generate_code()
+    await db.save_sms_code(phone, code, "app_login", datetime.utcnow() + timedelta(minutes=SMS_CODE_TTL_MIN))
+    if tg_id:
+        uz = (body.get("lang") or "ru") == "uz"
+        await _send_tg_safe(int(tg_id), (
+            f"🔐 <b>ARTEZ</b> — ilovaga kirish kodi:\n\n<code>{code}</code>\n\n⏱ {SMS_CODE_TTL_MIN} daqiqa amal qiladi. "
+            f"Kodni hech kimga bermang." if uz else
+            f"🔐 <b>ARTEZ</b> — код для входа в приложение:\n\n<code>{code}</code>\n\n⏱ Действителен "
+            f"{SMS_CODE_TTL_MIN} минут. Никому не сообщайте код."))
+        return {"ok": True, "via": "tg", "new": is_new, "phone": phone}
+    await send_sms(phone, await sms_text(code, "login"))
+    return {"ok": True, "via": "sms", "new": is_new, "phone": phone}
+
+
+@app.post("/api/app/auth/verify")
+async def app_auth_verify(body: dict, request: Request):
+    """Шаг 2: код → сессия. Новому клиенту нужно имя (first_name) — аккаунт создаётся здесь."""
+    phone = normalize_phone(body.get("phone") or "")
+    code = str(body.get("code") or "").strip()
+    name = (body.get("first_name") or "").strip()[:60]
+    user = await db.get_user_by_phone(phone)
+    is_new = not (user and user["is_verified"])
+    if is_new and not name:
+        _app_err(400, "name_required", "Укажите имя", "Ismingizni kiriting")
+    if await db.count_recent_codes(phone, "app_attempt", 15) >= APP_CODE_MAX_FAILS:
+        _app_err(429, "rate_limited", "Много неверных кодов. Попробуйте через 15 минут",
+                 "Ko'p noto'g'ri kod. 15 daqiqadan keyin urinib ko'ring")
+    if not code or not await db.check_sms_code(phone, code, "app_login"):
+        await db.save_sms_code(phone, "x", "app_attempt", datetime.utcnow())
+        _app_err(400, "code_invalid", "Неверный или просроченный код", "Kod noto'g'ri yoki eskirgan")
+    if is_new:
+        await db.create_user(phone, pwd_context.hash(secrets.token_urlsafe(24)[:72]), name)
+        await db.verify_user(phone)
+        user = await db.get_user_by_phone(phone)
+        asyncio.create_task(_notify_new_site_user(name, phone, "app"))
+        asyncio.create_task(db.upsert_crm_client(phone=phone, first_name=name, source="app_register"))
+    asyncio.create_task(db.update_user_last_login(user["id"]))
+    return await _app_issue("client", user, "code", request)
+
+
+@app.post("/api/app/auth/password")
+async def app_auth_password(body: dict, request: Request):
+    """Вход клиента по номеру и паролю сайта."""
+    phone = normalize_phone(body.get("phone") or "")
+    user = await db.get_user_by_phone(phone)
+    if not user or not pwd_context.verify(str(body.get("password") or "")[:72], user["password_hash"]):
+        _app_err(401, "bad_credentials", "Неверный номер или пароль", "Noto'g'ri telefon yoki parol")
+    if not user["is_verified"]:
+        _app_err(403, "not_verified", "Номер не подтверждён — войдите по коду", "Raqam tasdiqlanmagan — kod orqali kiring")
+    asyncio.create_task(db.update_user_last_login(user["id"]))
+    return await _app_issue("client", user, "password", request)
+
+
+@app.post("/api/app/auth/staff")
+async def app_auth_staff(body: dict, request: Request):
+    """Вход сотрудника в приложение — тот же логин и пароль, что в staff.html."""
+    staff = await _staff_check_password(str(body.get("login") or "").strip(), str(body.get("password") or ""))
+    out = await _app_issue("staff", staff, "password", request)
+    out["staff"]["must_change_password"] = bool(staff.get("must_change_password"))
+    return out
+
+
+@app.post("/api/app/auth/refresh")
+async def app_auth_refresh(body: dict):
+    new = secrets.token_urlsafe(48)
+    sess = await db.app_session_rotate(_sha(str(body.get("refresh_token") or "")), _sha(new))
+    if not sess:
+        _app_err(401, "auth_expired", "Сессия истекла — войдите заново", "Sessiya tugadi — qayta kiring")
+    subject = await _app_subject(sess["kind"], sess["subject_id"])
+    alive = subject is not None
+    if alive and sess["kind"] == "staff":
+        alive = bool(sess["staff_sid"]) and await db.check_staff_session(sess["staff_sid"], subject["id"])
+    if not alive:
+        await db.app_session_revoke(sess["id"])
+        _app_err(401, "auth_expired", "Сессия истекла — войдите заново", "Sessiya tugadi — qayta kiring")
+    return _app_pair(sess["kind"], subject, sess["id"], sess["staff_sid"], new)
+
+
+@app.post("/api/app/auth/logout")
+async def app_auth_logout(body: dict):
+    sess = await db.app_session_by_refresh(_sha(str(body.get("refresh_token") or "")))
+    if sess:
+        await db.app_session_revoke(sess["id"])
+        if sess["kind"] == "staff" and sess["staff_sid"]:
+            await db.revoke_staff_sessions(sess["subject_id"], "app_logout", sid=sess["staff_sid"])
+    if body.get("device_token"):
+        dev = await db.app_device_find(_sha(str(body["device_token"])))
+        if dev:
+            await db.app_device_set(dev["id"], revoke=True)
+    return {"ok": True}
+
+
+@app.post("/api/app/pin/enroll")
+async def app_pin_enroll(body: dict, cur=Depends(_app_current)):
+    """Придумать PIN → ключ устройства (выдаётся один раз; телефон хранит его в защищённом хранилище)."""
+    sess = cur["session"]
+    if sess["method"] in ("pin", "bio") or not sess["fresh"]:
+        _app_err(403, "login_again", "Для смены PIN войдите заново по коду или паролю",
+                 "PIN o'zgartirish uchun kod yoki parol bilan qayta kiring")
+    pin = str(body.get("pin") or "")
+    if (problem := _pin_problem(pin)):
+        _app_err(400, "pin_weak", *problem)
+    token = secrets.token_urlsafe(32)
+    pin_hash = await asyncio.to_thread(_scrypt_pin, pin)
+    dev_id = await db.app_device_add(cur["kind"], cur["subject"]["id"], _sha(token), pin_hash,
+                                     str(body.get("device_name") or ""))
+    return {"ok": True, "device_token": token, "device_id": dev_id}
+
+
+async def _app_device_login(device_token: str, pin: str | None, request: Request) -> dict:
+    dev = await db.app_device_find(_sha(device_token or ""))
+    if not dev:
+        _app_err(401, "device_unknown", "Вход по PIN сброшен — войдите по коду", "PIN bilan kirish o'chirildi — kod bilan kiring")
+    subject = await _app_subject(dev["kind"], dev["subject_id"])
+    if not subject:
+        await db.app_device_set(dev["id"], revoke=True)
+        _app_err(401, "device_unknown", "Вход по PIN сброшен — войдите по коду", "PIN bilan kirish o'chirildi — kod bilan kiring")
+    if pin is None:
+        if not dev["biometric"]:
+            _app_err(403, "biometric_off", "Face ID выключен — введите PIN", "Face ID o'chirilgan — PIN kiriting")
+    elif not await asyncio.to_thread(_scrypt_check, pin, dev["pin_hash"]):
+        fails = await db.app_device_fail(dev["id"], APP_PIN_MAX_FAILS)
+        left = APP_PIN_MAX_FAILS - fails
+        if left <= 0:
+            _app_err(401, "pin_locked", "PIN введён неверно 5 раз — войдите по коду",
+                     "PIN 5 marta noto'g'ri — kod bilan kiring")
+        _app_err(400, "pin_invalid", f"Неверный PIN, осталось попыток: {left}",
+                 f"PIN noto'g'ri, qolgan urinishlar: {left}", attempts_left=left)
+    new_token = secrets.token_urlsafe(32)
+    if not await db.app_device_rotate(dev["id"], _sha(new_token), used_prev=not dev["is_current"]):
+        _app_err(401, "device_unknown", "Вход по PIN сброшен — войдите по коду", "PIN bilan kirish o'chirildi — kod bilan kiring")
+    for old in await db.app_sessions_of_device(dev["id"]):   # одна живая сессия на устройство
+        if old["kind"] == "staff" and old["staff_sid"]:
+            await db.revoke_staff_sessions(old["subject_id"], "app_relogin", sid=old["staff_sid"])
+    out = await _app_issue(dev["kind"], subject, "pin" if pin is not None else "bio", request, device_id=dev["id"])
+    out["device_token"] = new_token
+    return out
+
+
+@app.post("/api/app/pin/unlock")
+async def app_pin_unlock(body: dict, request: Request):
+    return await _app_device_login(str(body.get("device_token") or ""), str(body.get("pin") or ""), request)
+
+
+@app.post("/api/app/pin/biometric-unlock")
+async def app_pin_bio_unlock(body: dict, request: Request):
+    return await _app_device_login(str(body.get("device_token") or ""), None, request)
+
+
+@app.post("/api/app/pin/biometric")
+async def app_pin_biometric(body: dict, cur=Depends(_app_current)):
+    """Включить/выключить Face ID для этого устройства."""
+    dev = await db.app_device_find(_sha(str(body.get("device_token") or "")))
+    if not dev or dev["kind"] != cur["kind"] or dev["subject_id"] != cur["subject"]["id"]:
+        _app_err(404, "device_unknown", "Устройство не найдено", "Qurilma topilmadi")
+    await db.app_device_set(dev["id"], biometric=bool(body.get("on")))
+    return {"ok": True, "biometric": bool(body.get("on"))}
+
+
+@app.post("/api/app/pin/status")
+async def app_pin_status(body: dict):
+    """Без входа: есть ли вход по PIN на этом телефоне и чей он (маска номера) — для экрана «Введите PIN»."""
+    dev = await db.app_device_find(_sha(str(body.get("device_token") or "")))
+    if not dev or not dev["is_current"]:
+        return {"ok": True, "active": False}
+    subject = await _app_subject(dev["kind"], dev["subject_id"])
+    if not subject:
+        return {"ok": True, "active": False}
+    if dev["kind"] == "staff":
+        label = (subject.get("first_name") or subject["login"])
+    else:
+        p = subject["phone"]
+        label = f"{p[:6]} *** {p[-2:]}"
+    return {"ok": True, "active": True, "kind": dev["kind"], "biometric": dev["biometric"],
+            "label": label, "first_name": subject.get("first_name")}
+
+
 @app.post("/api/login")
 async def login(req: LoginRequest):
     user = await db.get_user_by_phone(req.phone)
@@ -4985,7 +5302,7 @@ async def _notify_new_site_user(first_name: str, phone: str, method: str):
         return
     from datetime import datetime
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
-    method_icon = "✈️ Telegram" if method == "tg" else "📱 SMS"
+    method_icon = {"tg": "✈️ Telegram", "app": "📲 Приложение"}.get(method, "📱 SMS")
     text = (
         f"👤 {first_name}, 📞 <code>{phone}</code>, 🔐 {method_icon}, 🌐\n"
         f"📅 {now}"
