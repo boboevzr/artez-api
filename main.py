@@ -3975,6 +3975,11 @@ async def passkey_register_verify(body: dict, user=Depends(get_current_user)):
                                v.sign_count, str(body.get("name") or "")[:60])
     if not pid:
         raise HTTPException(400, bi("Этот Face ID уже подключён", "Bu Face ID allaqachon ulangan"))
+    if user.get("tg_id"):   # чтобы чужое подключение не прошло незаметно
+        asyncio.create_task(_send_tg_safe(int(user["tg_id"]),
+            "🔐 <b>ARTEZ</b>: к вашему аккаунту подключён вход по Face ID / отпечатку"
+            f"{' (' + str(body.get('name'))[:30] + ')' if body.get('name') else ''}.\n"
+            "Если это были не вы — смените пароль на сайте: все входы по Face ID отключатся."))
     return {"ok": True, "id": pid}
 
 

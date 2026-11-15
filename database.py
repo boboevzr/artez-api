@@ -3757,6 +3757,9 @@ async def app_revoke_subject(kind: str, subject_id: int) -> None:
                            "AND revoked_at IS NULL", kind, subject_id)
         await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE kind=$1 AND subject_id=$2 "
                            "AND revoked_at IS NULL", kind, subject_id)
+        if kind == "client":   # и Face ID на сайте (passkey)
+            await conn.execute("UPDATE passkeys SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL",
+                               subject_id)
 
 
 # ── Passkey (Face ID на сайте) ──
