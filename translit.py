@@ -23,6 +23,7 @@ FIX = {
     "kalkulyator": "калькулятор", "kalkulyatori": "калькулятори",
     "obyekt": "объект", "subyekt": "субъект",
     "litsenziya": "лицензия", "sertifikat": "сертификат",
+    "ya": "як", "ch": "чо", "sh": "ша",   # сокращения дней недели (Ya/Ch/Sh)
     "sex": "цех", "sexi": "цехи", "sexda": "цехда", "sexga": "цехга",
 }
 
