@@ -716,13 +716,17 @@ async def reconcile(tx_id: int) -> str:
 async def reverse_tx(tx_id: int, actor: str, reason: str = "admin") -> dict:
     """Полный возврат оплаченной транзакции на карту (paymentReverse). Сначала запись refund (pending) —
     уникальный индекс не даст сделать второй автоворот по той же оплате; потом запрос в банк."""
-    async with db.pool.acquire() as c:
-        t = await c.fetchrow("SELECT * FROM pay_tx WHERE id=$1 AND kind='pay'", tx_id)
-    if not t or t["status"] != "paid" or not t["plum_tx_id"]:
-        raise PayError("not_found", 404)
-    t = dict(t)
     try:
-        async with db.pool.acquire() as c:
+        async with db.pool.acquire() as c, c.transaction():
+            # блокируем оплату: параллельный ручной возврат ждёт; полный автовозврат — только если
+            # по этой оплате ещё НИЧЕГО не возвращали (иначе банк вернул бы сумму второй раз)
+            t = await c.fetchrow("SELECT * FROM pay_tx WHERE id=$1 AND kind='pay' FOR UPDATE", tx_id)
+            if not t or t["status"] != "paid" or not t["plum_tx_id"]:
+                raise PayError("not_found", 404)
+            t = dict(t)
+            if await c.fetchval("SELECT COUNT(*) FROM pay_tx WHERE refund_of=$1 AND kind='refund' "
+                                "AND status IN ('paid','manual','pending')", tx_id):
+                raise PayError("payment_in_progress", 409)
             r = await c.fetchrow(
                 """INSERT INTO pay_tx (kind, purpose, order_id, lead_id, user_id, phone, amount, status, card_mask, is_test,
                                        refund_of, plum_tx_id, note, done_by)
