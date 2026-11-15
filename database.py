@@ -785,6 +785,28 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_app_devices_prev ON app_devices(prev_token_hash) WHERE prev_token_hash IS NOT NULL",
         "CREATE INDEX IF NOT EXISTS idx_app_devices_subject ON app_devices(kind, subject_id) WHERE revoked_at IS NULL",
+        # Вход на сайте по Face ID / отпечатку — passkey (WebAuthn), 2026-11-15. Хранится только
+        # открытый ключ; закрытый не покидает телефон. Вызовы (challenge) — одноразовые, 5 минут.
+        """CREATE TABLE IF NOT EXISTS passkeys (
+            id            BIGSERIAL PRIMARY KEY,
+            user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            credential_id TEXT NOT NULL UNIQUE,
+            public_key    BYTEA NOT NULL,
+            sign_count    BIGINT NOT NULL DEFAULT 0,
+            name          TEXT,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_used_at  TIMESTAMPTZ,
+            revoked_at    TIMESTAMPTZ
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_passkeys_user ON passkeys(user_id) WHERE revoked_at IS NULL",
+        """CREATE TABLE IF NOT EXISTS passkey_challenges (
+            id         BIGSERIAL PRIMARY KEY,
+            user_id    INTEGER,
+            purpose    VARCHAR(10) NOT NULL,
+            challenge  TEXT NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            used_at    TIMESTAMPTZ
+        )""",
     ]
     async with pool.acquire() as c:
         for sql in other_migrations:
@@ -1727,16 +1749,17 @@ async def save_sms_code(phone: str, code: str, purpose: str, expires_at):
 async def check_sms_code(phone: str, code: str, purpose: str) -> bool:
     if not pool: return False
     async with pool.acquire() as conn:
+        # Одним запросом: два одновременных ввода одного кода не пройдут оба.
         row = await conn.fetchrow("""
-            SELECT id FROM sms_codes
-            WHERE phone=$1 AND code=$2 AND purpose=$3
-              AND used = FALSE AND expires_at > NOW()
-            ORDER BY id DESC LIMIT 1
+            UPDATE sms_codes SET used = TRUE WHERE id = (
+                SELECT id FROM sms_codes
+                WHERE phone=$1 AND code=$2 AND purpose=$3
+                  AND used = FALSE AND expires_at > NOW()
+                ORDER BY id DESC LIMIT 1)
+              AND used = FALSE
+            RETURNING id
         """, phone, code, purpose)
-        if not row:
-            return False
-        await conn.execute("UPDATE sms_codes SET used = TRUE WHERE id=$1", row["id"])
-        return True
+        return bool(row)
 
 
 async def check_sms_rate_limit(phone: str, purpose: str) -> tuple[bool, str]:
@@ -3707,14 +3730,16 @@ async def app_device_rotate(device_id: int, new_hash: str, used_prev: bool) -> b
         return res.endswith(" 1")
 
 
-async def app_device_fail(device_id: int, max_fails: int = 5) -> int:
-    """Неверный PIN: +1 к счётчику; на max_fails устройство отключается. Возвращает число ошибок."""
+async def app_device_reserve_attempt(device_id: int, max_fails: int = 5) -> int | None:
+    """Занять попытку ввода PIN ДО проверки (атомарно: параллельные запросы не обходят лимит).
+    None — попыток не осталось (устройство отключается). Верный PIN обнуляет счётчик (app_device_rotate)."""
     async with pool.acquire() as conn:
         n = await conn.fetchval(
-            "UPDATE app_devices SET pin_failed = pin_failed + 1, "
-            "revoked_at = CASE WHEN pin_failed + 1 >= $2 THEN NOW() ELSE revoked_at END "
-            "WHERE id=$1 RETURNING pin_failed", device_id, max_fails)
-        return int(n or max_fails)
+            "UPDATE app_devices SET pin_failed = pin_failed + 1 WHERE id=$1 AND revoked_at IS NULL "
+            "AND pin_failed < $2 RETURNING pin_failed", device_id, max_fails)
+        if n is None:
+            await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE id=$1 AND revoked_at IS NULL", device_id)
+        return n
 
 
 async def app_device_set(device_id: int, *, biometric: bool | None = None, revoke: bool = False):
@@ -3732,6 +3757,75 @@ async def app_revoke_subject(kind: str, subject_id: int) -> None:
                            "AND revoked_at IS NULL", kind, subject_id)
         await conn.execute("UPDATE app_devices SET revoked_at=NOW() WHERE kind=$1 AND subject_id=$2 "
                            "AND revoked_at IS NULL", kind, subject_id)
+
+
+# ── Passkey (Face ID на сайте) ──
+async def passkey_challenge_save(purpose: str, challenge: str, user_id: int | None) -> int:
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM passkey_challenges WHERE expires_at < NOW() - INTERVAL '1 hour'")
+        return await conn.fetchval(
+            "INSERT INTO passkey_challenges (user_id, purpose, challenge, expires_at) "
+            "VALUES ($1,$2,$3, NOW() + INTERVAL '5 minutes') RETURNING id", user_id, purpose, challenge)
+
+
+async def passkey_challenge_take(challenge_id: int, purpose: str, user_id: int | None) -> str | None:
+    """Одноразово забрать вызов (не истёк, та же цель, тот же пользователь для регистрации)."""
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "UPDATE passkey_challenges SET used_at=NOW() WHERE id=$1 AND purpose=$2 AND used_at IS NULL "
+            "AND expires_at > NOW() AND user_id IS NOT DISTINCT FROM $3 RETURNING challenge",
+            challenge_id, purpose, user_id)
+
+
+async def passkey_add(user_id: int, credential_id: str, public_key: bytes, sign_count: int, name: str | None) -> int:
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "INSERT INTO passkeys (user_id, credential_id, public_key, sign_count, name) VALUES ($1,$2,$3,$4,$5) "
+            "ON CONFLICT (credential_id) DO NOTHING RETURNING id",
+            user_id, credential_id, public_key, sign_count, (name or "")[:60] or None)
+
+
+async def passkey_by_credential(credential_id: str) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM passkeys WHERE credential_id=$1 AND revoked_at IS NULL", credential_id)
+        return dict(row) if row else None
+
+
+async def passkey_used(passkey_id: int, sign_count: int):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE passkeys SET sign_count=$2, last_used_at=NOW() WHERE id=$1", passkey_id, sign_count)
+
+
+async def passkeys_of_user(user_id: int) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, credential_id, name, created_at, last_used_at FROM passkeys "
+            "WHERE user_id=$1 AND revoked_at IS NULL ORDER BY created_at", user_id)
+        return [dict(r) for r in rows]
+
+
+async def passkey_revoke(user_id: int, passkey_id: int) -> bool:
+    async with pool.acquire() as conn:
+        res = await conn.execute("UPDATE passkeys SET revoked_at=NOW() WHERE id=$1 AND user_id=$2 "
+                                 "AND revoked_at IS NULL", passkey_id, user_id)
+        return res.endswith(" 1")
+
+
+async def add_sms_attempt(phone: str, purpose: str):
+    """Отметка попытки ввода кода (строка sms_codes без кода — только для подсчёта)."""
+    async with pool.acquire() as conn:
+        await conn.execute("INSERT INTO sms_codes (phone, code, purpose, expires_at, used) "
+                           "VALUES ($1, '-', $2, NOW(), TRUE)", phone, purpose)
+
+
+async def burn_sms_codes(phone: str, purpose: str):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE sms_codes SET used=TRUE WHERE phone=$1 AND purpose=$2 AND used=FALSE", phone, purpose)
+
+
+async def clear_sms_attempts(phone: str, purpose: str):
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM sms_codes WHERE phone=$1 AND purpose=$2", phone, purpose)
 
 
 async def count_recent_codes(phone: str, purpose: str, minutes: int) -> int:

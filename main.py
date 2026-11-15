@@ -3763,12 +3763,16 @@ async def app_auth_verify(body: dict, request: Request):
     is_new = not (user and user["is_verified"])
     if is_new and not name:
         _app_err(400, "name_required", "Укажите имя", "Ismingizni kiriting")
-    if await db.count_recent_codes(phone, "app_attempt", 15) >= APP_CODE_MAX_FAILS:
+    # Попытку записываем ДО проверки кода, потом считаем: одновременные запросы не обходят лимит.
+    # Лимит исчерпан — действующий код сгорает (save_sms_code помечает прежние коды цели использованными).
+    await db.add_sms_attempt(phone, "app_attempt")
+    if await db.count_recent_codes(phone, "app_attempt", 15) > APP_CODE_MAX_FAILS:
+        await db.burn_sms_codes(phone, "app_login")
         _app_err(429, "rate_limited", "Много неверных кодов. Попробуйте через 15 минут",
                  "Ko'p noto'g'ri kod. 15 daqiqadan keyin urinib ko'ring")
     if not code or not await db.check_sms_code(phone, code, "app_login"):
-        await db.save_sms_code(phone, "x", "app_attempt", datetime.utcnow())
         _app_err(400, "code_invalid", "Неверный или просроченный код", "Kod noto'g'ri yoki eskirgan")
+    await db.clear_sms_attempts(phone, "app_attempt")
     if is_new:
         await db.create_user(phone, pwd_context.hash(secrets.token_urlsafe(24)[:72]), name)
         await db.verify_user(phone)
@@ -3859,14 +3863,19 @@ async def _app_device_login(device_token: str, pin: str | None, request: Request
     if pin is None:
         if not dev["biometric"]:
             _app_err(403, "biometric_off", "Face ID выключен — введите PIN", "Face ID o'chirilgan — PIN kiriting")
-    elif not await asyncio.to_thread(_scrypt_check, pin, dev["pin_hash"]):
-        fails = await db.app_device_fail(dev["id"], APP_PIN_MAX_FAILS)
-        left = APP_PIN_MAX_FAILS - fails
-        if left <= 0:
-            _app_err(401, "pin_locked", "PIN введён неверно 5 раз — войдите по коду",
-                     "PIN 5 marta noto'g'ri — kod bilan kiring")
-        _app_err(400, "pin_invalid", f"Неверный PIN, осталось попыток: {left}",
-                 f"PIN noto'g'ri, qolgan urinishlar: {left}", attempts_left=left)
+    else:
+        # Попытку занимаем до проверки — одновременные запросы не дадут перебрать больше 5 PIN.
+        used = await db.app_device_reserve_attempt(dev["id"], APP_PIN_MAX_FAILS)
+        locked = ("pin_locked", "PIN введён неверно 5 раз — войдите по коду", "PIN 5 marta noto'g'ri — kod bilan kiring")
+        if used is None:
+            _app_err(401, *locked)
+        if not await asyncio.to_thread(_scrypt_check, pin, dev["pin_hash"]):
+            left = APP_PIN_MAX_FAILS - used
+            if left <= 0:
+                await db.app_device_set(dev["id"], revoke=True)
+                _app_err(401, *locked)
+            _app_err(400, "pin_invalid", f"Неверный PIN, осталось попыток: {left}",
+                     f"PIN noto'g'ri, qolgan urinishlar: {left}", attempts_left=left)
     new_token = secrets.token_urlsafe(32)
     if not await db.app_device_rotate(dev["id"], _sha(new_token), used_prev=not dev["is_current"]):
         _app_err(401, "device_unknown", "Вход по PIN сброшен — войдите по коду", "PIN bilan kirish o'chirildi — kod bilan kiring")
@@ -3914,6 +3923,116 @@ async def app_pin_status(body: dict):
         label = f"{p[:6]} *** {p[-2:]}"
     return {"ok": True, "active": True, "kind": dev["kind"], "biometric": dev["biometric"],
             "label": label, "first_name": subject.get("first_name")}
+
+
+# ══════════════════════════════════════
+#  САЙТ: вход по Face ID / отпечатку — passkey (WebAuthn), 2026-11-15
+# ══════════════════════════════════════
+# Включается в кабинете (Настройки), дальше на форме входа «Войти по Face ID» — без пароля.
+# Ключ «discoverable»: телефон сам предлагает аккаунт, номер вводить не нужно.
+PASSKEY_RP_ID = os.getenv("PASSKEY_RP_ID", "artez.uz")
+PASSKEY_ORIGINS = [o.strip() for o in os.getenv(
+    "PASSKEY_ORIGINS", "https://artez.uz,https://www.artez.uz").split(",") if o.strip()]
+
+
+def _passkey_err(e: Exception):
+    logging.warning(f"passkey verify failed: {type(e).__name__}: {e}")
+    raise HTTPException(400, bi("Не удалось подтвердить Face ID. Попробуйте ещё раз",
+                                "Face ID tasdiqlanmadi. Qayta urinib ko'ring"))
+
+
+@app.post("/api/passkey/register/options")
+async def passkey_register_options(user=Depends(get_current_user)):
+    import webauthn
+    from webauthn.helpers.structs import (AuthenticatorSelectionCriteria, ResidentKeyRequirement,
+                                          UserVerificationRequirement, PublicKeyCredentialDescriptor)
+    from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
+    have = await db.passkeys_of_user(user["id"])
+    opts = webauthn.generate_registration_options(
+        rp_id=PASSKEY_RP_ID, rp_name="ARTEZ", user_id=str(user["id"]).encode(),
+        user_name=user["phone"], user_display_name=user.get("first_name") or user["phone"],
+        authenticator_selection=AuthenticatorSelectionCriteria(
+            resident_key=ResidentKeyRequirement.REQUIRED, user_verification=UserVerificationRequirement.REQUIRED),
+        exclude_credentials=[PublicKeyCredentialDescriptor(id=base64url_to_bytes(p["credential_id"])) for p in have])
+    cid = await db.passkey_challenge_save("register", bytes_to_base64url(opts.challenge), user["id"])
+    return {"ok": True, "challenge_id": cid, "options": _json.loads(webauthn.options_to_json(opts))}
+
+
+@app.post("/api/passkey/register/verify")
+async def passkey_register_verify(body: dict, user=Depends(get_current_user)):
+    import webauthn
+    from webauthn.helpers import base64url_to_bytes, bytes_to_base64url
+    challenge = await db.passkey_challenge_take(int(body.get("challenge_id") or 0), "register", user["id"])
+    if not challenge:
+        raise HTTPException(400, bi("Время вышло — нажмите ещё раз", "Vaqt tugadi — qayta bosing"))
+    try:
+        v = webauthn.verify_registration_response(
+            credential=body.get("credential"), expected_challenge=base64url_to_bytes(challenge),
+            expected_rp_id=PASSKEY_RP_ID, expected_origin=PASSKEY_ORIGINS, require_user_verification=True)
+    except Exception as e:
+        _passkey_err(e)
+    pid = await db.passkey_add(user["id"], bytes_to_base64url(v.credential_id), v.credential_public_key,
+                               v.sign_count, str(body.get("name") or "")[:60])
+    if not pid:
+        raise HTTPException(400, bi("Этот Face ID уже подключён", "Bu Face ID allaqachon ulangan"))
+    return {"ok": True, "id": pid}
+
+
+@app.post("/api/passkey/login/options")
+async def passkey_login_options():
+    import webauthn
+    from webauthn.helpers.structs import UserVerificationRequirement
+    from webauthn.helpers import bytes_to_base64url
+    opts = webauthn.generate_authentication_options(
+        rp_id=PASSKEY_RP_ID, user_verification=UserVerificationRequirement.REQUIRED)
+    cid = await db.passkey_challenge_save("login", bytes_to_base64url(opts.challenge), None)
+    return {"ok": True, "challenge_id": cid, "options": _json.loads(webauthn.options_to_json(opts))}
+
+
+@app.post("/api/passkey/login/verify")
+async def passkey_login_verify(body: dict):
+    import webauthn
+    from webauthn.helpers import base64url_to_bytes
+    cred = body.get("credential") or {}
+    challenge = await db.passkey_challenge_take(int(body.get("challenge_id") or 0), "login", None)
+    if not challenge:
+        raise HTTPException(400, bi("Время вышло — нажмите ещё раз", "Vaqt tugadi — qayta bosing"))
+    pk = await db.passkey_by_credential(str(cred.get("id") or "")) if isinstance(cred, dict) else None
+    if not pk:
+        raise HTTPException(401, bi("Этот Face ID не подключён к аккаунту. Войдите по паролю и включите его в настройках",
+                                    "Bu Face ID ulanmagan. Parol bilan kiring va sozlamalarda yoqing"))
+    try:
+        v = webauthn.verify_authentication_response(
+            credential=cred, expected_challenge=base64url_to_bytes(challenge), expected_rp_id=PASSKEY_RP_ID,
+            expected_origin=PASSKEY_ORIGINS, credential_public_key=bytes(pk["public_key"]),
+            credential_current_sign_count=int(pk["sign_count"]), require_user_verification=True)
+    except Exception as e:
+        _passkey_err(e)
+    user = await db.get_user_by_id(pk["user_id"])
+    if not user or not user["is_verified"]:
+        raise HTTPException(401, bi("Аккаунт недоступен", "Akkaunt mavjud emas"))
+    await db.passkey_used(pk["id"], v.new_sign_count)
+    asyncio.create_task(db.update_user_last_login(user["id"]))
+    return {"ok": True, "token": create_token(user["id"], user["phone"]), "user": {
+        "id": user["id"], "phone": user["phone"], "first_name": user["first_name"], "address": user["address"],
+        "car_plate": user["car_plate"],
+        "osago_expiry": user["osago_expiry"].isoformat() if user.get("osago_expiry") else None,
+        "must_change_password": bool(user.get("must_change_password"))}}
+
+
+@app.get("/api/passkey/list")
+async def passkey_list(user=Depends(get_current_user)):
+    rows = await db.passkeys_of_user(user["id"])
+    return {"ok": True, "passkeys": [{"id": r["id"], "name": r["name"], "created_at": r["created_at"].isoformat(),
+                                      "last_used_at": r["last_used_at"].isoformat() if r["last_used_at"] else None}
+                                     for r in rows]}
+
+
+@app.post("/api/passkey/{passkey_id}/delete")
+async def passkey_delete(passkey_id: int, user=Depends(get_current_user)):
+    if not await db.passkey_revoke(user["id"], passkey_id):
+        raise HTTPException(404, "Не найдено")
+    return {"ok": True}
 
 
 @app.post("/api/login")
