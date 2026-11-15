@@ -116,6 +116,7 @@ async def startup():
     await db.ensure_sms_dispatch_table()
     await db.ensure_sms_operator_prices()
     asyncio.create_task(_sms_dispatch_worker())
+    asyncio.create_task(_app_push_worker())
     # Webhook не нужен — бот работает в режиме polling (ARTEZ-BOT сервис на Railway)
     # if BOT_TOKEN and APP_URL:
     #     asyncio.create_task(_set_tg_webhook())
@@ -3924,11 +3925,95 @@ async def app_delete_account(cur=Depends(_app_current)):
         _app_err(403, "staff_account", "Аккаунт сотрудника удаляет администратор", "Xodim akkauntini administrator o'chiradi")
     uid = cur["subject"]["id"]
     await db.app_revoke_subject("client", uid)
+    await db.app_push_revoke_subject("client", uid)
     try:
         await db.delete_site_user(uid)
     except Exception as e:
         logging.error(f"app delete account {uid}: {type(e).__name__}: {e}")
         _app_err(500, "server", "Не удалось удалить аккаунт. Напишите в поддержку", "Akkauntni o'chirib bo'lmadi. Qo'llab-quvvatlashga yozing")
+    return {"ok": True}
+
+
+# ── Push-уведомления в приложение (Expo Push → APNs / FCM) ──
+EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send"
+# Какие смены статуса сообщаем клиенту (сушка/упаковка — без уведомления, чтобы не надоедать).
+APP_PUSH_STATUS = {
+    "confirmed": ("Заказ подтверждён — скоро заберём ковры", "Buyurtma tasdiqlandi — tez orada gilamlarni olib ketamiz"),
+    "pickup":    ("Курьер едет за вашими коврами", "Kuryer gilamlaringizni olib ketishga kelmoqda"),
+    "received":  ("Ковры в мастерской — скоро замер и стирка", "Gilamlar ustaxonada — tez orada o'lchash va yuvish"),
+    "washing":   ("Ваши ковры стираются", "Gilamlaringiz yuvilmoqda"),
+    "ready":     ("Заказ готов! Скоро привезём", "Buyurtma tayyor! Tez orada yetkazamiz"),
+    "delivery":  ("Курьер везёт ваш заказ", "Kuryer buyurtmangizni olib kelmoqda"),
+    "delivered": ("Заказ доставлен. Спасибо, что выбрали ARTEZ!", "Buyurtma yetkazildi. ARTEZ ni tanlaganingiz uchun rahmat!"),
+    "cancelled": ("Заказ отменён", "Buyurtma bekor qilindi"),
+}
+
+
+async def _expo_send(messages: list[dict]) -> list[dict]:
+    """Отправка в Expo пачками по 100; квитанции в том же порядке. Сбой сети → [] (событие уже помечено)."""
+    out: list[dict] = []
+    try:
+        async with aiohttp.ClientSession() as s:
+            for i in range(0, len(messages), 100):
+                chunk = messages[i:i + 100]
+                async with s.post(EXPO_PUSH_URL, json=chunk, timeout=aiohttp.ClientTimeout(total=15),
+                                  headers={"Accept": "application/json"}) as r:
+                    data = await r.json(content_type=None)
+                    out.extend((data or {}).get("data") or [{"status": "error"}] * len(chunk))
+    except Exception as e:
+        logging.warning(f"expo push: {type(e).__name__}: {e}")
+    return out
+
+
+async def _app_push_worker():
+    """Каждые 10 с: новые смены статуса заказов → push на телефоны клиента (по номеру заказа)."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            for ev in await db.take_order_status_events():
+                text = APP_PUSH_STATUS.get(ev["new_status"] or "")
+                if not text or not ev["client_phone"]:
+                    await db.mark_order_status_event(ev["id"], "skip")
+                    continue
+                tokens = await db.app_push_tokens_for_phone(ev["client_phone"])
+                if not tokens:
+                    await db.mark_order_status_event(ev["id"], "no_app")
+                    continue
+                msgs = [{
+                    "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
+                    "title": (f"ARTEZ · Buyurtma №{ev['order_num']}" if t["lang"] == "uz" else f"ARTEZ · Заказ №{ev['order_num']}"),
+                    "body": text[1] if t["lang"] == "uz" else text[0],
+                    "data": {"kind": "order_status", "order_num": ev["order_num"], "status": ev["new_status"]},
+                } for t in tokens]
+                receipts = await _expo_send(msgs)
+                ok = 0
+                for t, rc in zip(tokens, receipts):
+                    if rc.get("status") == "ok":
+                        ok += 1
+                    elif (rc.get("details") or {}).get("error") == "DeviceNotRegistered":
+                        await db.app_push_unregister(t["token"])
+                await db.mark_order_status_event(ev["id"], f"sent {ok}/{len(tokens)}")
+        except Exception as e:
+            logging.warning(f"_app_push_worker: {type(e).__name__}: {e}")
+        await asyncio.sleep(10)
+
+
+@app.post("/api/app/push/register")
+async def app_push_register(body: dict, cur=Depends(_app_current)):
+    token = str(body.get("token") or "")
+    if not re.match(r"^Expo(nent)?PushToken\[[A-Za-z0-9_\-]{10,}\]$", token):
+        _app_err(400, "validation", "Неверный токен уведомлений", "Bildirishnoma tokeni noto'g'ri")
+    await db.app_push_register(cur["kind"], cur["subject"]["id"], token, str(body.get("platform") or ""),
+                               "uz" if body.get("lang") == "uz" else "ru")
+    return {"ok": True}
+
+
+@app.post("/api/app/push/unregister")
+async def app_push_unregister(body: dict):
+    """Выход из аккаунта: этот телефон больше не получает уведомления (токен знает только сам телефон)."""
+    token = str(body.get("token") or "")
+    if token:
+        await db.app_push_unregister(token)
     return {"ok": True}
 
 

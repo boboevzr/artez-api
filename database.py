@@ -799,6 +799,47 @@ async def create_tables():
             revoked_at    TIMESTAMPTZ
         )""",
         "CREATE INDEX IF NOT EXISTS idx_passkeys_user ON passkeys(user_id) WHERE revoked_at IS NULL",
+        # Push в приложение (2026-11-15): токены Expo телефонов и события смены статуса заказа.
+        # Событие пишет триггер БД — статус меняют и API, и бот (своё подключение к БД), а
+        # уведомление должно уйти в любом случае. Рассылает _app_push_worker в API.
+        """CREATE TABLE IF NOT EXISTS app_push_tokens (
+            id           BIGSERIAL PRIMARY KEY,
+            kind         VARCHAR(10) NOT NULL,
+            subject_id   INTEGER NOT NULL,
+            token        TEXT NOT NULL UNIQUE,
+            platform     VARCHAR(10),
+            lang         VARCHAR(4),
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            revoked_at   TIMESTAMPTZ
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_app_push_subject ON app_push_tokens(kind, subject_id) WHERE revoked_at IS NULL",
+        """CREATE TABLE IF NOT EXISTS order_status_events (
+            id           BIGSERIAL PRIMARY KEY,
+            order_id     INTEGER NOT NULL,
+            order_num    TEXT,
+            client_phone TEXT,
+            old_status   TEXT,
+            new_status   TEXT,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            sent_at      TIMESTAMPTZ,
+            result       TEXT
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_order_status_events_unsent ON order_status_events(id) WHERE sent_at IS NULL",
+        """CREATE OR REPLACE FUNCTION artez_order_status_event() RETURNS trigger AS $$
+           BEGIN
+             IF NEW.status IS DISTINCT FROM OLD.status THEN
+               INSERT INTO order_status_events (order_id, order_num, client_phone, old_status, new_status)
+               VALUES (NEW.id, NEW.order_num, NEW.client_phone, OLD.status, NEW.status);
+             END IF;
+             RETURN NEW;
+           END $$ LANGUAGE plpgsql""",
+        """DO $$ BEGIN
+             IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_order_status_event') THEN
+               CREATE TRIGGER trg_order_status_event AFTER UPDATE OF status ON orders
+               FOR EACH ROW EXECUTE FUNCTION artez_order_status_event();
+             END IF;
+           END $$""",
         """CREATE TABLE IF NOT EXISTS passkey_challenges (
             id         BIGSERIAL PRIMARY KEY,
             user_id    INTEGER,
@@ -3760,6 +3801,55 @@ async def app_revoke_subject(kind: str, subject_id: int) -> None:
         if kind == "client":   # и Face ID на сайте (passkey)
             await conn.execute("UPDATE passkeys SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL",
                                subject_id)
+
+
+# ── Push в приложение ──
+async def app_push_register(kind: str, subject_id: int, token: str, platform: str | None, lang: str | None):
+    """Токен телефона → этот человек (если телефоном раньше пользовался другой — токен переходит)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO app_push_tokens (kind, subject_id, token, platform, lang) VALUES ($1,$2,$3,$4,$5) "
+            "ON CONFLICT (token) DO UPDATE SET kind=EXCLUDED.kind, subject_id=EXCLUDED.subject_id, "
+            "platform=EXCLUDED.platform, lang=EXCLUDED.lang, last_seen_at=NOW(), revoked_at=NULL",
+            kind, subject_id, token[:200], (platform or "")[:10] or None, (lang or "")[:4] or None)
+
+
+async def app_push_unregister(token: str):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE app_push_tokens SET revoked_at=NOW() WHERE token=$1 AND revoked_at IS NULL", token)
+
+
+async def app_push_revoke_subject(kind: str, subject_id: int):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE app_push_tokens SET revoked_at=NOW() WHERE kind=$1 AND subject_id=$2 "
+                           "AND revoked_at IS NULL", kind, subject_id)
+
+
+async def app_push_tokens_for_phone(phone: str) -> list[dict]:
+    """Токены клиента по номеру телефона заказа (users.phone)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT t.token, t.lang FROM app_push_tokens t JOIN users u ON u.id = t.subject_id "
+            "WHERE t.kind='client' AND t.revoked_at IS NULL AND u.phone=$1", phone)
+        return [dict(r) for r in rows]
+
+
+async def take_order_status_events(limit: int = 50) -> list[dict]:
+    """Забрать новые события (помечаются отправленными сразу — уведомление не уйдёт дважды,
+    даже если API запущен в нескольких копиях). Старше суток — не шлём (устарели)."""
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE order_status_events SET sent_at=NOW(), result='stale' "
+                           "WHERE sent_at IS NULL AND created_at < NOW() - INTERVAL '1 day'")
+        rows = await conn.fetch(
+            "UPDATE order_status_events SET sent_at=NOW() WHERE id IN ("
+            " SELECT id FROM order_status_events WHERE sent_at IS NULL ORDER BY id "
+            " LIMIT $1 FOR UPDATE SKIP LOCKED) RETURNING *", limit)
+        return [dict(r) for r in rows]
+
+
+async def mark_order_status_event(event_id: int, result: str):
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE order_status_events SET result=$2 WHERE id=$1", event_id, result[:200])
 
 
 # ── Passkey (Face ID на сайте) ──
