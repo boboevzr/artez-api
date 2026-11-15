@@ -19,6 +19,7 @@ from passlib.context import CryptContext
 from jose import jwt, JWTError
 
 import database as db
+from translit import to_cyrl
 import receipt
 
 logging.basicConfig(level=logging.INFO)
@@ -3984,6 +3985,13 @@ APP_PUSH_STATUS = {
 }
 
 
+def _push_lang_text(code: str | None, ru: str, uz: str) -> str:
+    """Язык токена: "ru" | "uz" | "uzc" (Ўзбекча, кирилл — узбекский текст через транслит)."""
+    if code == "uzc":
+        return to_cyrl(uz)
+    return uz if code == "uz" else ru
+
+
 async def _expo_send(messages: list[dict]) -> list[dict]:
     """Отправка в Expo пачками по 100; квитанции в том же порядке. Сбой сети → [] (событие уже помечено)."""
     out: list[dict] = []
@@ -4016,8 +4024,8 @@ async def _app_push_worker():
                     continue
                 msgs = [{
                     "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
-                    "title": (f"ARTEZ · Buyurtma №{ev['order_num']}" if t["lang"] == "uz" else f"ARTEZ · Заказ №{ev['order_num']}"),
-                    "body": text[1] if t["lang"] == "uz" else text[0],
+                    "title": _push_lang_text(t["lang"], f"ARTEZ · Заказ №{ev['order_num']}", f"ARTEZ · Buyurtma №{ev['order_num']}"),
+                    "body": _push_lang_text(t["lang"], text[0], text[1]),
                     "data": {"kind": "order_status", "order_num": ev["order_num"], "status": ev["new_status"]},
                 } for t in tokens]
                 receipts = await _expo_send(msgs)
@@ -4039,7 +4047,7 @@ async def app_push_register(body: dict, cur=Depends(_app_current)):
     if not re.match(r"^Expo(nent)?PushToken\[[A-Za-z0-9_\-]{10,}\]$", token):
         _app_err(400, "validation", "Неверный токен уведомлений", "Bildirishnoma tokeni noto'g'ri")
     await db.app_push_register(cur["kind"], cur["subject"]["id"], token, str(body.get("platform") or ""),
-                               "uz" if body.get("lang") == "uz" else "ru")
+                               {"uz": "uz", "uz_cyrl": "uzc"}.get(body.get("lang"), "ru"))
     return {"ok": True}
 
 
@@ -6002,17 +6010,24 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             tmpl = await db.get_tg_status_message(status)
             if tmpl and tmpl.get("enabled"):
                 # Определяем язык клиента — пробуем найти в таблице clients
+                # Язык выбирают в боте → clients.lang (колонку language никто не пишет —
+                # из-за этого до 15.11.2026 все получали RU). uz_cyrl = узбекский шаблон + транслит.
                 lang = "ru"
                 try:
                     async with db.pool.acquire() as _c:
                         row = await _c.fetchrow(
-                            "SELECT language FROM clients WHERE tg_id=$1", int(tg_id))
-                        if row and row["language"] in ("uz", "ru"):
-                            lang = row["language"]
+                            "SELECT COALESCE(NULLIF(lang,''), language) AS l FROM clients WHERE tg_id=$1", int(tg_id))
+                        if row and row["l"] in ("uz", "ru", "uz_cyrl"):
+                            lang = row["l"]
                 except Exception:
                     pass
+                cyrl = lang == "uz_cyrl"
+                if cyrl:
+                    lang = "uz"
 
                 raw = tmpl.get(f"message_{lang}") or tmpl.get("message_ru") or ""
+                if lang == "uz" and not tmpl.get("message_uz"):
+                    lang, cyrl = "ru", False
                 if raw:
                     STATUS_EMOJI = {
                         "new":"🆕","confirmed":"✅","pickup":"🚗","received":"📦",
@@ -6025,9 +6040,15 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                         "packing":"Упаковка","ready":"Готов","delivery":"Доставка",
                         "delivered":"Доставлен","cancelled":"Отменён",
                     }
+                    STATUS_NAME_UZ = {
+                        "new":"Yangi","confirmed":"Tasdiqlandi","pickup":"Olib ketish",
+                        "received":"Ustaxonada","washing":"Yuvilmoqda","drying":"Quritilmoqda",
+                        "packing":"Qadoqlanmoqda","ready":"Tayyor","delivery":"Yetkazilmoqda",
+                        "delivered":"Yetkazildi","cancelled":"Bekor qilindi",
+                    }
                     text = raw.format(
                         order_num  = order.get("order_num", ""),
-                        status     = STATUS_NAME_RU.get(status, status),
+                        status     = (STATUS_NAME_UZ if lang == "uz" else STATUS_NAME_RU).get(status, status),
                         status_emoji = STATUS_EMOJI.get(status, ""),
                         client_name  = order.get("client_first_name", ""),
                         service      = order.get("service", ""),
@@ -6035,6 +6056,8 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                         pickup_date  = str(order.get("pickup_date", "") or ""),
                         phone        = order.get("client_phone", ""),
                     )
+                    if cyrl:
+                        text = to_cyrl(text)
                     async with aiohttp.ClientSession() as session:
                         await session.post(
                             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
