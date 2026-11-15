@@ -77,9 +77,11 @@ app.add_middleware(
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     logging.error(f"422 on {request.method} {request.url.path}: {exc.errors()}")
+    # ctx.error — объект ValueError из field_validator, в JSON не превращается (раньше → 500 вместо 422)
+    errors = [{k: v for k, v in e.items() if k != "ctx"} for e in exc.errors()]
     return JSONResponse(
         status_code=422,
-        content={"detail": exc.errors()},
+        content={"detail": errors},
         headers={"Access-Control-Allow-Origin": "*"},
     )
 
@@ -951,6 +953,31 @@ class ResendCodeRequest(BaseModel):
 class AgentApplyRequest(BaseModel):
     branch: str = ""
 
+class OrderServiceLine(BaseModel):
+    service_key: str
+    type_key: str = ""
+    qty: int = 1
+
+    @field_validator("qty")
+    @classmethod
+    def validate_qty(cls, v):
+        return max(1, min(int(v or 1), 99))
+
+
+_LATLON_RE = re.compile(r"^\s*(-?\d{1,2}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$")
+
+
+def _clean_latlon(s: str) -> str:
+    """Координаты из приложения/сайта → «lat,lon» (5 знаков) или "" если мусор/вне диапазона."""
+    m = _LATLON_RE.match(s or "")
+    if not m:
+        return ""
+    la, lo = float(m.group(1)), float(m.group(2))
+    if not (-90 <= la <= 90 and -180 <= lo <= 180):
+        return ""
+    return f"{la:.5f},{lo:.5f}"
+
+
 class OrderRequest(BaseModel):
     first_name: str
     last_name: str = ""
@@ -973,8 +1000,17 @@ class OrderRequest(BaseModel):
     pickup_time: str = ""
     is_quick: bool = False
     total_price: int | None = None
-    source: str = "site"  # "site" or "bot"
+    source: str = "site"  # "site", "bot" или "app" (приложение — в лидах хранится как "site")
     client_tg_id: int | None = None
+    # 15.11.2026, приложение: несколько услуг сразу (аддитивно; сайт и бот шлют одну service/service_type)
+    services: list[OrderServiceLine] = []
+
+    @field_validator("services")
+    @classmethod
+    def validate_services(cls, v):
+        if len(v) > 20:
+            raise ValueError("Слишком много услуг в одной заявке")
+        return v
 
     @field_validator("phone")
     @classmethod
@@ -10636,6 +10672,35 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
     """Заявка с сайта/бота → сохраняется как лид для обработки сотрудниками."""
     full_name = f"{order.first_name} {order.last_name}".strip()
     note_parts = []
+    from_app = order.source == "app"
+    if from_app:
+        note_parts.append("📱 Из приложения")
+        # координаты из приложения — строго «lat,lon»; мусор не сохраняем
+        order.location = _clean_latlon(order.location)
+        order.delivery_location = _clean_latlon(order.delivery_location)
+    services_json = None
+    if order.services:
+        # несколько услуг (приложение): названия — только из таблицы услуг/вариантов, ключи проверяем
+        svc_rows = {s["key"]: s for s in await db.get_services()}
+        type_rows = {(t["service_key"], t["type_key"]): t for t in await db.get_service_types()}
+        services_json, short, full = [], [], []
+        for ln in order.services:
+            s = svc_rows.get(ln.service_key)
+            if not s:
+                raise HTTPException(status_code=400, detail="Неверная услуга")
+            t = type_rows.get((ln.service_key, ln.type_key)) if ln.type_key else None
+            if ln.type_key and not t:
+                raise HTTPException(status_code=400, detail="Неверный вариант услуги")
+            name = f"{(s.get('emoji') or '').strip()} {s['name_ru']}".strip()
+            services_json.append({"service_key": ln.service_key, "type_key": ln.type_key or "", "qty": ln.qty,
+                                  "name_ru": s["name_ru"], "type_ru": t["name_ru"] if t else ""})
+            short.append(f"{s['name_ru']} ×{ln.qty}")
+            full.append(f"{name} ×{ln.qty}" + (f" ({t['name_ru']})" if t else ""))
+        summary = ", ".join(short)
+        # leads.service — VARCHAR(100): краткая сводка; полный список — в примечании и services_json
+        order.service = summary if len(summary) <= 100 else summary[:97] + "…"
+        order.service_type = ""
+        note_parts.append("Услуги: " + "; ".join(full))
     if order.service_type: note_parts.append(f"Тип: {await _type_label_ru(order.service, order.service_type)}")
     if order.pickup_date:  note_parts.append(f"Дата: {order.pickup_date}")
     if order.pickup_time:  note_parts.append(f"Время: {order.pickup_time}")
@@ -10678,6 +10743,7 @@ async def create_order_from_site(order: OrderRequest, user=Depends(get_optional_
         "client_tg_id":  order.client_tg_id,
         "pickup_date":   order.pickup_date or "",
         "pickup_time":   order.pickup_time or "",
+        "services_json": services_json,
     })
     lead_code = (lead or {}).get("lead_code") or f"#{(lead or {}).get('id','?')}"
     if lead:

@@ -1321,6 +1321,11 @@ async def create_tables():
         ALTER TABLE leads ADD COLUMN IF NOT EXISTS pickup_time VARCHAR(100) DEFAULT '';
         """)
 
+    # ── Шаг 14b (15.11.2026): несколько услуг в заявке из приложения ───
+    # [{service_key, type_key, qty, name_ru, type_ru}] — чтобы позже подставить позиции при оформлении
+    async with pool.acquire() as c:
+        await c.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS services_json JSONB DEFAULT NULL")
+
     # ── Шаг 15b: tg_id водителя в платежах ──────────────────────────────
     async with pool.acquire() as c:
         await c.execute("""
@@ -4283,6 +4288,9 @@ async def create_lead(data: dict) -> dict:
             "UPDATE leads SET lead_num=$1, lead_code=$2 WHERE id=$3",
             lead_num, lead_code, rid
         )
+        if data.get("services_json"):
+            await conn.execute("UPDATE leads SET services_json=$1::jsonb WHERE id=$2",
+                               json.dumps(data["services_json"], ensure_ascii=False), rid)
         return dict(row) | {"lead_num": lead_num, "lead_code": lead_code}
 
 async def get_leads(status: str = None, branch: str = None,
