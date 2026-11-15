@@ -21,6 +21,7 @@ from jose import jwt, JWTError
 import database as db
 from translit import to_cyrl
 import receipt
+import pay  # онлайн-оплата PLUM + заявки на рассрочку (Э3, 2026-11-15)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -61,6 +62,7 @@ _eskiz_token   = ""  # кэш токена в памяти
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 app = FastAPI(title="ARTEZ API")
+app.include_router(pay.router)
 
 def bi(ru: str, uz: str) -> str:
     """Двуязычное сообщение для ошибок, видимых пользователю."""
@@ -124,6 +126,11 @@ async def startup():
     await db.ensure_sms_operator_prices()
     asyncio.create_task(_sms_dispatch_worker())
     asyncio.create_task(_app_push_worker())
+    try:
+        await pay.init()
+        asyncio.create_task(pay.worker())
+    except Exception as e:
+        logging.error(f"pay init: {type(e).__name__}: {e}")
     # Webhook не нужен — бот работает в режиме polling (ARTEZ-BOT сервис на Railway)
     # if BOT_TOKEN and APP_URL:
     #     asyncio.create_task(_set_tg_webhook())
@@ -3963,6 +3970,10 @@ async def app_delete_account(cur=Depends(_app_current)):
     await db.app_revoke_subject("client", uid)
     await db.app_push_revoke_subject("client", uid)
     try:
+        await pay.delete_all_cards(uid)  # сохранённые карты PLUM — убрать и у нас, и в банке
+    except Exception as e:
+        logging.warning(f"app delete account {uid}: cards: {type(e).__name__}")
+    try:
         await db.delete_site_user(uid)
     except Exception as e:
         logging.error(f"app delete account {uid}: {type(e).__name__}: {e}")
@@ -6706,6 +6717,8 @@ async def edit_order_payment(
         existing = await conn.fetchrow("SELECT * FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Платёж не найден")
+    if str(existing["method"] or "").startswith("online"):  # онлайн-оплата PLUM — только возвратом в «💳 Оплаты» (pay.py)
+        raise HTTPException(status_code=400, detail="Онлайн-оплату нельзя изменить — оформите возврат в разделе «💳 Оплаты»")
     can_edit = (staff.get("sub") == "admin"
                 or staff.get("can_manage_cash")
                 or existing.get("created_by_staff_id") == staff.get("id"))
@@ -8346,6 +8359,8 @@ async def delete_order_payment(
         existing = await conn.fetchrow("SELECT * FROM order_payments WHERE id=$1 AND order_id=$2", payment_id, order_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Платёж не найден")
+    if str(existing["method"] or "").startswith("online"):  # онлайн-оплата PLUM — только возвратом в «💳 Оплаты» (pay.py)
+        raise HTTPException(status_code=400, detail="Онлайн-оплату нельзя удалить — оформите возврат в разделе «💳 Оплаты»")
     can_delete = (staff.get("sub") == "admin"
                   or staff.get("can_manage_cash")
                   or existing.get("created_by_staff_id") == staff.get("id"))
