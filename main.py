@@ -3907,6 +3907,31 @@ async def app_pin_biometric(body: dict, cur=Depends(_app_current)):
     return {"ok": True, "biometric": bool(body.get("on"))}
 
 
+@app.post("/api/app/me/logout-all")
+async def app_logout_all(cur=Depends(_app_current)):
+    """«Выйти на всех устройствах»: все сессии приложения и все PIN/Face ID этого человека."""
+    if cur["kind"] == "staff":
+        await db.revoke_staff_sessions(cur["subject"]["id"], "app_logout_all")
+    await db.app_revoke_subject(cur["kind"], cur["subject"]["id"])
+    return {"ok": True}
+
+
+@app.post("/api/app/me/delete")
+async def app_delete_account(cur=Depends(_app_current)):
+    """Удаление аккаунта клиента из приложения (требование App Store / Google Play).
+    Удаляется вход (users, сессии, PIN, Face ID сайта); заказы остаются у ARTEZ — они по номеру телефона."""
+    if cur["kind"] != "client":
+        _app_err(403, "staff_account", "Аккаунт сотрудника удаляет администратор", "Xodim akkauntini administrator o'chiradi")
+    uid = cur["subject"]["id"]
+    await db.app_revoke_subject("client", uid)
+    try:
+        await db.delete_site_user(uid)
+    except Exception as e:
+        logging.error(f"app delete account {uid}: {type(e).__name__}: {e}")
+        _app_err(500, "server", "Не удалось удалить аккаунт. Напишите в поддержку", "Akkauntni o'chirib bo'lmadi. Qo'llab-quvvatlashga yozing")
+    return {"ok": True}
+
+
 @app.post("/api/app/pin/status")
 async def app_pin_status(body: dict):
     """Без входа: есть ли вход по PIN на этом телефоне и чей он (маска номера) — для экрана «Введите PIN»."""
