@@ -2483,7 +2483,10 @@ async def update_lead_status(lead_id: int, body: dict,
         scheduled_at_pre = body.get("scheduled_at")
         from datetime import datetime as _dt
         sched_pre = _dt.fromisoformat(scheduled_at_pre) if scheduled_at_pre and status == "callback" else None
+        _old = await db.get_lead_by_id(lead_id)
         await db.update_lead_status(lead_id, status, scheduled_at=sched_pre)
+        if (_old or {}).get("status") != status:   # тот же статус ещё раз — клиенту не повторяем
+            asyncio.create_task(_app_push_lead(lead_id, status))
     if status in ("converted", "lost"):
         await db.cancel_pending_lead_reminders(lead_id)
     # лог
@@ -4019,6 +4022,40 @@ async def _expo_send(messages: list[dict]) -> list[dict]:
     return out
 
 
+# Заявка (лид) — клиенту в приложение, когда менеджер начал работу (15.11.2026). «Оформлен» — не шлём:
+# дальше идут уведомления заказа (confirmed → …); «потерян» — не шлём (часто спам/дубль).
+APP_PUSH_LEAD = {
+    "contacted": ("Менеджер работает над вашей заявкой", "Menejer arizangiz ustida ishlamoqda"),
+    "callback":  ("Менеджер перезвонит вам в удобное время", "Menejer sizga qulay vaqtda qo'ng'iroq qiladi"),
+    "no_answer": ("Не смогли до вас дозвониться — позвоните 1221", "Sizga qo'ng'iroq qila olmadik — 1221 ga qo'ng'iroq qiling"),
+}
+
+
+async def _app_push_lead(lead_id: int, status: str):
+    text = APP_PUSH_LEAD.get(status)
+    if not text:
+        return
+    try:
+        lead = await db.get_lead_by_id(lead_id)
+        if not lead or not lead.get("client_phone"):
+            return
+        tokens = await db.app_push_tokens_for_phone(lead["client_phone"])
+        if not tokens:
+            return
+        code = lead.get("lead_code") or ""
+        receipts = await _expo_send([{
+            "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
+            "title": _push_lang_text(t["lang"], f"ARTEZ · Заявка {code}", f"ARTEZ · Ariza {code}"),
+            "body": _push_lang_text(t["lang"], text[0], text[1]),
+            "data": {"kind": "lead_status", "lead_code": code, "status": status},
+        } for t in tokens])
+        for t, rc in zip(tokens, receipts):
+            if (rc.get("details") or {}).get("error") == "DeviceNotRegistered":
+                await db.app_push_unregister(t["token"])
+    except Exception as e:
+        logging.warning(f"_app_push_lead {lead_id}: {type(e).__name__}: {e}")
+
+
 async def _app_push_worker():
     """Каждые 10 с: новые смены статуса заказов → push на телефоны клиента (по номеру заказа)."""
     await asyncio.sleep(20)
@@ -4920,6 +4957,12 @@ async def link_tg(req: LinkTgRequest):
 async def my_orders(user = Depends(get_current_user)):
     orders = await db.get_orders_by_phone(user["phone"])
     return {"orders": [dict(o) for o in orders]}
+
+
+@app.get("/api/my/leads")
+async def my_leads(user = Depends(get_current_user)):
+    """Заявки клиента, по которым менеджер ещё не оформил заказ (приложение «Мои заказы», кабинет сайта)."""
+    return {"leads": await db.get_client_leads(user["phone"])}
 
 
 @app.post("/api/orders/{order_num}/cancel")

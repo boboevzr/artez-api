@@ -1847,6 +1847,30 @@ async def set_config(key: str, value: str):
 # ══════════════════════════════════════
 #  ЗАКАЗЫ КЛИЕНТА (для личного кабинета)
 # ══════════════════════════════════════
+async def get_client_leads(phone: str):
+    """Заявки клиента, ещё не ставшие заказом (15.11.2026): клиент видит «менеджер работает над заявкой».
+    Оформленные (converted) не возвращаем — вместо них есть заказ; отменённые — только 3 дня.
+    Без note/звонков: там внутренние пометки сотрудников."""
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT lead_code, status, created_at, updated_at, service, services_json, city, address,
+                   delivery_address, location, delivery_location, pickup_date, pickup_time
+            FROM leads
+            WHERE client_phone=$1 AND status <> 'converted'
+              AND created_at > NOW() - INTERVAL '30 days'
+              AND (status <> 'lost' OR updated_at > NOW() - INTERVAL '3 days')
+            ORDER BY created_at DESC LIMIT 20
+        """, phone)
+        out = []
+        for r in rows:
+            d = dict(r)
+            sj = d.get("services_json")
+            d["services"] = json.loads(sj) if isinstance(sj, str) else (sj or [])
+            d.pop("services_json", None)
+            out.append(d)
+        return out
+
 async def get_orders_by_phone(phone: str):
     if not pool: return []
     async with pool.acquire() as conn:
