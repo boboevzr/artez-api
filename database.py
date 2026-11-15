@@ -2601,6 +2601,51 @@ async def save_service_size(service_key: str, name_ru: str, name_uz: str,
     return size_key
 
 
+async def apply_price_fixes_2026_11_15():
+    """Разовая правка прайса по решению владельца 15.11.2026 (выполняется один раз — флаг в config):
+    • Одеяло, большой, быстрый: 10 000 → 100 000 (опечатка; меняем только если всё ещё 10 000);
+    • Курпа, курпача: размеры «до 2 м» (50 000 / 80 000) и «до 2,5 м» (80 000 / 110 000) за шт.
+    Те же функции, что у admin.html (save_service_size / set_price) — данные как при ручном вводе."""
+    if not pool or await get_config("data_fix_2026_11_15") == "done":
+        return
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE prices SET price=100000, updated_at=NOW() WHERE service_key='mattress' "
+                           "AND type_key='express_bolshoy' AND price=10000")
+        has_sizes = await conn.fetchval("SELECT COUNT(*) FROM service_types WHERE service_key='korpa_korpacha' "
+                                        "AND size_key IS NOT NULL")
+        svc_exists = await conn.fetchval("SELECT COUNT(*) FROM services WHERE key='korpa_korpacha'")
+    if svc_exists and not has_sizes:
+        for name_ru, name_uz, std, exp in (("до 2 м", "2 m gacha", 50000, 80000),
+                                           ("до 2,5 м", "2,5 m gacha", 80000, 110000)):
+            size_key = await save_service_size("korpa_korpacha", name_ru, name_uz)
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT type_key, speed_key FROM service_types WHERE service_key='korpa_korpacha' "
+                                        "AND size_key=$1", size_key)
+            for r in rows:
+                await set_price("korpa_korpacha", r["type_key"], std if r["speed_key"] == "standard" else exp,
+                                unit_key="pcs", min_order=1, min_order_total=1)
+    # Правила приёма, сохранённые в админке со старым примером «13 000 … 130 000» —
+    # только эта фраза меняется на подстановку цены ковра из прайса (остальной текст не трогаем).
+    raw = await get_config("order_rules")
+    if raw and "13 000" in raw:
+        try:
+            import json as _j
+            rules = _j.loads(raw)
+            old = "при тарифе 13 000 сум за 1 м² минимальная стоимость любого заказа составит 130 000 сум"
+            new = "при тарифе {carpet_price} сум за 1 м² минимальная стоимость любого заказа составит {carpet_min_sum} сум"
+            changed = False
+            for r in rules if isinstance(rules, list) else []:
+                if isinstance(r, dict) and old in (r.get("text_ru") or ""):
+                    r["text_ru"] = r["text_ru"].replace(old, new)
+                    changed = True
+            if changed:
+                await set_config("order_rules", _j.dumps(rules, ensure_ascii=False))
+        except Exception as e:
+            logging.warning(f"order_rules price fix skipped: {e}")
+    await set_config("data_fix_2026_11_15", "done")
+    logging.info("price fix 2026-11-15 applied (mattress express_bolshoy, korpa sizes, order rules)")
+
+
 async def delete_service_size(service_key: str, size_key: str) -> int:
     """Удаляет пару вариантов размера и их цены. Позиции заказов хранят снимок
     (ключи/цену/минимумы) — на открытые заказы не влияет."""

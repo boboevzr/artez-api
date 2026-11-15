@@ -105,6 +105,10 @@ async def startup():
     await db.ensure_chat_templates()
     await db.ensure_expense_tables()
     await db.ensure_salary_ledger_table()
+    try:
+        await db.apply_price_fixes_2026_11_15()
+    except Exception as e:
+        logging.warning(f"price fix 2026-11-15: {type(e).__name__}: {e}")
     asyncio.create_task(_tg_reminder_worker())
     asyncio.create_task(_salary_accrual_worker())
     asyncio.create_task(_chat_timeout_worker())
@@ -3399,14 +3403,9 @@ async def get_prices():
     с размерами (db.get_public_prices) — admin видит всё через /api/admin/prices."""
     prices = await db.get_public_prices() if await db.get_all_prices() else {}
     if not prices:
-        # Дефолты на случай пустой таблицы
-        prices = {
-            "carpet":      {"standard": {"price": 13000, "unit_key": "m2", "min_order": 10}, "express": {"price": 18000, "unit_key": "m2", "min_order": 10}},
-            "carpet_home": {"standard": {"price": 15000, "unit_key": "m2", "min_order": 10}, "express": {"price": 20000, "unit_key": "m2", "min_order": 10}},
-            "sofa":        {"standard": {"price": 100000, "unit_key": "m2", "min_order": None}, "express": {"price": 150000, "unit_key": "m2", "min_order": None}},
-            "mattress":    {"standard": {"price": 30000, "unit_key": "m2", "min_order": None}, "express": {"price": 40000, "unit_key": "m2", "min_order": None}},
-            "curtains":    {"standard": {"price": 5000,  "unit_key": "m2", "min_order": None}, "express": {"price": 8000,  "unit_key": "m2", "min_order": None}},
-        }
+        # Раньше здесь отдавались «запасные» старые цены (13 000, 100 000…) — сайт принимал их
+        # за настоящие. Цены — только из таблицы прайса; нет данных — честно «недоступно» (2026-11-15).
+        raise HTTPException(status_code=503, detail=bi("Прайс временно недоступен", "Narxlar vaqtincha mavjud emas"))
     units = await db.get_all_units()
     units_dict = {u["key"]: dict(u) for u in units}
     return {"ok": True, "prices": prices, "units": units_dict}
@@ -4895,6 +4894,8 @@ async def my_order_items(order_num: str, user = Depends(get_current_user)):
         # Цена по прайсу — клиенту видна его скидка (решение 2026-10-10); причина скидки и
         # кто её поставил — внутренние, наружу не отдаются
         "list_price": it.get("list_price"),
+        # единица из снимка прайса: «шт» у дивана/подушки, «м²» у ковра (кабинет, приложение)
+        "unit_key": it.get("unit_key_snap") or "m2",
     } for it in billing["items"]]
     return {"ok": True, "items": safe, "groups": billing["groups"], "order_total": billing["order_total"]}
 
@@ -9975,7 +9976,7 @@ _DEFAULT_ORDER_RULES = [
     {
         "emoji": "📐",
         "title_ru": "УСЛОВИЯ МИНИМАЛЬНОГО ЗАКАЗА",
-        "text_ru": "Компания принимает заказы на профессиональную стирку ковровых покрытий объемом не менее 10 м². Если суммарный объем (общая площадь) всех ковров в заказе составляет менее 10 м², оплата все равно взимается клиентом в полном объеме как за 10 м². (Например: при тарифе 13 000 сум за 1 м² минимальная стоимость любого заказа составит 130 000 сум, даже если фактическая площадь изделия меньше). Если площадь отдельного ковра составляет менее 1 кв.м, при расчете стоимости она округляется и учитывается как 1 кв.м.",
+        "text_ru": "Компания принимает заказы на профессиональную стирку ковровых покрытий объемом не менее 10 м². Если суммарный объем (общая площадь) всех ковров в заказе составляет менее 10 м², оплата все равно взимается клиентом в полном объеме как за 10 м². (Например: при тарифе {carpet_price} сум за 1 м² минимальная стоимость любого заказа составит {carpet_min_sum} сум, даже если фактическая площадь изделия меньше). Если площадь отдельного ковра составляет менее 1 кв.м, при расчете стоимости она округляется и учитывается как 1 кв.м.",
         "title_uz": "MINIMAL BUYURTMA SHARTLARI",
         "text_uz": "Kompaniya gilamlarni professional yuvish uchun kamida 10 m² hajmdagi buyurtmalarni qabul qiladi. Agar buyurtmadagi barcha gilamlarning umumiy maydoni 10 m² dan kam bo'lsa, to'lov baribir 10 m² uchun to'liq miqdorda undiriladi."
     },
@@ -10165,7 +10166,24 @@ async def get_site_settings():
     result = {}
     for key in PUBLIC_KEYS:
         result[key] = await _get_cfg(key)
+    # Цена ковра в правилах приёма — из прайса, а не вписана текстом (2026-11-15)
+    if result.get("order_rules") and "{carpet_" in result["order_rules"]:
+        result["order_rules"] = await _fill_carpet_price(result["order_rules"])
     return {"ok": True, "settings": result}
+
+
+async def _fill_carpet_price(text: str) -> str:
+    """{carpet_price} / {carpet_min_sum} → «15 000» / «150 000» из прайса «Чистка ковра, стандарт»."""
+    try:
+        row = (await db.get_public_prices()).get("carpet", {}).get("standard") or {}
+        price = int(row.get("price") or 0)
+        min_total = float(row.get("min_order_total") or 10)
+    except Exception:
+        return text
+    if not price:
+        return text
+    fmt = lambda n: f"{int(round(n)):,}".replace(",", " ")
+    return text.replace("{carpet_price}", fmt(price)).replace("{carpet_min_sum}", fmt(price * min_total))
 
 
 class SiteSettings(BaseModel):
