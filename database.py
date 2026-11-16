@@ -3032,7 +3032,7 @@ async def get_admin_orders(status: str = None, statuses: list = None, branch: st
                    COUNT(*) OVER() AS total_count
             FROM orders o
             LEFT JOIN (
-                SELECT order_id, COUNT(*) AS cnt,
+                SELECT order_id, SUM(CASE WHEN unit_key_snap='pcs' AND COALESCE(actual_sqm, sqm, 0) >= 1 THEN ROUND(COALESCE(actual_sqm, sqm))::int ELSE 1 END) AS cnt,  -- кол-во вещей (шт — по количеству)
                        COUNT(*) FILTER (WHERE measure_status='corrected') AS corr,
                        COUNT(*) FILTER (WHERE measure_status IN ('pending','rejected')) AS pend
                 FROM order_items GROUP BY order_id
@@ -5569,7 +5569,15 @@ async def create_empty_items_by_service(order_id: int, service_counts: dict[str,
         else:
             snap = await resolve_price_snapshot(None, None, service) or {}
         price = snap.get("list_price") or 0
-        for _ in range(max(0, int(qty))):
+        n = max(0, int(qty))
+        if n and snap.get("unit_key_snap") == "pcs":
+            # Штучная услуга (16.11.2026, владелец): ОДНА позиция с количеством n (у «шт» кол-во
+            # хранится в sqm, сумма = n × цена), а не n позиций по 1. м² — по одной (каждую меряют).
+            row = await create_order_item(order_id, label, n, price, **snap, **extra)
+            if row:
+                result.append(row)
+            continue
+        for _ in range(n):
             row = await create_order_item(order_id, label, 0, price, **snap, **extra)
             if row:
                 result.append(row)
@@ -6627,7 +6635,7 @@ async def get_route(route_id: int) -> dict | None:
                    o.delivery_date, o.delivery_from, o.delivery_to, o.delivery_note,
                    o.total_price, o.prepaid_amount, o.payment_status,
                    o.discount_sum, o.delivery_discount, o.manual_discount, o.client_discount,
-                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
+                   COALESCE((SELECT SUM(CASE WHEN unit_key_snap='pcs' AND COALESCE(actual_sqm, sqm, 0) >= 1 THEN ROUND(COALESCE(actual_sqm, sqm))::int ELSE 1 END) FROM order_items WHERE order_id=o.id), 0)::int AS item_count,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id=o.id
                                 AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL)), 0) AS paid_amount
@@ -7857,7 +7865,7 @@ async def get_pending_debt_approvals() -> list:
                               WHERE order_id = o.id
                                 AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
                                      OR (method<>'cash' AND confirmed=TRUE))), 0) AS paid_amount,
-                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id = o.id), 0)::int AS item_count
+                   COALESCE((SELECT SUM(CASE WHEN unit_key_snap='pcs' AND COALESCE(actual_sqm, sqm, 0) >= 1 THEN ROUND(COALESCE(actual_sqm, sqm))::int ELSE 1 END) FROM order_items WHERE order_id = o.id), 0)::int AS item_count
             FROM debt_approval_requests dar
             LEFT JOIN orders o ON o.id = dar.order_id
             WHERE dar.status = 'pending'
@@ -7882,7 +7890,7 @@ async def get_order_channel_info(order_id: int) -> dict | None:
                    COALESCE(o.delivery_discount,0) AS delivery_discount,
                    COALESCE(o.manual_discount,0) AS manual_discount,
                    COALESCE(o.client_discount,0) AS client_discount,
-                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id),0)::int AS item_count,
+                   COALESCE((SELECT SUM(CASE WHEN unit_key_snap='pcs' AND COALESCE(actual_sqm, sqm, 0) >= 1 THEN ROUND(COALESCE(actual_sqm, sqm))::int ELSE 1 END) FROM order_items WHERE order_id=o.id),0)::int AS item_count,
                    COALESCE((SELECT SUM(amount) FROM order_payments
                               WHERE order_id=o.id
                                 AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
@@ -7965,7 +7973,7 @@ async def get_routes_today(branch: str | None = None) -> list:
                    COALESCE((SELECT SUM(amount) FROM order_payments WHERE order_id=o.id
                               AND ((method='cash' AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL))
                                    OR (method<>'cash' AND confirmed=TRUE))), 0) AS paid_amount,
-                   COALESCE((SELECT COUNT(*) FROM order_items WHERE order_id=o.id),0)::int AS item_count
+                   COALESCE((SELECT SUM(CASE WHEN unit_key_snap='pcs' AND COALESCE(actual_sqm, sqm, 0) >= 1 THEN ROUND(COALESCE(actual_sqm, sqm))::int ELSE 1 END) FROM order_items WHERE order_id=o.id),0)::int AS item_count
             FROM routes r
             LEFT JOIN staff s ON s.id = r.driver_id
             JOIN route_orders ro ON ro.route_id = r.id
