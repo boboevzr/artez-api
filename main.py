@@ -5011,17 +5011,29 @@ async def _refund_prepay(*, lead_id: int | None = None, order_id: int | None = N
                 txs = await c.fetch("SELECT id, amount, created_at, plum_tx_id FROM pay_tx WHERE kind='pay' AND purpose='prepay' "
                                     "AND status='paid' AND order_id=$1 ORDER BY id", order_id)
         today = _tash_date(datetime.now(timezone.utc))
+        processing = 0   # банк не ответил: возврат уже записан (pending), воркер pay доведёт его сам — не «вручную»
         for t in txs:
-            done = False
+            where = "pending"
             if t["plum_tx_id"] and _tash_date(t["created_at"]) == today:
                 try:
                     await pay.reverse_tx(t["id"], actor=actor, reason=f"auto: {why}"[:200])
-                    done = True
+                    where = "auto"
                 except Exception as e:  # банк отказал / возврат уже начат — вернут вручную
+                    if getattr(e, "code", "") == "plum_unavailable":
+                        where = "processing"
                     logging.warning(f"_refund_prepay tx={t['id']}: {type(e).__name__}: {e}")
-            out["auto" if done else "pending"] += int(t["amount"] or 0)
-        if out["auto"]:
-            await pay.notify(f"↩️ Предоплата {out['auto']:,} сум возвращена на карту автоматически — {why}".replace(",", " "))
+            amt = int(t["amount"] or 0)
+            if where == "processing":
+                processing += amt
+                out["auto"] += amt   # клиенту — «вернётся на карту»: деньги уже в пути
+            else:
+                out[where] += amt
+        if out["auto"] - processing:
+            await pay.notify(f"↩️ Предоплата {out['auto'] - processing:,} сум возвращена на карту автоматически — {why}".replace(",", " "))
+        if processing:
+            await pay.notify(f"↩️ Возврат предоплаты {processing:,} сум отправлен в банк, ответ ждём — {why}. "
+                             f"Проверьте через 5 минут: «💳 Оплаты» → Журнал. Вручную НЕ возвращать.".replace(",", " "))
+        out["processing"] = processing
         if out["pending"]:
             await pay.notify(f"↩️ НУЖНО ВЕРНУТЬ предоплату {out['pending']:,} сум — {why}. "
                              f"Админка → Оплата → «Кому вернуть деньги» → «Вернули вручную».".replace(",", " "))
