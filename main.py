@@ -2490,6 +2490,8 @@ async def update_lead_status(lead_id: int, body: dict,
         await db.update_lead_status(lead_id, status, scheduled_at=sched_pre)
         if (_old or {}).get("status") != status:   # тот же статус ещё раз — клиенту не повторяем
             asyncio.create_task(_app_push_lead(lead_id, status))
+            if status != "lost":   # «Потерян» — ниже, вместе с итогом возврата предоплаты
+                asyncio.create_task(_tg_lead_status(lead_id, status))
     if status in ("converted", "lost"):
         await db.cancel_pending_lead_reminders(lead_id)
     # лог
@@ -2518,6 +2520,7 @@ async def update_lead_status(lead_id: int, body: dict,
         who = f"{staff.get('first_name') or ''} {staff.get('last_name') or ''}".strip() or str(staff.get("sub") or "staff")
         refund = await _refund_prepay(lead_id=lead_id, actor=who,
                                       why=f"менеджер закрыл заявку {_old.get('lead_code') or lead_id} как «Потерян»")
+        asyncio.create_task(_tg_lead_status(lead_id, "lost", refund))
     return {"ok": True, "refund": refund}
 
 @app.get("/api/staff/my-notifications")
@@ -2791,8 +2794,9 @@ async def bulk_status_leads(body: dict, staff=Depends(require_perm("leads"))):
         await db.add_lead_call(int(lead_id), operator_id, action=f"status_{status}",
                                note=f"Массовая смена статуса")
         if _was and _was.get("status") not in ("lost", "converted"):   # предоплата по заявке — назад
-            await _refund_prepay(lead_id=int(lead_id), actor="bulk",
-                                 why=f"заявка {_was.get('lead_code') or lead_id} закрыта как «Потерян» (массово)")
+            _rf = await _refund_prepay(lead_id=int(lead_id), actor="bulk",
+                                       why=f"заявка {_was.get('lead_code') or lead_id} закрыта как «Потерян» (массово)")
+            asyncio.create_task(_tg_lead_status(int(lead_id), "lost", _rf))   # пишет, только если были деньги
     return {"ok": True, "updated": len(ids)}
 
 @app.post("/api/staff/orders/bulk-status")
@@ -4043,6 +4047,59 @@ APP_PUSH_LEAD = {
     "callback":  ("Менеджер перезвонит вам в удобное время", "Menejer sizga qulay vaqtda qo'ng'iroq qiladi"),
     "no_answer": ("Не смогли до вас дозвониться — позвоните 1221", "Sizga qo'ng'iroq qila olmadik — 1221 ga qo'ng'iroq qiling"),
 }
+
+
+async def _lead_client_tg(lead: dict) -> tuple[int | None, str]:
+    """Telegram клиента по заявке: client_tg_id заявки → users.tg_id → crm_clients.tg_id (по телефону); язык — clients.lang."""
+    tg = lead.get("client_tg_id")
+    phone = lead.get("client_phone") or ""
+    async with db.pool.acquire() as c:
+        if not tg and phone:
+            tg = await c.fetchval("SELECT tg_id FROM users WHERE phone=$1 AND tg_id IS NOT NULL LIMIT 1", phone)
+        if not tg and phone:
+            tg = await c.fetchval("SELECT tg_id FROM crm_clients WHERE phone=$1 AND tg_id IS NOT NULL LIMIT 1", phone)
+        lang = "ru"
+        if tg:
+            try:
+                lang = await c.fetchval("SELECT COALESCE(NULLIF(lang,''), language) FROM clients WHERE tg_id=$1", int(tg)) or "ru"
+            except Exception:
+                lang = "ru"
+    try:
+        return (int(tg) if tg else None), (lang if lang in ("ru", "uz", "uz_cyrl") else "ru")
+    except (TypeError, ValueError):
+        return None, "ru"
+
+
+async def _tg_lead_status(lead_id: int, status: str, refund: dict | None = None):
+    """Сообщение клиенту в Telegram при смене статуса заявки менеджером (16.11.2026, «да, Telegram» владельца).
+    Тексты — те же, что push в приложении; «Потерян» — только если по заявке была предоплата (что с деньгами)."""
+    try:
+        lead = await db.get_lead_by_id(lead_id)
+        if not lead or not BOT_TOKEN:
+            return
+        if status == "lost":
+            rf = refund or {}
+            if not (rf.get("auto") or rf.get("pending")):
+                return   # закрыта без денег — не пишем (часто спам/дубль)
+            if rf.get("auto"):
+                text = (f"Заявка закрыта. Предоплата {rf['auto']:,} сум возвращена на вашу карту".replace(",", " "),
+                        f"Ariza yopildi. {rf['auto']:,} so'm oldindan to'lov kartangizga qaytarildi".replace(",", " "))
+            else:
+                text = (f"Заявка закрыта. Предоплату {rf['pending']:,} сум вернём — менеджер свяжется с вами".replace(",", " "),
+                        f"Ariza yopildi. {rf['pending']:,} so'm oldindan to'lovni qaytaramiz — menejer siz bilan bog'lanadi".replace(",", " "))
+        else:
+            text = APP_PUSH_LEAD.get(status)
+            if not text:
+                return
+        tg, lang = await _lead_client_tg(dict(lead))
+        if not tg:
+            return
+        code = lead.get("lead_code") or ""
+        body = text[0] if lang == "ru" else (to_cyrl(text[1]) if lang == "uz_cyrl" else text[1])
+        head = f"ARTEZ · Заявка {code}" if lang == "ru" else (to_cyrl(f"ARTEZ · Ariza {code}") if lang == "uz_cyrl" else f"ARTEZ · Ariza {code}")
+        await send_tg(tg, f"{head}\n{body}")
+    except Exception as e:
+        logging.warning(f"_tg_lead_status {lead_id}: {type(e).__name__}: {e}")
 
 
 async def _app_push_lead(lead_id: int, status: str):
