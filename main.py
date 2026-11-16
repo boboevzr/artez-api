@@ -2453,6 +2453,10 @@ async def assign_lead(lead_id: int, body: dict = Body({}),
             note = f"Лид взят: {staff.get('first_name','')} {staff.get('last_name','')}".strip()
             staff_name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','')
             asyncio.create_task(_tg_mark_lead_taken(lead_id, staff_name, staff.get("gender", "")))
+            # впервые взята в работу — клиенту push и Telegram «Менеджер взял вашу заявку» (без имени, 16.11.2026)
+            if not row["assigned_to"]:
+                asyncio.create_task(_app_push_lead(lead_id, "taken"))
+                asyncio.create_task(_tg_lead_status(lead_id, "taken"))
         else:
             row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
             if not row:
@@ -4044,6 +4048,7 @@ async def _expo_send(messages: list[dict]) -> list[dict]:
 # Заявка (лид) — клиенту в приложение, когда менеджер начал работу (15.11.2026). «Оформлен» — не шлём:
 # дальше идут уведомления заказа (confirmed → …); «потерян» — не шлём (часто спам/дубль).
 APP_PUSH_LEAD = {
+    "taken":     ("Менеджер взял вашу заявку и скоро позвонит", "Menejer arizangizni oldi va tez orada qo'ng'iroq qiladi"),
     "contacted": ("Менеджер работает над вашей заявкой", "Menejer arizangiz ustida ishlamoqda"),
     "callback":  ("Менеджер перезвонит вам в удобное время", "Menejer sizga qulay vaqtda qo'ng'iroq qiladi"),
     "no_answer": ("Не смогли до вас дозвониться — позвоните 1221", "Sizga qo'ng'iroq qila olmadik — 1221 ga qo'ng'iroq qiling"),
