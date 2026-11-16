@@ -6120,6 +6120,12 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
                "pickup_type","self_pickup_discount","discount_sum","manual_discount","manual_discount_pct",
                "delivery_type","delivery_discount","delivery_discount_pct"}
     updates = {k: v for k, v in body.items() if k in allowed}
+    # Ручная скидка (сумма или %) — только тем, кому интерфейс показывает поле «Скидка» (16.11.2026):
+    # admin.html — админ; staff.html — вкладка «Оплата» карточки заказа (все роли с orders, КРОМЕ мойщика:
+    # у него своя карточка без оплаты). Мойщик прямым запросом скидку больше не ставит.
+    # Скидки самовывоза/доставки (discount_sum, delivery_discount) — как раньше (их шлёт staff сам при правке).
+    if ("manual_discount" in updates or "manual_discount_pct" in updates) and role == "washer":
+        raise HTTPException(status_code=403, detail="Нет права менять скидку заказа")
     # Ручная скидка в % (16.11.2026): «12,52» или 12.52, 0 < % ≤ 100, до 2 знаков; сумму считает сервер
     # (db.recalc_manual_discount_pct). Пусто/0 — % снят. Скидка суммой (manual_discount) снимает %.
     if "manual_discount_pct" in updates:
