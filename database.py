@@ -3909,6 +3909,14 @@ async def app_push_tokens_for_phone(phone: str) -> list[dict]:
         return [dict(r) for r in rows]
 
 
+async def app_push_tokens_for_staff(staff_id: int) -> list[dict]:
+    """Токены приложения сотрудника (вход «Я сотрудник»)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT token, lang FROM app_push_tokens WHERE kind='staff' AND revoked_at IS NULL AND subject_id=$1", staff_id)
+        return [dict(r) for r in rows]
+
+
 async def take_order_status_events(limit: int = 50) -> list[dict]:
     """Забрать новые события (помечаются отправленными сразу — уведомление не уйдёт дважды,
     даже если API запущен в нескольких копиях). Старше суток — не шлём (устарели)."""

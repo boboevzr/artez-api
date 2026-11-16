@@ -1787,6 +1787,8 @@ async def add_route_orders(route_id: int, body: dict, me=Depends(get_current_sta
         raise HTTPException(400, f"Заказы уже в активном маршруте: {names}")
     count = await db.add_orders_to_route(route_id, order_ids)
     await _auto_sync_route_channel(route_id)
+    if count:
+        asyncio.create_task(_app_push_route(route_id, added=count))   # водителю в приложение (16.11.2026)
     return {"ok": True, "added": count}
 
 @app.delete("/api/admin/routes/{route_id}/orders/{order_id}")
@@ -1814,6 +1816,7 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Маршрут не найден")
     if not route.get("driver_id"):
         raise HTTPException(status_code=400, detail="Водитель не назначен")
+    asyncio.create_task(_app_push_route(route_id))   # приложение водителя — даже если Telegram не указан (16.11.2026)
 
     # Получить tg_id водителя
     if not db.pool:
@@ -4106,6 +4109,35 @@ async def _tg_lead_status(lead_id: int, status: str, refund: dict | None = None)
         await send_tg(tg, f"{head}\n{body}")
     except Exception as e:
         logging.warning(f"_tg_lead_status {lead_id}: {type(e).__name__}: {e}")
+
+
+async def _app_push_route(route_id: int, added: int = 0):
+    """Водителю в приложение: «Новый адрес в маршруте» (добавили остановки) или «Маршрут на сегодня»
+    (отправили маршрут). Тап — экран «Маршрут». Нет приложения — ничего не делаем (Telegram — как раньше)."""
+    try:
+        route = await db.get_route(route_id)
+        if not route or not route.get("driver_id"):
+            return
+        tokens = await db.app_push_tokens_for_staff(int(route["driver_id"]))
+        if not tokens:
+            return
+        n = len(route.get("stops") or [])
+        if added:
+            title = ("🚗 Новый адрес в маршруте", "🚗 Marshrutda yangi manzil")
+            body = (f"Добавлено: {added} · всего остановок: {n}", f"Qo'shildi: {added} · jami to'xtash: {n}")
+        else:
+            title = ("🚗 Маршрут на сегодня", "🚗 Bugungi marshrut")
+            body = (f"{route.get('name') or ''} · остановок: {n}", f"{route.get('name') or ''} · to'xtash: {n}")
+        receipts = await _expo_send([{
+            "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
+            "title": _push_lang_text(t["lang"], *title), "body": _push_lang_text(t["lang"], *body),
+            "data": {"kind": "route", "route_id": route_id},
+        } for t in tokens])
+        for t, rc in zip(tokens, receipts):
+            if (rc.get("details") or {}).get("error") == "DeviceNotRegistered":
+                await db.app_push_unregister(t["token"])
+    except Exception as e:
+        logging.warning(f"_app_push_route {route_id}: {type(e).__name__}: {e}")
 
 
 async def _app_push_lead(lead_id: int, status: str):
@@ -6798,6 +6830,16 @@ async def upload_order_photo(
     note: str = Form(""),
     staff=Depends(get_current_staff),
 ):
+    # Водитель (приложение/staff) — только к заказам СВОЕГО маршрута за последние дни (16.11.2026);
+    # остальные роли — как раньше.
+    if staff.get("role") == "driver":
+        async with db.pool.acquire() as conn:
+            mine = await conn.fetchval(
+                "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
+                "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1",
+                order_id, staff["id"])
+        if not mine:
+            raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
     media_ch = await _get_media_channel()
     if not BOT_TOKEN or not media_ch:
         raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
