@@ -1255,7 +1255,9 @@ async def _measure_block(order_id: int, cur_status: str, new_status: str, stage:
     """Сколько позиций не замерено, если переход уводит заказ ЗА этап замера; 0 — можно."""
     stage = stage or await _measure_stage()
     si, ci, ni = _flow_idx(stage), _flow_idx(cur_status), _flow_idx(new_status)
-    if ni <= si or ci < 0 or ci > si:   # не за этап / откат / заказ уже был дальше этапа
+    # не за этап / откат / заказ уже был дальше этапа. Статус вне потока (cancelled) —
+    # проверяем как «до этапа» (fail closed): из «Отменён» сразу в «Готов» без замеров нельзя.
+    if ni <= si or ci > si:
         return 0
     items = await db.get_order_items(order_id)
     return sum(1 for i in items if (i.get("measure_status") or "pending") not in MEASURED_OK_STATUSES)
@@ -8896,6 +8898,10 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
     _o = await db.get_order_by_id(order_id)
     if not _o:
         raise HTTPException(status_code=404, detail="Заказ не найден")
+    # позиция должна быть из ЭТОГО заказа — иначе окно замера проверялось бы по чужому статусу
+    if not db.pool or not await db.pool.fetchval(
+            "SELECT 1 FROM order_items WHERE id=$1 AND order_id=$2", item_id, order_id):
+        raise HTTPException(status_code=404, detail="Позиция не найдена")
     _st = _o.get("status", "")
     if _st in ("delivered", "cancelled"):
         raise HTTPException(status_code=400, detail="Заказ закрыт — замер менять нельзя")
