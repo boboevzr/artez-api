@@ -43,7 +43,8 @@ OTP_WINDOW = timedelta(minutes=20)
 REVIEW_AFTER = timedelta(hours=24)
 REVIEW_GIVE_UP = timedelta(days=7)
 CARD_BRANDS = {"8600": "uzcard", "5614": "uzcard", "9860": "humo"}
-PREPAY_STATUSES = ("new", "confirmed", "pickup", "received")
+# 16.11: предоплата и в стирке/сушке/упаковке, пока замер не принят (раньше в этом промежутке платить было нечем)
+PREPAY_STATUSES = ("new", "confirmed", "pickup", "received", "washing", "drying", "packing")
 BALANCE_OPEN_STATUSES = ("received", "washing", "drying", "packing", "ready", "delivery", "delivered")
 MEASURED_OK = ("approved", "confirmed")
 DEFAULTS = {"pay_mode": "testers", "pay_prepay_amount": "100000", "pay_otpless_limit": "500000",
@@ -196,6 +197,11 @@ CREATE TABLE IF NOT EXISTS pay_installments (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_pay_installments_open ON pay_installments(order_id)
     WHERE status IN ('new','in_work');
+CREATE TABLE IF NOT EXISTS pay_net_notice (
+    order_id    INTEGER PRIMARY KEY,
+    net         INTEGER NOT NULL,
+    notified_at TIMESTAMPTZ DEFAULT NOW()
+);
 CREATE TABLE IF NOT EXISTS pay_due_push (
     order_id  INTEGER PRIMARY KEY,
     amount    INTEGER NOT NULL,
@@ -1041,7 +1047,7 @@ async def _due_pushes() -> None:
             if not user or not await bank_for(user):
                 continue
             m = await money(o)
-            if m["due"] < 1000 or last == m["due"] or m["open_tx"]:
+            if m["due"] < 1000 or last == m["due"] or m["open_tx"] or m["paid"] > 0:
                 continue
             tokens = await db.app_push_tokens_for_phone(o["client_phone"])
             async with db.pool.acquire() as c:  # сначала отметка — дважды одно и то же не уйдёт
@@ -1078,6 +1084,7 @@ async def worker() -> None:
             await _attach_lead_prepays()
             await _check_pending_refunds()
             await _due_pushes()
+            await _net_change_notices()
             async with db.pool.acquire() as c:
                 await c.execute("DELETE FROM pay_card_binds WHERE created_at < NOW() - INTERVAL '1 day'")
         except Exception as e:
@@ -1560,3 +1567,85 @@ async def adm_refund_perm(staff_id: int, body: dict = Body({}), a=Depends(_admin
         raise HTTPException(404, "Сотрудник не найден")
     await _log(a["name"], "refund_perm", f"staff {staff_id} → {on}")
     return {"ok": True, "value": on}
+
+
+# ══════════════════════════════════════
+#  Итог заказа изменился ПОСЛЕ оплаты (16.11) — клиенту push в приложение + Telegram
+# ══════════════════════════════════════
+NET_NOTICE_MIN = 1000   # меньше — не беспокоим
+
+
+async def _client_say(order: dict, ru: str, uz: str) -> None:
+    """Push на телефоны клиента (приложение) и сообщение в его Telegram — на языке клиента."""
+    import main
+    phone = order.get("client_phone") or ""
+    num = order.get("order_num") or ""
+    try:
+        tokens = await db.app_push_tokens_for_phone(phone) if phone else []
+        if tokens:
+            await main._expo_send([{
+                "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
+                "title": main._push_lang_text(t["lang"], f"ARTEZ · Заказ №{num}", f"ARTEZ · Buyurtma №{num}"),
+                "body": main._push_lang_text(t["lang"], ru, uz),
+                "data": {"kind": "pay_change", "order_num": num},
+            } for t in tokens])
+    except Exception as e:
+        log.warning("net notice push %s: %s", num, type(e).__name__)
+    try:
+        tg, lang = await main._lead_client_tg({"client_phone": phone})
+        if tg and main.BOT_TOKEN:
+            uzx = main.to_cyrl(uz) if lang == "uz_cyrl" else uz
+            head = f"ARTEZ · Заказ №{num}" if lang == "ru" else (main.to_cyrl(f"ARTEZ · Buyurtma №{num}") if lang == "uz_cyrl" else f"ARTEZ · Buyurtma №{num}")
+            await main.send_tg(tg, f"{head}\n{ru if lang == 'ru' else uzx}")
+    except Exception as e:
+        log.warning("net notice tg %s: %s", num, type(e).__name__)
+
+
+async def _net_change_notices() -> None:
+    """Заказы, по которым уже что-то внесено и замер принят: если итог изменился больше чем на 1000 — сообщить клиенту.
+    Первый раз только запоминаем итог (без сообщения). Доставленные/отменённые не трогаем."""
+    async with db.pool.acquire() as c:
+        rows = await c.fetch(
+            """SELECT o.* FROM orders o
+                WHERE o.status <> ALL($1::text[]) AND o.created_at > NOW() - INTERVAL '60 days'
+                  AND EXISTS (SELECT 1 FROM order_payments p WHERE p.order_id=o.id AND p.amount > 0
+                               AND NOT (p.confirmed=FALSE AND p.confirmed_at IS NOT NULL))
+                  AND EXISTS (SELECT 1 FROM order_items i WHERE i.order_id=o.id)
+                  AND NOT EXISTS (SELECT 1 FROM order_items i WHERE i.order_id=o.id
+                                   AND COALESCE(i.measure_status,'pending') <> ALL($2::text[]))
+                LIMIT 300""",
+            ["delivered", "cancelled"], list(MEASURED_OK))
+    for o in rows:
+        o = dict(o)
+        try:
+            m = await money(o)
+            if m["paid"] <= 0:
+                continue
+            async with db.pool.acquire() as c:
+                last = await c.fetchval("SELECT net FROM pay_net_notice WHERE order_id=$1", o["id"])
+                if last is None:
+                    await c.execute("INSERT INTO pay_net_notice (order_id, net) VALUES ($1,$2) ON CONFLICT (order_id) DO NOTHING",
+                                    o["id"], m["net"])
+                    continue
+                if abs(m["net"] - last) <= NET_NOTICE_MIN:
+                    continue
+                # сначала отметка (compare-and-set) — одно и то же не уйдёт дважды
+                moved = await c.fetchval("UPDATE pay_net_notice SET net=$2, notified_at=NOW() WHERE order_id=$1 AND net=$3 RETURNING order_id",
+                                         o["id"], m["net"], last)
+            if not moved:
+                continue
+            over = m["paid"] - m["net"]
+            if m["due"] >= 1000:
+                ru = f"Сумма заказа изменилась: теперь {_fmt(m['net'])} сум. Доплата {_fmt(m['due'])} сум — можно картой в приложении или курьеру"
+                uz = f"Buyurtma summasi o'zgardi: endi {_fmt(m['net'])} so'm. Qo'shimcha to'lov {_fmt(m['due'])} so'm — ilovada karta bilan yoki kuryerga"
+            elif over >= 1000:
+                ru = f"Сумма заказа изменилась: теперь {_fmt(m['net'])} сум. Вы внесли больше — вернём вам {_fmt(over)} сум"
+                uz = f"Buyurtma summasi o'zgardi: endi {_fmt(m['net'])} so'm. Siz ko'proq to'lagansiz — {_fmt(over)} so'm qaytaramiz"
+            else:
+                ru = f"Сумма заказа изменилась: теперь {_fmt(m['net'])} сум. Всё оплачено"
+                uz = f"Buyurtma summasi o'zgardi: endi {_fmt(m['net'])} so'm. Hammasi to'langan"
+            await _client_say(o, ru, uz)
+            if over >= 1000:
+                await notify(f"↩️ Переплата {_fmt(over)} сум — заказ {o['order_num']}: итог изменился после оплаты. Админка → 💳 Оплаты → «Кому вернуть»")
+        except Exception as e:
+            log.warning("net notice %s: %s", o.get("id"), type(e).__name__)
