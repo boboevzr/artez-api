@@ -10194,32 +10194,43 @@ async def driver_pay(
                 order_id, staff["id"])
             if not mine:
                 raise HTTPException(403, "Заказ не в вашем маршруте")
-        # одна оплата за раз по заказу: повтор ждёт первую и видит её
-        await conn.execute("SELECT pg_advisory_lock(hashtext('driver_pay'), $1)", order_id)
-        try:
-            dup = None
-            if key:
-                dup = await conn.fetchrow("SELECT * FROM order_payments WHERE order_id=$1 AND client_key=$2", order_id, key)
-            if not dup:
-                dup = await conn.fetchrow(
-                    "SELECT * FROM order_payments WHERE order_id=$1 AND created_by_staff_id=$2 AND method=$3 "
-                    "AND amount=$4 AND confirmed IS NOT TRUE AND confirmed_at IS NULL "
-                    "AND created_at > NOW() - INTERVAL '10 minutes' ORDER BY id DESC LIMIT 1",
-                    order_id, staff["id"], method, amount)
-            if dup:
-                return {"ok": True, "payment": dict(dup), "duplicate": True}
-            m = await pay.money(dict(order))
-            if amount > m["due"] + 1000:   # +1000 — округление сумм в интерфейсе
-                raise HTTPException(400, f"Сумма больше остатка к оплате ({m['due']:,} сум)".replace(",", " "))
-            name = _driver_name(staff)
-            row = await db.add_order_payment(order_id, amount, method, "delivery",
-                                             "Оплата при доставке (web)", name,
-                                             created_by_staff_id=staff["id"])
-            if key and row:
-                await conn.execute("UPDATE order_payments SET client_key=$2 WHERE id=$1", row["id"], key)
-                row = dict(row); row["client_key"] = key
-        finally:
-            await conn.execute("SELECT pg_advisory_unlock(hashtext('driver_pay'), $1)", order_id)
+    # Одна оплата за раз по заказу: атомарный захват orders.driver_pay_claim_at (UPDATE … RETURNING), без
+    # удержания соединения пула (advisory lock держал соединение и мог исчерпать пул). Повтор ждёт первую
+    # (до ~10 с, соединение не держит) и видит её; зависший захват истекает через 30 с.
+    got = False
+    for _ in range(50):
+        if await db.pool.fetchval(
+                "UPDATE orders SET driver_pay_claim_at=NOW() WHERE id=$1 AND (driver_pay_claim_at IS NULL "
+                "OR driver_pay_claim_at < NOW() - INTERVAL '30 seconds') RETURNING id", order_id):
+            got = True
+            break
+        await asyncio.sleep(0.2)
+    if not got:
+        raise HTTPException(409, "Оплата по этому заказу уже записывается — повторите через минуту")
+    try:
+        dup = None
+        if key:
+            dup = await db.pool.fetchrow("SELECT * FROM order_payments WHERE order_id=$1 AND client_key=$2", order_id, key)
+        if not dup:
+            dup = await db.pool.fetchrow(
+                "SELECT * FROM order_payments WHERE order_id=$1 AND created_by_staff_id=$2 AND method=$3 "
+                "AND amount=$4 AND confirmed IS NOT TRUE AND confirmed_at IS NULL "
+                "AND created_at > NOW() - INTERVAL '10 minutes' ORDER BY id DESC LIMIT 1",
+                order_id, staff["id"], method, amount)
+        if dup:
+            return {"ok": True, "payment": dict(dup), "duplicate": True}
+        m = await pay.money(dict(order))
+        if amount > m["due"] + 1000:   # +1000 — округление сумм в интерфейсе
+            raise HTTPException(400, f"Сумма больше остатка к оплате ({m['due']:,} сум)".replace(",", " "))
+        name = _driver_name(staff)
+        row = await db.add_order_payment(order_id, amount, method, "delivery",
+                                         "Оплата при доставке (web)", name,
+                                         created_by_staff_id=staff["id"])
+        if key and row:
+            await db.pool.execute("UPDATE order_payments SET client_key=$2 WHERE id=$1", row["id"], key)
+            row = dict(row); row["client_key"] = key
+    finally:
+        await db.pool.execute("UPDATE orders SET driver_pay_claim_at=NULL WHERE id=$1", order_id)
     if method == "cash":
         asyncio.create_task(_update_api_channel_stop(order_id))
     # card/transfer: push к менеджерам отправляется из upload_payment_receipt — после сохранения чека
