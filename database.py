@@ -1880,7 +1880,10 @@ async def get_orders_by_phone(phone: str):
         return await conn.fetch("""
             SELECT order_num, service, branch, city, address, status,
                    pickup_date, pickup_time, total_price, created_at,
-                   (SELECT COUNT(*) FROM order_items WHERE order_id=orders.id)::int AS item_count
+                   (SELECT COUNT(*) FROM order_items WHERE order_id=orders.id)::int AS item_count,
+                   -- «Замер проведён» клиенту: все позиции утверждены (16.11.2026)
+                   COALESCE((SELECT COUNT(*) > 0 AND bool_and(measure_status IN ('approved','confirmed'))
+                               FROM order_items WHERE order_id=orders.id), FALSE) AS measure_done
             FROM orders
             WHERE client_phone = $1
             ORDER BY created_at DESC
@@ -6493,29 +6496,32 @@ async def approve_item_measure(item_id: int) -> dict:
         """, item_id)
         return dict(row) if row else {}
 
-async def direct_approve_measure(item_id: int, width_cm: float, length_cm: float) -> dict:
+async def direct_approve_measure(item_id: int, width_cm: float, length_cm: float, by: int | None = None) -> dict:
+    """by — кто ввёл замер сам (direct_approve) → «Замерил»; None — не трогаем (правка при утверждении)."""
     if not pool: return {}
     sqm = round(width_cm * length_cm / 10000, 3)
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_items
                SET width_cm=$2, length_cm=$3, sqm=$4,
-                   measure_status='approved', reject_note=NULL
+                   measure_status='approved', reject_note=NULL,
+                   measure_submitted_by=COALESCE($5, measure_submitted_by)
              WHERE id=$1 RETURNING *
-        """, item_id, width_cm, length_cm, sqm)
+        """, item_id, width_cm, length_cm, sqm, by)
     if row:
         await recalc_client_discount(row["order_id"])
     return dict(row) if row else {}
 
-async def direct_approve_measure_qty(item_id: int, quantity: float) -> dict:
+async def direct_approve_measure_qty(item_id: int, quantity: float, by: int | None = None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE order_items
                SET width_cm=NULL, length_cm=NULL, sqm=$2,
-                   measure_status='approved', reject_note=NULL
+                   measure_status='approved', reject_note=NULL,
+                   measure_submitted_by=COALESCE($3, measure_submitted_by)
              WHERE id=$1 RETURNING *
-        """, item_id, round(quantity, 3))
+        """, item_id, round(quantity, 3), by)
     if row:
         await recalc_client_discount(row["order_id"])
     return dict(row) if row else {}
