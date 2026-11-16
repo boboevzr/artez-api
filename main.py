@@ -11303,11 +11303,22 @@ def _gen_chat_code() -> str:
 
 
 def _chat_clean_site_name(name: str) -> str:
-    """Имя из виджета сайта (не проверено): убираем «📱» и «из приложения», чтобы нельзя было выдать
-    себя за клиента приложения в списке чатов сотрудника."""
-    n = (name or "").replace("📱", "")
-    n = re.sub(r"[·\-–—,\s]*из\s+приложения", "", n, flags=re.IGNORECASE)
-    return n.strip()[:100]
+    """Имя из виджета сайта (не проверено). Пометку чата из приложения ставит сервер: «📱» В НАЧАЛЕ имени
+    (_chat_staff_name). Поэтому из имени с сайта убираем всё, чем её можно подделать:
+    после NFKC — невидимые/служебные символы (Cf: zero-width и т.п.), все эмодзи и значки (So/Sk/Cs, вариационные
+    селекторы), затем «из приложения» — в цикле, пока строка меняется. Обычные буквы, цифры, пробелы, точки, дефисы
+    остаются (имена клиентов — кириллица/латиница)."""
+    import unicodedata
+    n = unicodedata.normalize("NFKC", name or "")
+    n = "".join(ch for ch in n
+                if unicodedata.category(ch) not in ("Cf", "Cc", "Co", "Cs", "So", "Sk")
+                and not (0xFE00 <= ord(ch) <= 0xFE0F))
+    while True:
+        m2 = re.sub(r"[·\-–—,.\s]*из\s*прил[оo]жени[яe]", "", n, flags=re.IGNORECASE)
+        if m2 == n:
+            break
+        n = m2
+    return re.sub(r"\s+", " ", n).strip()[:100]
 
 
 def _chat_staff_name(s: dict) -> str:
