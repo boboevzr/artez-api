@@ -8264,19 +8264,25 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
         asyncio.create_task(send_web_push(drv_staff_id, "✅ Оплата подтверждена",
                                           f"Заказ #{order_id} · {int(float(row['amount'])):,} сум",
                                           order_id=order_id, push_type="delivery_reload"))
-    # Auto-deliver: если заказ в статусе "delivery" и долг погашен после подтверждения
+    # Auto-deliver: если заказ в статусе "delivery" и долг погашен после подтверждения.
+    # 16.11.2026: итог — как в карточке (позиции с минимумами — get_order_items_billing, минус скидки,
+    # округление вниз до 1000), а не сырая сумма позиций: иначе с минимумами заказ закрывался при недоплате,
+    # а с остатком < 1000 не закрывался.
     try:
         async with db.pool.acquire() as _c:
             o = await _c.fetchrow("""
-                SELECT o.status,
-                       COALESCE((SELECT SUM(COALESCE(sqm*price_per_sqm,0)) FROM order_items WHERE order_id=o.id),0) AS items_total,
+                SELECT o.status, o.total_price,
                        COALESCE(o.discount_sum,0)+COALESCE(o.delivery_discount,0)+COALESCE(o.manual_discount,0)+COALESCE(o.client_discount,0) AS disc,
                        COALESCE((SELECT SUM(amount) FROM order_payments
                                  WHERE order_id=o.id AND confirmed=TRUE),0) AS paid_conf
                 FROM orders o WHERE o.id=$1
             """, order_id)
         if o and o["status"] == "delivery":
-            debt_left = float(o["items_total"]) - float(o["disc"]) - float(o["paid_conf"])
+            _bill = await db.get_order_items_billing(order_id)
+            _base = float(_bill.get("order_total") or 0) if _bill.get("items") else float(o["total_price"] or 0)
+            _net = max(0.0, _base - float(o["disc"]))
+            _net -= _net % 1000
+            debt_left = _net - float(o["paid_conf"])
             if debt_left <= 0:
                 async with db.pool.acquire() as _c:
                     await _c.execute("UPDATE orders SET status='delivered',delivered_at=NOW() WHERE id=$1", order_id)
@@ -8417,6 +8423,15 @@ async def upload_payment_receipt(
     file: UploadFile = File(...),
     staff=Depends(get_current_staff),
 ):
+    # 16.11.2026: чек — только к платежу ЭТОГО заказа; прикрепляет автор платежа (водитель/сотрудник,
+    # создавший оплату) или кассир/менеджер/админ. Раньше можно было подменить чек любого платежа.
+    async with db.pool.acquire() as conn:
+        _p = await conn.fetchrow("SELECT order_id, created_by_staff_id FROM order_payments WHERE id=$1", payment_id)
+    if not _p or _p["order_id"] != order_id:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    if not (staff.get("sub") == "admin" or staff.get("role") in ("admin", "manager") or staff.get("can_manage_cash")
+            or (_p["created_by_staff_id"] and _p["created_by_staff_id"] == staff.get("id"))):
+        raise HTTPException(status_code=403, detail="Чек прикрепляет тот, кто принял оплату, или кассир")
     content = await file.read()
     ct = file.content_type or "image/jpeg"
     tg_method = "sendDocument" if not ct.startswith("image/") else "sendPhoto"
@@ -10092,14 +10107,57 @@ async def driver_pay(
     order_id: int,
     method: str = Body(..., embed=True),
     amount: float = Body(..., embed=True),
+    client_key: str = Body("", embed=True),
     staff=Depends(get_current_staff)
 ):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
     if method not in ("cash","card","transfer"): raise HTTPException(400, "Неверный метод")
-    name = _driver_name(staff)
-    row = await db.add_order_payment(order_id, amount, method, "delivery",
-                                     "Оплата при доставке (web)", name,
-                                     created_by_staff_id=staff["id"])
+    # 16.11.2026 (касса): заказ — из маршрута ЭТОГО водителя; сумма > 0 и не больше остатка;
+    # повтор (сбой связи, двойное нажатие) возвращает уже созданную оплату, а не вторую.
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Сумма — число")
+    if not (amount > 0) or amount != amount or amount > 1e10:
+        raise HTTPException(400, "Сумма должна быть больше 0")
+    key = re.sub(r"[^A-Za-z0-9_\-]", "", str(client_key or ""))[:64] or None
+    async with db.pool.acquire() as conn:
+        order = await conn.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
+        if not order:
+            raise HTTPException(404, "Заказ не найден")
+        if staff.get("role") != "admin":
+            mine = await conn.fetchval(
+                "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
+                "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1",
+                order_id, staff["id"])
+            if not mine:
+                raise HTTPException(403, "Заказ не в вашем маршруте")
+        # одна оплата за раз по заказу: повтор ждёт первую и видит её
+        await conn.execute("SELECT pg_advisory_lock(hashtext('driver_pay'), $1)", order_id)
+        try:
+            dup = None
+            if key:
+                dup = await conn.fetchrow("SELECT * FROM order_payments WHERE order_id=$1 AND client_key=$2", order_id, key)
+            if not dup:
+                dup = await conn.fetchrow(
+                    "SELECT * FROM order_payments WHERE order_id=$1 AND created_by_staff_id=$2 AND method=$3 "
+                    "AND amount=$4 AND confirmed IS NOT TRUE AND confirmed_at IS NULL "
+                    "AND created_at > NOW() - INTERVAL '10 minutes' ORDER BY id DESC LIMIT 1",
+                    order_id, staff["id"], method, amount)
+            if dup:
+                return {"ok": True, "payment": dict(dup), "duplicate": True}
+            m = await pay.money(dict(order))
+            if amount > m["due"] + 1000:   # +1000 — округление сумм в интерфейсе
+                raise HTTPException(400, f"Сумма больше остатка к оплате ({m['due']:,} сум)".replace(",", " "))
+            name = _driver_name(staff)
+            row = await db.add_order_payment(order_id, amount, method, "delivery",
+                                             "Оплата при доставке (web)", name,
+                                             created_by_staff_id=staff["id"])
+            if key and row:
+                await conn.execute("UPDATE order_payments SET client_key=$2 WHERE id=$1", row["id"], key)
+                row = dict(row); row["client_key"] = key
+        finally:
+            await conn.execute("SELECT pg_advisory_unlock(hashtext('driver_pay'), $1)", order_id)
     if method == "cash":
         asyncio.create_task(_update_api_channel_stop(order_id))
     # card/transfer: push к менеджерам отправляется из upload_payment_receipt — после сохранения чека

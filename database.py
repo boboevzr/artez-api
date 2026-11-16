@@ -534,6 +534,9 @@ async def create_tables():
         "ALTER TABLE cash_shifts ADD COLUMN IF NOT EXISTS status VARCHAR(20) DEFAULT 'closed'",
         "ALTER TABLE cash_shifts ADD COLUMN IF NOT EXISTS opened_by INTEGER REFERENCES staff(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
+        # 16.11.2026: ключ повтора оплаты водителя (приложение) — повтор POST /pay не создаёт вторую оплату
+        "ALTER TABLE order_payments ADD COLUMN IF NOT EXISTS client_key VARCHAR(64) DEFAULT NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_payments_client_key ON order_payments(order_id, client_key) WHERE client_key IS NOT NULL",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         # Расходы: источник выплаты (сейф / банк / наличные)
