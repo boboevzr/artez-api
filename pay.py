@@ -399,8 +399,24 @@ async def order_pay_info(order: dict, user) -> dict:
     async with db.pool.acquire() as c:
         inst = await c.fetchrow("SELECT id, status, created_at FROM pay_installments WHERE order_id=$1 "
                                 "ORDER BY id DESC LIMIT 1", order["id"])
+        # оплаты заказа для экрана клиента (приложение, 16.11): без персональных данных и примечаний сотрудников
+        prow = await c.fetch(
+            "SELECT amount, method, purpose, created_at FROM order_payments WHERE order_id=$1 "
+            "AND NOT (confirmed=FALSE AND confirmed_at IS NOT NULL) ORDER BY created_at, id", order["id"])
+    method_pub = {"cash": "cash", "card": "card", "transfer": "transfer", "online": "online", "online_test": "online"}
+    payments = [{"amount": int(float(p["amount"] or 0)),
+                 "method": method_pub.get(p["method"] or "", "other"),
+                 "kind": "refund" if float(p["amount"] or 0) < 0 else ("prepay" if p["purpose"] == "prepayment" else "balance"),
+                 "created_at": p["created_at"].isoformat() if p["created_at"] else None} for p in prow]
+    discounts = {k: int(float(order.get(k) or 0)) for k in ("client_discount", "discount_sum", "delivery_discount", "manual_discount")}
+    discounts["client_discount_pct"] = float(order.get("client_discount_pct") or 0)
+    discounts["client_discount_kind"] = order.get("client_discount_kind")
     return {
         "ok": True, "order_num": order["order_num"], "status": st,
+        # переплата (внесено больше итога) — только после замера, когда итог известен
+        "over": (max(0, m["paid"]) if st == "cancelled"
+                 else max(0, m["paid"] - m["net"]) if (m["measured"] or st in ("ready", "delivery", "delivered")) else 0),
+        "discounts": discounts, "payments": payments,
         "enabled": bank is not None, "test_bank": bank == "test",
         "net": m["net"], "paid": m["paid"], "due": m["due"], "measured": m["measured"],
         "can_pay": bool(bank) and can_balance, "can_prepay": bool(bank) and can_prepay, "prepay_amount": pre,
