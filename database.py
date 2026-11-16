@@ -1189,6 +1189,8 @@ async def create_tables():
             created_at    TIMESTAMPTZ  DEFAULT NOW()
         );
         CREATE INDEX IF NOT EXISTS idx_order_photos_order ON order_photos(order_id);
+        -- кто загрузил (id сотрудника) — удалить своё фото может автор (16.11.2026)
+        ALTER TABLE order_photos ADD COLUMN IF NOT EXISTS uploaded_by_staff_id INTEGER;
         """)
 
     # ── Шаг 6: оплата и касса ────────────────────────────────────────────
@@ -6058,13 +6060,14 @@ async def get_order_photos(order_id: int) -> list:
         return [dict(r) for r in rows]
 
 async def save_order_photo(order_id: int, tg_file_id: str, tg_file_type: str,
-                           photo_type: str, note: str, uploaded_by: str) -> dict:
+                           photo_type: str, note: str, uploaded_by: str,
+                           uploaded_by_staff_id: int | None = None) -> dict:
     if not pool: return {}
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO order_photos (order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by)
-            VALUES ($1,$2,$3,$4,$5,$6) RETURNING *
-        """, order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by)
+            INSERT INTO order_photos (order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by, uploaded_by_staff_id)
+            VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *
+        """, order_id, tg_file_id, tg_file_type, photo_type, note, uploaded_by, uploaded_by_staff_id)
         return dict(row) if row else {}
 
 async def delete_order_photo(photo_id: int) -> bool:

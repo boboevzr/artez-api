@@ -6988,11 +6988,20 @@ async def upload_order_photo(
         file_id = msg[tg_type]["file_id"]
 
     name = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login","")
-    photo = await db.save_order_photo(order_id, file_id, tg_type, photo_type, note, name)
+    photo = await db.save_order_photo(order_id, file_id, tg_type, photo_type, note, name,
+                                      uploaded_by_staff_id=staff.get("id"))
     return {"ok": True, "photo": photo}
 
 @app.delete("/api/admin/orders/{order_id}/photos/{photo_id}")
-async def delete_order_photo(order_id: int, photo_id: int, _=Depends(get_current_staff)):
+async def delete_order_photo(order_id: int, photo_id: int, staff=Depends(get_current_staff)):
+    # Раньше любой сотрудник удалял любое фото по id, не сверяя заказ (16.11.2026): теперь фото — только этого
+    # заказа; удалить — админ/менеджер или автор фото (старые фото без автора — только админ/менеджер).
+    photo = await db.get_photo_by_id(photo_id)
+    if not photo or photo.get("order_id") != order_id:
+        raise HTTPException(status_code=404, detail="Фото не найдено")
+    if staff.get("role") not in ("admin", "manager"):
+        if not photo.get("uploaded_by_staff_id") or photo["uploaded_by_staff_id"] != staff.get("id"):
+            raise HTTPException(status_code=403, detail="Удалить фото может автор или менеджер")
     await db.delete_order_photo(photo_id)
     return {"ok": True}
 
