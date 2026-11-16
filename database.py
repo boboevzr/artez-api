@@ -1335,6 +1335,8 @@ async def create_tables():
     # [{service_key, type_key, qty, name_ru, type_ru}] — чтобы позже подставить позиции при оформлении
     async with pool.acquire() as c:
         await c.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS services_json JSONB DEFAULT NULL")
+        # «оформляется в заказ» (17.11.2026): защита от двойного convert без удержания соединения
+        await c.execute("ALTER TABLE leads ADD COLUMN IF NOT EXISTS converting_at TIMESTAMPTZ DEFAULT NULL")
 
     # ── Шаг 15b: tg_id водителя в платежах ──────────────────────────────
     async with pool.acquire() as c:

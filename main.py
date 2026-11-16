@@ -6246,24 +6246,29 @@ async def check_phone(phone: str, _=Depends(get_current_staff)):
 async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
                                  staff=Depends(require_perm("orders"))):
     """Одна заявка — один заказ (17.11.2026, ревью): двойное нажатие / два запроса сразу не создают два заказа.
-    Блокировка — advisory lock Postgres на отдельном соединении (работает и при нескольких копиях API)."""
+    Атомарный захват: UPDATE … converting_at (одна строка — один победитель, и при нескольких копиях API);
+    соединение не держим. Зависший захват (сбой посреди) истекает через 2 минуты."""
     if not db.pool:
         raise HTTPException(status_code=503, detail="DB unavailable")
-    lock_key = 7_170_000_000 + int(lead_id)
-    async with db.pool.acquire() as lock_conn:
-        if not await lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", lock_key):
-            raise HTTPException(status_code=409, detail="Заявка уже оформляется")
-        try:
-            return await _convert_lead_locked(lead_id, body, staff)
-        finally:
-            await lock_conn.execute("SELECT pg_advisory_unlock($1)", lock_key)
+    got = await db.pool.fetchval(
+        "UPDATE leads SET converting_at=NOW() WHERE id=$1 AND status NOT IN ('converted','lost') "
+        "AND (converting_at IS NULL OR converting_at < NOW() - INTERVAL '2 minutes') RETURNING id", lead_id)
+    if not got:
+        exists = await db.pool.fetchval("SELECT status FROM leads WHERE id=$1", lead_id)
+        if exists is None:
+            raise HTTPException(status_code=404, detail="Лид не найден")
+        raise HTTPException(status_code=409, detail="Заявка уже закрыта" if exists in ("converted", "lost") else "Заявка уже оформляется")
+    try:
+        return await _convert_lead_locked(lead_id, body, staff)
+    finally:
+        await db.pool.execute("UPDATE leads SET converting_at=NULL WHERE id=$1", lead_id)
 
 
 async def _convert_lead_locked(lead_id: int, body: dict, staff: dict):
     lead = await db.get_lead_by_id(lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="Лид не найден")
-    # уже оформленную/закрытую заявку повторно в заказ не превращаем (перечитано под блокировкой)
+    # уже оформленную/закрытую заявку повторно в заказ не превращаем (перечитано после захвата)
     if lead.get("status") in ("converted", "lost"):
         raise HTTPException(status_code=409, detail="Заявка уже закрыта")
     name_parts = (lead.get("name") or "").split(maxsplit=1)
