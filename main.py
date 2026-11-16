@@ -2510,7 +2510,8 @@ async def update_lead_status(lead_id: int, body: dict,
     asyncio.create_task(_notify_agent_status(lead_id, status, note))
     # «Потерян» по заявке с онлайн-предоплатой — деньги клиенту назад полностью (курьер ещё не выезжал)
     refund = {"auto": 0, "pending": 0}
-    if status == "lost" and _old and _old.get("status") != "lost":   # _old есть: «lost» идёт веткой else выше
+    # _old есть: «lost» идёт веткой else выше. Оформленную (converted) не трогаем — её деньги уже в заказе.
+    if status == "lost" and _old and _old.get("status") not in ("lost", "converted"):
         who = f"{staff.get('first_name') or ''} {staff.get('last_name') or ''}".strip() or str(staff.get("sub") or "staff")
         refund = await _refund_prepay(lead_id=lead_id, actor=who,
                                       why=f"менеджер закрыл заявку {_old.get('lead_code') or lead_id} как «Потерян»")
@@ -5037,11 +5038,13 @@ async def my_lead_cancel(code: str, user = Depends(get_current_user)):
     """Клиент сам отменяет заявку (до оформления в заказ): заявка → «Потерян», предоплата — назад полностью."""
     if not db.pool:
         raise HTTPException(status_code=503, detail="База недоступна")
-    lead = await db.pool.fetchrow("SELECT id, status, lead_code FROM leads WHERE lead_code=$1 AND client_phone=$2",
-                                  code, user["phone"])
-    if not lead or lead["status"] not in _CLIENT_CANCELABLE_LEAD:
+    # проверка и смена статуса — одним UPDATE: параллельное оформление в заказ / повторная отмена не пройдут
+    lead = await db.pool.fetchrow(
+        "UPDATE leads SET status='lost', callback_at=NULL, updated_at=NOW() WHERE lead_code=$1 AND client_phone=$2 "
+        "AND status = ANY($3::text[]) AND converted_order IS NULL RETURNING id, lead_code",
+        code, user["phone"], list(_CLIENT_CANCELABLE_LEAD))
+    if not lead:
         raise HTTPException(status_code=400, detail="Заявку уже нельзя отменить — позвоните 1221")
-    await db.update_lead_status(lead["id"], "lost")
     await db.cancel_pending_lead_reminders(lead["id"])
     await db.add_lead_call(lead["id"], None, action="status_lost", note="Клиент сам отменил заявку (сайт/приложение)")
     refund = await _refund_prepay(lead_id=lead["id"], actor="client", why=f"клиент отменил заявку {code}")
