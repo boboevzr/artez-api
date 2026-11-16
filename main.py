@@ -11309,7 +11309,8 @@ def _chat_clean_site_name(name: str) -> str:
     селекторы), затем «из приложения» — в цикле, пока строка меняется. Обычные буквы, цифры, пробелы, точки, дефисы
     остаются (имена клиентов — кириллица/латиница)."""
     import unicodedata
-    n = unicodedata.normalize("NFKC", name or "")
+    # длину режем ДО и ПОСЛЕ нормализации: /api/chat/start без входа — огромное имя грузило бы сервер (regex/цикл)
+    n = unicodedata.normalize("NFKC", (name or "")[:200])[:200]
     n = "".join(ch for ch in n
                 if unicodedata.category(ch) not in ("Cf", "Cc", "Co", "Cs", "So", "Sk")
                 and not (0xFE00 <= ord(ch) <= 0xFE0F))
