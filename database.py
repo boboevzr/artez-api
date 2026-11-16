@@ -539,6 +539,7 @@ async def create_tables():
         "CREATE UNIQUE INDEX IF NOT EXISTS uq_order_payments_client_key ON order_payments(order_id, client_key) WHERE client_key IS NOT NULL",
         # захват «водитель записывает оплату» (атомарный UPDATE … RETURNING вместо advisory lock на соединении пула)
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_pay_claim_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_pay_claim_token VARCHAR(32) DEFAULT NULL",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         # Расходы: источник выплаты (сейф / банк / наличные)

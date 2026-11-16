@@ -10196,12 +10196,16 @@ async def driver_pay(
                 raise HTTPException(403, "Заказ не в вашем маршруте")
     # Одна оплата за раз по заказу: атомарный захват orders.driver_pay_claim_at (UPDATE … RETURNING), без
     # удержания соединения пула (advisory lock держал соединение и мог исчерпать пул). Повтор ждёт первую
-    # (до ~10 с, соединение не держит) и видит её; зависший захват истекает через 30 с.
+    # (до ~10 с, соединение не держит) и видит её; зависший захват истекает через 2 мин (сама запись — мс).
+    # Захват с меткой владельца: снимает только тот, кто захватил (истёкший и перехваченный — не трогаем).
+    import uuid as _uuid
+    claim = _uuid.uuid4().hex
     got = False
     for _ in range(50):
         if await db.pool.fetchval(
-                "UPDATE orders SET driver_pay_claim_at=NOW() WHERE id=$1 AND (driver_pay_claim_at IS NULL "
-                "OR driver_pay_claim_at < NOW() - INTERVAL '30 seconds') RETURNING id", order_id):
+                "UPDATE orders SET driver_pay_claim_at=NOW(), driver_pay_claim_token=$2 WHERE id=$1 AND "
+                "(driver_pay_claim_at IS NULL OR driver_pay_claim_at < NOW() - INTERVAL '2 minutes') RETURNING id",
+                order_id, claim):
             got = True
             break
         await asyncio.sleep(0.2)
@@ -10230,7 +10234,8 @@ async def driver_pay(
             await db.pool.execute("UPDATE order_payments SET client_key=$2 WHERE id=$1", row["id"], key)
             row = dict(row); row["client_key"] = key
     finally:
-        await db.pool.execute("UPDATE orders SET driver_pay_claim_at=NULL WHERE id=$1", order_id)
+        await db.pool.execute("UPDATE orders SET driver_pay_claim_at=NULL, driver_pay_claim_token=NULL "
+                              "WHERE id=$1 AND driver_pay_claim_token=$2", order_id, claim)
     if method == "cash":
         asyncio.create_task(_update_api_channel_stop(order_id))
     # card/transfer: push к менеджерам отправляется из upload_payment_receipt — после сохранения чека
