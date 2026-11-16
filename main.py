@@ -11302,6 +11302,13 @@ def _gen_chat_code() -> str:
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
+def _chat_staff_name(s: dict) -> str:
+    """Имя клиента для сотрудников: чат из приложения помечен «📱 … · из приложения» (16.11.2026).
+    В базе имя хранится как есть — шаблоны {name} в приветствиях клиенту не меняются."""
+    name = (s.get('client_name') or s.get('client_phone') or 'Клиент')
+    return f"📱 {name} · из приложения" if s.get('source') == 'app' else name
+
+
 def _msg_json(msg: dict) -> dict:
     m = dict(msg)
     if hasattr(m.get('created_at'), 'isoformat'):
@@ -11350,6 +11357,64 @@ async def chat_start(body: dict = Body(...)):
     return {"ok": True, "code": code}
 
 
+@app.post("/api/app/chat/start")
+async def app_chat_start(body: dict = Body(default={}), cur=Depends(_app_current)):
+    """Чат с ARTEZ из приложения (16.11.2026): клиент приложения — по своему входу (телефон/имя из аккаунта).
+    Открытый чат этого номера (с сайта или из приложения) продолжается; иначе — новый с source='app'.
+    Дальше приложение говорит по тому же WebSocket, что и сайт (/ws/chat/client/{code});
+    ответ сотрудника — push в приложение (_app_push_chat)."""
+    if cur["kind"] != "client":
+        _app_err(403, "forbidden", "Чат — для клиентов", "Chat — mijozlar uchun")
+    u = cur["subject"]
+    phone = (u.get("phone") or "").strip()
+    name = (u.get("first_name") or "").strip()
+    lang = {"ru": "ru", "uz": "uz", "uz_cyrl": "uz"}.get(str(body.get("lang") or ""), "uz")
+    active = await db.get_active_chat_by_phone(phone) if phone else None
+    if active:
+        return {"ok": True, "code": active["code"], "status": active["status"]}
+    code = _gen_chat_code()
+    session = await db.create_chat_session(code, phone, name, "", lang, source="app")
+    if not session:
+        raise HTTPException(500, "Не удалось создать сессию")
+    welcome = _tpl(await db.get_chat_template_text('welcome', lang) or
+                   "Здравствуйте! 👋 Спасибо, что обратились в ARTEZ. Менеджер ответит вам в ближайшее время.", session)
+    await db.add_chat_message(session['id'], 'bot', 'ARTEZ', welcome)
+    label = _chat_staff_name(session)
+    await _chat.broadcast_staff({
+        "type": "new_chat", "code": code, "client_name": label, "client_phone": phone, "branch": "",
+        "source": "app",
+        "created_at": session['created_at'].isoformat() if hasattr(session.get('created_at'), 'isoformat') else str(session.get('created_at', '')),
+    })
+    online = _chat.staff_online_ids()
+    for sid in await db.get_staff_for_chat_push():
+        if sid not in online:
+            asyncio.create_task(send_web_push(sid, title="💬 Новый чат", body=f"{label} ждёт ответа", push_type="new_chat"))
+    return {"ok": True, "code": code, "status": session["status"]}
+
+
+async def _app_push_chat(session: dict, staff_name: str, text: str):
+    """Ответ сотрудника в чате из приложения → push клиенту (по номеру; язык — у токена)."""
+    try:
+        phone = session.get("client_phone")
+        if not phone:
+            return
+        tokens = await db.app_push_tokens_for_phone(phone)
+        if not tokens:
+            return
+        body = text if len(text) <= 160 else text[:157] + "…"
+        receipts = await _expo_send([{
+            "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
+            "title": _push_lang_text(t["lang"], f"💬 ARTEZ · {staff_name}", f"💬 ARTEZ · {staff_name}"),
+            "body": body,
+            "data": {"kind": "chat", "code": session.get("code")},
+        } for t in tokens])
+        for t, rc in zip(tokens, receipts):
+            if (rc.get("details") or {}).get("error") == "DeviceNotRegistered":
+                await db.app_push_unregister(t["token"])
+    except Exception as e:
+        logging.warning(f"_app_push_chat {session.get('code')}: {type(e).__name__}: {e}")
+
+
 @app.get("/api/chat/sessions")
 async def chat_sessions(staff=Depends(get_current_staff)):
     sessions = await db.get_active_chat_sessions()
@@ -11359,6 +11424,7 @@ async def chat_sessions(staff=Depends(get_current_staff)):
         s2 = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in s.items()}
         s2['message_count'] = len(msgs)
         s2['last_text'] = msgs[-1]['text'] if msgs else ''
+        s2['client_name'] = _chat_staff_name(s)
         result.append(s2)
     return result
 
@@ -11370,6 +11436,7 @@ async def chat_get_messages(code: str, staff=Depends(get_current_staff)):
         raise HTTPException(404, "Сессия не найдена")
     msgs = await db.get_chat_messages(session['id'])
     s = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in session.items()}
+    s['client_name'] = _chat_staff_name(session)
     return {"session": s, "messages": [_msg_json(m) for m in msgs]}
 
 
@@ -11429,6 +11496,8 @@ async def chat_history(limit: int = 50, offset: int = 0, filter: str = "own",
     for r in rows:
         for k, v in r.items():
             if hasattr(v, 'isoformat'): r[k] = v.isoformat()
+        if 'client_name' in r:
+            r['client_name'] = _chat_staff_name(r)
     return {"rows": rows, "can_see_all": can_see_all}
 
 @app.get("/api/chat/templates")
@@ -11596,6 +11665,8 @@ async def ws_chat_staff(websocket: WebSocket, token: str):
             payload = {"type": "message", "code": code, "msg": _msg_json(msg)}
             await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg)})
             await _chat.broadcast_staff(payload, exclude=staff_id)
+            if session.get('source') == 'app':
+                asyncio.create_task(_app_push_chat(session, sname, text))
     except (WebSocketDisconnect, Exception):
         pass
     finally:

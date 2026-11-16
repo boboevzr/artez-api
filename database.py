@@ -7336,14 +7336,17 @@ async def ensure_chat_tables():
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS last_client_msg_at TIMESTAMPTZ;
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS warned_at TIMESTAMPTZ;
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS lang VARCHAR(5) DEFAULT 'uz';
+        -- откуда клиент пишет: 'site' (виджет сайта) | 'app' (приложение) — 16.11.2026
+        ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS source VARCHAR(10) DEFAULT 'site';
         """)
 
-async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '', lang: str = 'uz') -> dict:
+async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '', lang: str = 'uz',
+                              source: str = 'site') -> dict:
     if not pool: return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "INSERT INTO chat_sessions (code, client_phone, client_name, branch, lang) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-            code, client_phone, client_name, branch, lang
+            "INSERT INTO chat_sessions (code, client_phone, client_name, branch, lang, source) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+            code, client_phone, client_name, branch, lang, source
         )
         return dict(row) if row else None
 
