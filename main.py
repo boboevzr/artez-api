@@ -2417,7 +2417,7 @@ async def get_leads(status: str = None, branch: str = None,
         rows = await db.get_leads(status=status, branch=branch)
     else:
         raise HTTPException(status_code=403, detail="Нет доступа")
-    return {"ok": True, "leads": [dict(r) for r in rows]}
+    return {"ok": True, "leads": await pay.add_prepaid([dict(r) for r in rows])}  # prepaid — онлайн-предоплата
 
 @app.patch("/api/staff/leads/{lead_id}")
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
@@ -4962,7 +4962,8 @@ async def my_orders(user = Depends(get_current_user)):
 @app.get("/api/my/leads")
 async def my_leads(user = Depends(get_current_user)):
     """Заявки клиента, по которым менеджер ещё не оформил заказ (приложение «Мои заказы», кабинет сайта)."""
-    return {"leads": await db.get_client_leads(user["phone"])}
+    leads = [dict(l) for l in await db.get_client_leads(user["phone"])]
+    return {"leads": await pay.add_prepaid(leads, user["phone"])}  # prepaid — оплаченная онлайн-предоплата
 
 
 @app.post("/api/orders/{order_num}/cancel")
@@ -5196,7 +5197,7 @@ async def admin_get_leads(status: str = None, branch: str = None,
                  q in (l.get("client_phone") or "").lower() or
                  q in (l.get("address") or "").lower() or
                  q in (l.get("short_address") or "").lower()]
-    return {"ok": True, "leads": leads}
+    return {"ok": True, "leads": await pay.add_prepaid(leads)}  # prepaid — онлайн-предоплата
 
 class LeadUpdateRequest(BaseModel):
     client_name:  str | None = None

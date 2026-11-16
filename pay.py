@@ -1381,3 +1381,38 @@ async def adm_log(a=Depends(_admin)):
     async with db.pool.acquire() as c:
         rows = await c.fetch("SELECT * FROM pay_log ORDER BY id DESC LIMIT 200")
     return {"ok": True, "log": [dict(r) for r in rows]}
+
+
+# ══════════════════════════════════════
+#  Предоплата по заявкам — для списков лидов (staff/admin) и кабинета клиента (16.11)
+# ══════════════════════════════════════
+async def prepaid_by_lead_ids(ids: list[int]) -> dict[int, int]:
+    """{lead_id: сумма оплаченных онлайн-предоплат} (возвращённые не считаются)."""
+    ids = [int(i) for i in ids if i]
+    if not ids or not db.pool:
+        return {}
+    async with db.pool.acquire() as c:
+        rows = await c.fetch("SELECT lead_id, SUM(amount)::int AS s FROM pay_tx WHERE kind='pay' AND purpose='prepay' "
+                             "AND status='paid' AND lead_id = ANY($1::int[]) GROUP BY lead_id", ids)
+    return {r["lead_id"]: r["s"] for r in rows}
+
+
+async def add_prepaid(leads: list[dict], phone: str | None = None) -> list[dict]:
+    """Дописывает в каждую заявку поле prepaid (сум). Без id (кабинет клиента) — по lead_code и телефону."""
+    try:
+        if leads and all(l.get("id") for l in leads):
+            m = await prepaid_by_lead_ids([l["id"] for l in leads])
+            for l in leads:
+                l["prepaid"] = m.get(l["id"], 0)
+        elif leads and phone:
+            codes = [l.get("lead_code") for l in leads if l.get("lead_code")]
+            async with db.pool.acquire() as c:
+                rows = await c.fetch("SELECT l.lead_code, SUM(t.amount)::int AS s FROM pay_tx t JOIN leads l ON l.id=t.lead_id "
+                                     "WHERE t.kind='pay' AND t.purpose='prepay' AND t.status='paid' AND l.client_phone=$1 "
+                                     "AND l.lead_code = ANY($2::text[]) GROUP BY l.lead_code", phone, codes)
+            m = {r["lead_code"]: r["s"] for r in rows}
+            for l in leads:
+                l["prepaid"] = m.get(l.get("lead_code"), 0)
+    except Exception as e:  # метка не должна ломать список заявок
+        log.warning("add_prepaid: %s", type(e).__name__)
+    return leads
