@@ -2508,7 +2508,13 @@ async def update_lead_status(lead_id: int, body: dict,
                                    message=f"Перезвонить клиенту — лид {lead_id}")
     # Уведомить агента если лид агентский
     asyncio.create_task(_notify_agent_status(lead_id, status, note))
-    return {"ok": True}
+    # «Потерян» по заявке с онлайн-предоплатой — деньги клиенту назад полностью (курьер ещё не выезжал)
+    refund = {"auto": 0, "pending": 0}
+    if status == "lost" and _old and _old.get("status") != "lost":   # _old есть: «lost» идёт веткой else выше
+        who = f"{staff.get('first_name') or ''} {staff.get('last_name') or ''}".strip() or str(staff.get("sub") or "staff")
+        refund = await _refund_prepay(lead_id=lead_id, actor=who,
+                                      why=f"менеджер закрыл заявку {_old.get('lead_code') or lead_id} как «Потерян»")
+    return {"ok": True, "refund": refund}
 
 @app.get("/api/staff/my-notifications")
 async def get_my_notifications(staff=Depends(get_current_staff)):
@@ -2776,9 +2782,13 @@ async def bulk_status_leads(body: dict, staff=Depends(require_perm("leads"))):
         raise HTTPException(status_code=400, detail="Нет ID лидов")
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
     for lead_id in ids:
+        _was = await db.get_lead_by_id(int(lead_id)) if status == "lost" else None
         await db.update_lead_status(int(lead_id), status)
         await db.add_lead_call(int(lead_id), operator_id, action=f"status_{status}",
                                note=f"Массовая смена статуса")
+        if _was and _was.get("status") not in ("lost", "converted"):   # предоплата по заявке — назад
+            await _refund_prepay(lead_id=int(lead_id), actor="bulk",
+                                 why=f"заявка {_was.get('lead_code') or lead_id} закрыта как «Потерян» (массово)")
     return {"ok": True, "updated": len(ids)}
 
 @app.post("/api/staff/orders/bulk-status")
@@ -4972,7 +4982,70 @@ async def cancel_order(order_num: str, user = Depends(get_current_user)):
     if not order:
         raise HTTPException(status_code=400, detail="Заказ не найден или уже нельзя отменить")
     asyncio.create_task(notify_group_client_cancel(order))
-    return {"ok": True}
+    # заказ отменён до выезда курьера (статус «Новый») — онлайн-предоплата возвращается полностью
+    oid = await db.pool.fetchval("SELECT id FROM orders WHERE order_num=$1", order_num) if db.pool else None
+    refund = await _refund_prepay(order_id=oid, actor="client", why=f"клиент отменил заказ {order_num}") if oid else {"auto": 0, "pending": 0}
+    return {"ok": True, "refund": refund}
+
+
+# ── Возврат онлайн-предоплаты при отказе (16.11.2026, решение владельца) ──
+# Правило: предоплата возвращается полностью, пока курьер не выехал — отказ по заявке (клиент сам или менеджер
+# «Потерян») и отмена заказа в статусе «Новый». В день оплаты — сразу на карту (paymentReverse, pay.reverse_tx);
+# позже банк так не умеет — заявка/заказ уже в админке «Оплата → Кому вернуть деньги», плюс уведомление.
+def _tash_date(dt) -> str:
+    return (dt + timedelta(hours=5)).strftime("%Y-%m-%d") if dt else ""
+
+
+async def _refund_prepay(*, lead_id: int | None = None, order_id: int | None = None,
+                         actor: str = "system", why: str = "") -> dict:
+    out = {"auto": 0, "pending": 0}
+    if not db.pool or not (lead_id or order_id):
+        return out
+    try:
+        async with db.pool.acquire() as c:
+            if lead_id:
+                txs = await c.fetch("SELECT id, amount, created_at, plum_tx_id FROM pay_tx WHERE kind='pay' AND purpose='prepay' "
+                                    "AND status='paid' AND lead_id=$1 AND order_id IS NULL ORDER BY id", lead_id)
+            else:
+                txs = await c.fetch("SELECT id, amount, created_at, plum_tx_id FROM pay_tx WHERE kind='pay' AND purpose='prepay' "
+                                    "AND status='paid' AND order_id=$1 ORDER BY id", order_id)
+        today = _tash_date(datetime.now(timezone.utc))
+        for t in txs:
+            done = False
+            if t["plum_tx_id"] and _tash_date(t["created_at"]) == today:
+                try:
+                    await pay.reverse_tx(t["id"], actor=actor, reason=f"auto: {why}"[:200])
+                    done = True
+                except Exception as e:  # банк отказал / возврат уже начат — вернут вручную
+                    logging.warning(f"_refund_prepay tx={t['id']}: {type(e).__name__}: {e}")
+            out["auto" if done else "pending"] += int(t["amount"] or 0)
+        if out["auto"]:
+            await pay.notify(f"↩️ Предоплата {out['auto']:,} сум возвращена на карту автоматически — {why}".replace(",", " "))
+        if out["pending"]:
+            await pay.notify(f"↩️ НУЖНО ВЕРНУТЬ предоплату {out['pending']:,} сум — {why}. "
+                             f"Админка → Оплата → «Кому вернуть деньги» → «Вернули вручную».".replace(",", " "))
+    except Exception as e:
+        logging.warning(f"_refund_prepay lead={lead_id} order={order_id}: {type(e).__name__}: {e}")
+    return out
+
+
+_CLIENT_CANCELABLE_LEAD = ("new", "contacted", "callback", "no_answer")
+
+
+@app.post("/api/my/leads/{code}/cancel")
+async def my_lead_cancel(code: str, user = Depends(get_current_user)):
+    """Клиент сам отменяет заявку (до оформления в заказ): заявка → «Потерян», предоплата — назад полностью."""
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="База недоступна")
+    lead = await db.pool.fetchrow("SELECT id, status, lead_code FROM leads WHERE lead_code=$1 AND client_phone=$2",
+                                  code, user["phone"])
+    if not lead or lead["status"] not in _CLIENT_CANCELABLE_LEAD:
+        raise HTTPException(status_code=400, detail="Заявку уже нельзя отменить — позвоните 1221")
+    await db.update_lead_status(lead["id"], "lost")
+    await db.cancel_pending_lead_reminders(lead["id"])
+    await db.add_lead_call(lead["id"], None, action="status_lost", note="Клиент сам отменил заявку (сайт/приложение)")
+    refund = await _refund_prepay(lead_id=lead["id"], actor="client", why=f"клиент отменил заявку {code}")
+    return {"ok": True, "refund": refund}
 
 
 @app.get("/api/orders/{order_num}/items")
