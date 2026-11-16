@@ -4163,6 +4163,23 @@ async def _tg_lead_status(lead_id: int, status: str, refund: dict | None = None)
         logging.warning(f"_tg_lead_status {lead_id}: {type(e).__name__}: {e}")
 
 
+async def _app_push_staff(staff_id: int, title: str, body: str, data: dict):
+    """Push сотруднику в приложение (вход «Я сотрудник»); нет приложения — тихо ничего."""
+    try:
+        tokens = await db.app_push_tokens_for_staff(int(staff_id))
+        if not tokens:
+            return
+        receipts = await _expo_send([{
+            "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
+            "title": title, "body": body, "data": data,
+        } for t in tokens])
+        for t, rc in zip(tokens, receipts):
+            if (rc.get("details") or {}).get("error") == "DeviceNotRegistered":
+                await db.app_push_unregister(t["token"])
+    except Exception as e:
+        logging.warning(f"_app_push_staff {staff_id}: {type(e).__name__}: {e}")
+
+
 async def _app_push_route(route_id: int, added: int = 0):
     """Водителю в приложение: «Новый адрес в маршруте» (добавили остановки) или «Маршрут на сегодня»
     (отправили маршрут). Тап — экран «Маршрут». Нет приложения — ничего не делаем (Telegram — как раньше)."""
@@ -9018,6 +9035,8 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                     push_body,
                     order_id=order_id, item_id=item_id, push_type="measure_approved"
                 ))
+                asyncio.create_task(_app_push_staff(recipient_id, f"✅ Замер утверждён — {order_num}", push_body,
+                                                    {"kind": "measure", "order_id": order_id, "item_id": item_id}))
                 await db.create_washer_notification(
                     recipient_id, order_id, order_num, push_body,
                     item_id=item_id, notification_type="measure_approved"
@@ -9054,6 +9073,8 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                     push_body,
                     order_id=order_id, item_id=item_id, push_type="measure_rejected"
                 ))
+                asyncio.create_task(_app_push_staff(recipient_id, f"❌ Замер отклонён — {order_num}", push_body,
+                                                    {"kind": "measure", "order_id": order_id, "item_id": item_id}))
                 await db.create_washer_notification(
                     recipient_id, order_id, order_num, push_body,
                     item_id=item_id, notification_type="measure_rejected"
@@ -10414,6 +10435,48 @@ async def get_delivery_discount_public():
     return {"ok": True, "discount": float(val) if val else 0.0}
 
 # ── Этап замера (16.11.2026) ─────────────────────────────────
+@app.get("/api/staff/washer/work")
+async def washer_work(staff=Depends(get_current_staff)):
+    """Мойщик в приложении (17.11.2026): заказы в мастерской (приём…упаковка, с учётом этапов сотрудника — как
+    /api/staff/orders) и их позиции — свои и свободные (чужие не отдаём). Без цен и сумм. Только чтение;
+    действия — существующие эндпоинты (…/items/{id}/washer, …/measure, …/media, …/status)."""
+    if staff.get("role") != "washer":
+        raise HTTPException(status_code=403, detail="Только для мойщика")
+    work = ["received", "washing", "drying", "packing"]
+    stages = [s.strip() for s in (staff.get("order_stages") or "").split(",") if s.strip()]
+    if stages:
+        visible = set()
+        for st in stages:
+            visible |= _STAGE_STATUSES.get(st, set())
+        work = [s for s in work if s in visible]
+    me = staff.get("login") or ""
+    if not work or not db.pool:
+        return {"ok": True, "stage": await _measure_stage(), "orders": []}
+    async with db.pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT o.id AS order_id, o.order_num, o.status, o.client_first_name, o.updated_at,
+                   i.id AS item_id, i.service, i.service_ru, i.service_uz, COALESCE(i.unit_key_snap,'m2') AS unit_key,
+                   i.width_cm, i.length_cm, i.actual_width_cm, i.actual_length_cm, i.sqm,
+                   i.measure_status, i.reject_note, i.washer_login,
+                   (SELECT COUNT(*) FROM order_item_media im WHERE im.item_id = i.id)::int AS media_count
+              FROM orders o JOIN order_items i ON i.order_id = o.id
+             WHERE o.status = ANY($1::text[]) AND (i.washer_login IS NULL OR i.washer_login = '' OR i.washer_login = $2)
+             ORDER BY o.updated_at ASC, o.id, i.id""", work, me)
+    orders: dict = {}
+    for r in rows:
+        o = orders.setdefault(r["order_id"], {"order_id": r["order_id"], "order_num": r["order_num"], "status": r["status"],
+                                             "client_first_name": r["client_first_name"], "items": []})
+        o["items"].append({
+            "item_id": r["item_id"], "service": r["service"], "service_ru": r["service_ru"], "service_uz": r["service_uz"],
+            "unit_key": r["unit_key"], "width_cm": r["width_cm"], "length_cm": r["length_cm"],
+            "actual_width_cm": r["actual_width_cm"], "actual_length_cm": r["actual_length_cm"], "sqm": r["sqm"],
+            "measure_status": r["measure_status"], "reject_note": r["reject_note"],
+            "mine": (r["washer_login"] or "") == me and bool(me), "media_count": r["media_count"],
+        })
+    return {"ok": True, "stage": await _measure_stage(), "login": me,
+            "can_measure": bool(staff.get("can_measure")), "orders": list(orders.values())}
+
+
 @app.get("/api/settings/measure-stage")
 async def get_measure_stage_public():
     return {"ok": True, "stage": await _measure_stage(), "stages": list(MEASURE_STAGES)}
