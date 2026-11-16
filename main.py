@@ -6245,11 +6245,26 @@ async def check_phone(phone: str, _=Depends(get_current_staff)):
 @app.post("/api/staff/leads/{lead_id}/convert")
 async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
                                  staff=Depends(require_perm("orders"))):
+    """Одна заявка — один заказ (17.11.2026, ревью): двойное нажатие / два запроса сразу не создают два заказа.
+    Блокировка — advisory lock Postgres на отдельном соединении (работает и при нескольких копиях API)."""
+    if not db.pool:
+        raise HTTPException(status_code=503, detail="DB unavailable")
+    lock_key = 7_170_000_000 + int(lead_id)
+    async with db.pool.acquire() as lock_conn:
+        if not await lock_conn.fetchval("SELECT pg_try_advisory_lock($1)", lock_key):
+            raise HTTPException(status_code=409, detail="Заявка уже оформляется")
+        try:
+            return await _convert_lead_locked(lead_id, body, staff)
+        finally:
+            await lock_conn.execute("SELECT pg_advisory_unlock($1)", lock_key)
+
+
+async def _convert_lead_locked(lead_id: int, body: dict, staff: dict):
     lead = await db.get_lead_by_id(lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="Лид не найден")
-    # уже оформленную/закрытую заявку повторно в заказ не превращаем (повторное нажатие в приложении)
-    if body.get("items_from_services") and lead.get("status") in ("converted", "lost"):
+    # уже оформленную/закрытую заявку повторно в заказ не превращаем (перечитано под блокировкой)
+    if lead.get("status") in ("converted", "lost"):
         raise HTTPException(status_code=409, detail="Заявка уже закрыта")
     name_parts = (lead.get("name") or "").split(maxsplit=1)
     first = name_parts[0] if name_parts else ""
