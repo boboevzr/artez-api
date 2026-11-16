@@ -2439,9 +2439,12 @@ async def assign_lead(lead_id: int, body: dict = Body({}),
     is_admin = role in ("admin", "manager")
     async with db.pool.acquire() as conn:
         if take:
-            row = await conn.fetchrow("SELECT assigned_to FROM leads WHERE id=$1", lead_id)
+            row = await conn.fetchrow("SELECT assigned_to, status FROM leads WHERE id=$1", lead_id)
             if not row:
                 raise HTTPException(status_code=404, detail="Лид не найден")
+            # закрытую заявку (клиент отменил / «Потерян») и оформленную в работу не берут (16.11.2026)
+            if row["status"] in ("lost", "converted"):
+                raise HTTPException(status_code=409, detail="Заявка закрыта — взять в работу нельзя")
             # Обычный сотрудник не может взять лид занятый другим; admin/manager могут
             if row["assigned_to"] and row["assigned_to"] != staff_id and not is_admin:
                 raise HTTPException(status_code=409, detail="Лид уже взят другим сотрудником")
