@@ -377,6 +377,8 @@ async def create_tables():
             created_at  TIMESTAMPTZ DEFAULT NOW(),
             updated_at  TIMESTAMPTZ DEFAULT NOW()
         )""",
+        # отметка «маршрут отправлен водителю» — push «новый адрес» только после неё (16.11.2026)
+        "ALTER TABLE routes ADD COLUMN IF NOT EXISTS app_sent_at TIMESTAMPTZ",
         """CREATE TABLE IF NOT EXISTS route_orders (
             id          SERIAL PRIMARY KEY,
             route_id    INTEGER NOT NULL REFERENCES routes(id) ON DELETE CASCADE,
@@ -3723,6 +3725,11 @@ async def revoke_staff_sessions(staff_id: int, reason: str, sid: int | None = No
             await conn.execute(
                 "UPDATE app_devices SET revoked_at=NOW() WHERE kind='staff' AND subject_id=$1 "
                 "AND revoked_at IS NULL AND ($2::bigint IS NULL OR id<>$2)", staff_id, keep_dev)
+            # все сессии закрыты (смена пароля, «выйти везде», увольнение) — уведомления в приложение
+            # этому сотруднику больше не шлём (ревью artez-5e, 16.11.2026); текущее устройство (except_sid) — оставляем
+            if not except_sid:
+                await conn.execute("UPDATE app_push_tokens SET revoked_at=NOW() WHERE kind='staff' AND subject_id=$1 "
+                                   "AND revoked_at IS NULL", staff_id)
         return len(sids)
 
 
@@ -3910,10 +3917,11 @@ async def app_push_tokens_for_phone(phone: str) -> list[dict]:
 
 
 async def app_push_tokens_for_staff(staff_id: int) -> list[dict]:
-    """Токены приложения сотрудника (вход «Я сотрудник»)."""
+    """Токены приложения сотрудника (вход «Я сотрудник») — только пока сотрудник активен."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT token, lang FROM app_push_tokens WHERE kind='staff' AND revoked_at IS NULL AND subject_id=$1", staff_id)
+            "SELECT t.token, t.lang FROM app_push_tokens t JOIN staff s ON s.id = t.subject_id "
+            "WHERE t.kind='staff' AND t.revoked_at IS NULL AND t.subject_id=$1 AND s.active IS TRUE", staff_id)
         return [dict(r) for r in rows]
 
 

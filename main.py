@@ -1816,6 +1816,8 @@ async def send_route_to_driver(route_id: int, me=Depends(get_current_staff)):
         raise HTTPException(status_code=404, detail="Маршрут не найден")
     if not route.get("driver_id"):
         raise HTTPException(status_code=400, detail="Водитель не назначен")
+    async with db.pool.acquire() as conn:
+        await conn.execute("UPDATE routes SET app_sent_at=NOW() WHERE id=$1", route_id)
     asyncio.create_task(_app_push_route(route_id))   # приложение водителя — даже если Telegram не указан (16.11.2026)
 
     # Получить tg_id водителя
@@ -4118,6 +4120,13 @@ async def _app_push_route(route_id: int, added: int = 0):
         route = await db.get_route(route_id)
         if not route or not route.get("driver_id"):
             return
+        if added:
+            # «новый адрес» — только если маршрут уже отправлен водителю или он уже в работе; пока логист
+            # собирает черновик, водителя не дёргаем. Один push на пачку (весь вызов add_route_orders).
+            async with db.pool.acquire() as conn:
+                sent = await conn.fetchval("SELECT app_sent_at IS NOT NULL OR status='active' FROM routes WHERE id=$1", route_id)
+            if not sent:
+                return
         tokens = await db.app_push_tokens_for_staff(int(route["driver_id"]))
         if not tokens:
             return
