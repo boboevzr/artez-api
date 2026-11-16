@@ -47,6 +47,7 @@ PREPAY_STATUSES = ("new", "confirmed", "pickup", "received")
 BALANCE_OPEN_STATUSES = ("received", "washing", "drying", "packing", "ready", "delivery", "delivered")
 MEASURED_OK = ("approved", "confirmed")
 DEFAULTS = {"pay_mode": "testers", "pay_prepay_amount": "100000", "pay_otpless_limit": "500000",
+            "pay_prepay_min": "50000", "pay_prepay_max": "1000000",
             "pay_notify": "owner"}
 
 MSG: dict[str, tuple[str, str]] = {
@@ -63,6 +64,7 @@ MSG: dict[str, tuple[str, str]] = {
     "payment_not_waiting": ("Код уже не нужен — обновите экран", "Kod endi kerak emas — sahifani yangilang"),
     "too_many": ("Слишком часто — попробуйте позже", "Juda tez-tez — keyinroq urinib ko'ring"),
     "resend_wait": ("Новый код можно запросить через 2 минуты", "Yangi kodni 2 daqiqadan keyin so'rash mumkin"),
+    "prepay_amount_invalid": ("Сумма предоплаты вне допустимых пределов", "Oldindan to'lov summasi ruxsat etilgan chegaradan tashqarida"),
     "installment_exists": ("Заявка на рассрочку уже отправлена", "Muddatli to'lov arizasi allaqachon yuborilgan"),
     "installment_closed": ("Для этого заказа рассрочка недоступна", "Bu buyurtma uchun muddatli to'lov mavjud emas"),
     "plum_otp_invalid": ("Неверный код из SMS", "SMS kodi noto'g'ri"),
@@ -237,6 +239,33 @@ async def prepay_amount() -> int:
         return int(DEFAULTS["pay_prepay_amount"])
 
 
+async def prepay_limits() -> tuple[int, int, int]:
+    """(мин, макс, по умолчанию) предоплаты — клиент выбирает сумму сам в этих пределах (16.11, просьба владельца)."""
+    def num(v, d):
+        try:
+            return int(float(v))
+        except (TypeError, ValueError):
+            return int(d)
+    lo = max(1000, num(await setting("pay_prepay_min"), DEFAULTS["pay_prepay_min"]))
+    hi = max(lo, num(await setting("pay_prepay_max"), DEFAULTS["pay_prepay_max"]))
+    return lo, hi, min(max(await prepay_amount(), lo), hi)
+
+
+async def prepay_pick(requested) -> int:
+    """Сумма предоплаты клиента: пусто — по умолчанию; иначе в пределах, кратно 1000 (округляем вниз)."""
+    lo, hi, default = await prepay_limits()
+    if requested in (None, "", 0, "0"):
+        return default
+    try:
+        v = int(float(str(requested).replace(" ", "")))
+    except ValueError:
+        raise PayError("prepay_amount_invalid", 422)
+    v -= v % 1000
+    if v < lo or v > hi:
+        raise PayError("prepay_amount_invalid", 422)
+    return v
+
+
 async def tester(phone: str) -> dict | None:
     async with db.pool.acquire() as c:
         r = await c.fetchrow("SELECT * FROM pay_testers WHERE phone=$1", phone)
@@ -375,6 +404,7 @@ async def order_pay_info(order: dict, user) -> dict:
         "enabled": bank is not None, "test_bank": bank == "test",
         "net": m["net"], "paid": m["paid"], "due": m["due"], "measured": m["measured"],
         "can_pay": bool(bank) and can_balance, "can_prepay": bool(bank) and can_prepay, "prepay_amount": pre,
+        "prepay_min": (await prepay_limits())[0], "prepay_max": (await prepay_limits())[1],
         "open_tx": m["open_tx"],
         "installment": {"id": inst["id"], "status": inst["status"]} if inst else None,
         "can_installment": st not in ("cancelled",) and not (inst and inst["status"] in ("new", "in_work"))
@@ -403,16 +433,16 @@ async def _card_of(user, card_id: int, is_test: bool) -> dict:
 
 
 async def start(user, *, order: dict | None = None, lead: dict | None = None, purpose: str,
-                card: dict | None = None, card_id: int | None = None, lang: str = "ru") -> dict:
+                card: dict | None = None, card_id: int | None = None, lang: str = "ru", amount_req=None) -> dict:
     bank = await bank_for(user)
     if not bank:
         raise PayError("payments_disabled", 403)
     with plum.test_mode(bank == "test"):
         return await _start(user, order=order, lead=lead, purpose=purpose, card=card, card_id=card_id,
-                            lang=lang, is_test=bank == "test")
+                            lang=lang, is_test=bank == "test", amount_req=amount_req)
 
 
-async def _start(user, *, order, lead, purpose, card, card_id, lang, is_test) -> dict:
+async def _start(user, *, order, lead, purpose, card, card_id, lang, is_test, amount_req=None) -> dict:
     await _rate(user["id"])
     saved = None
     number = expire = None
@@ -446,13 +476,13 @@ async def _start(user, *, order, lead, purpose, card, card_id, lang, is_test) ->
         if purpose == "prepay":
             if not info["can_prepay"]:
                 raise PayError("prepay_unavailable", 409)
-            amount = info["prepay_amount"]
+            amount = await prepay_pick(amount_req)
         else:
             if not info["can_pay"]:
                 raise PayError("nothing_to_pay" if info["measured"] or info["due"] < 1000 else "not_measured", 409)
             amount = info["due"]
     else:
-        amount = await prepay_amount()
+        amount = await prepay_pick(amount_req)
         async with db.pool.acquire() as c:
             done = await c.fetchval("SELECT COUNT(*) FROM pay_tx WHERE lead_id=$1 AND kind='pay' AND purpose='prepay' "
                                     "AND status IN ('paid','refunded','review')", lead["id"])
@@ -1072,7 +1102,9 @@ def _card_body(body: dict) -> tuple[dict | None, int | None]:
 @router.get("/api/pay/config")
 async def api_config(user=Depends(_user)):
     bank = await bank_for(user)
+    lo, hi, _d = await prepay_limits()
     return {"ok": True, "enabled": bank is not None, "test_bank": bank == "test", "prepay_amount": await prepay_amount(),
+            "prepay_min": lo, "prepay_max": hi,
             "test_card": "8600 1234 5678 9012 · 12/30 · SMS 111111" if bank == "test" else None}
 
 
@@ -1087,7 +1119,8 @@ async def api_order_pay(order_num: str, body: dict = Body({}), user=Depends(_use
     card, card_id = _card_body(body)
     purpose = "prepay" if body.get("purpose") == "prepay" else "balance"
     try:
-        return await start(user, order=order, purpose=purpose, card=card, card_id=card_id, lang=body.get("lang") or "ru")
+        return await start(user, order=order, purpose=purpose, card=card, card_id=card_id, lang=body.get("lang") or "ru",
+                           amount_req=body.get("amount") if purpose == "prepay" else None)
     except PayError as e:
         raise _http(e) from None
 
@@ -1100,7 +1133,8 @@ async def api_lead(code: str, user=Depends(_user)):
         done = await c.fetchrow("SELECT id, status, amount FROM pay_tx WHERE lead_id=$1 AND kind='pay' AND purpose='prepay' "
                                 "AND status IN ('paid','refunded','review','pending','otp') ORDER BY id DESC LIMIT 1", lead["id"])
     return {"ok": True, "lead_code": lead.get("lead_code"), "enabled": bank is not None, "test_bank": bank == "test",
-            "prepay_amount": await prepay_amount(), "prepay": dict(done) if done else None,
+            "prepay_amount": await prepay_amount(), "prepay_min": (await prepay_limits())[0], "prepay_max": (await prepay_limits())[1],
+            "prepay": dict(done) if done else None,
             "can_prepay": bank is not None and not done and lead["status"] not in ("converted", "lost")}
 
 
@@ -1111,7 +1145,8 @@ async def api_lead_pay(code: str, body: dict = Body({}), user=Depends(_user)):
         raise _http(PayError("prepay_unavailable", 409))
     card, card_id = _card_body(body)
     try:
-        return await start(user, lead=lead, purpose="prepay", card=card, card_id=card_id, lang=body.get("lang") or "ru")
+        return await start(user, lead=lead, purpose="prepay", card=card, card_id=card_id, lang=body.get("lang") or "ru",
+                           amount_req=body.get("amount"))
     except PayError as e:
         raise _http(e) from None
 
@@ -1210,7 +1245,9 @@ def _need_admin(a: dict) -> None:
 
 @router.get("/api/pay/admin/settings")
 async def adm_settings(a=Depends(_admin)):
+    lo, hi, _d = await prepay_limits()
     return {"ok": True, "mode": await setting("pay_mode"), "prepay_amount": await prepay_amount(),
+            "prepay_min": lo, "prepay_max": hi,
             "otpless_limit": int(float(await setting("pay_otpless_limit"))), "notify": await setting("pay_notify"),
             "real_configured": plum.real_configured(), "prefix": plum.prefix(), "can_edit": a["is_admin"]}
 
@@ -1225,7 +1262,8 @@ async def adm_settings_put(body: dict = Body({}), a=Depends(_admin)):
         if body["mode"] == "all" and not plum.real_configured():
             raise HTTPException(400, "Ключи PLUM не настроены — «для всех» включить нельзя")
         await db.set_config("pay_mode", body["mode"]); changes.append(f"mode={body['mode']}")
-    for key, cfg, lo in (("prepay_amount", "pay_prepay_amount", 1000), ("otpless_limit", "pay_otpless_limit", 0)):
+    for key, cfg, lo in (("prepay_amount", "pay_prepay_amount", 1000), ("otpless_limit", "pay_otpless_limit", 0),
+                         ("prepay_min", "pay_prepay_min", 1000), ("prepay_max", "pay_prepay_max", 1000)):
         if key in body:
             try:
                 v = int(float(body[key]))
@@ -1234,6 +1272,9 @@ async def adm_settings_put(body: dict = Body({}), a=Depends(_admin)):
             if v < lo or v > 100_000_000:
                 raise HTTPException(400, f"{key}: от {lo}")
             await db.set_config(cfg, str(v)); changes.append(f"{key}={v}")
+    pmin, pmax, _pd = await prepay_limits()
+    if pmin > pmax or not (pmin <= await prepay_amount() <= pmax):
+        changes.append("⚠️ предоплата по умолчанию вне пределов — клиенту будет предложена ближайшая граница")
     if "notify" in body:
         if body["notify"] not in ("owner", "group"):
             raise HTTPException(400, "notify: owner | group")
