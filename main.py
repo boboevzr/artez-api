@@ -6117,9 +6117,38 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
                "location","location_address",
                "region_id","house_number","apartment_number",
                "note","deadline","service_type",
-               "pickup_type","self_pickup_discount","discount_sum","manual_discount",
+               "pickup_type","self_pickup_discount","discount_sum","manual_discount","manual_discount_pct",
                "delivery_type","delivery_discount","delivery_discount_pct"}
     updates = {k: v for k, v in body.items() if k in allowed}
+    # Ручная скидка в % (16.11.2026): «12,52» или 12.52, 0 < % ≤ 100, до 2 знаков; сумму считает сервер
+    # (db.recalc_manual_discount_pct). Пусто/0 — % снят. Скидка суммой (manual_discount) снимает %.
+    if "manual_discount_pct" in updates:
+        raw = updates["manual_discount_pct"]
+        if raw is None or str(raw).strip() in ("", "0", "0.0", "0,0", "0.00", "0,00"):
+            updates["manual_discount_pct"] = None
+            updates.setdefault("manual_discount", 0)
+        else:
+            from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+            try:
+                p = Decimal(str(raw).strip().replace(" ", "").replace(",", "."))
+            except (InvalidOperation, ValueError):
+                raise HTTPException(status_code=400, detail="Скидка в % — число, например 12,52")
+            if not p.is_finite() or p > 100:
+                raise HTTPException(status_code=400, detail="Скидка в % — больше 0 и не больше 100")
+            p = p.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)   # до 2 знаков: 0,001 → 0,00 — отказ
+            if p <= 0 or p > 100:
+                raise HTTPException(status_code=400, detail="Скидка в % — больше 0 и не больше 100")
+            updates["manual_discount_pct"] = p
+            updates.pop("manual_discount", None)   # сумму посчитает сервер
+    elif "manual_discount" in updates:
+        try:
+            md = float(updates["manual_discount"] or 0)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="Скидка — число")
+        if md < 0:
+            raise HTTPException(status_code=400, detail="Скидка не может быть меньше 0")
+        updates["manual_discount"] = md
+        updates["manual_discount_pct"] = None
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
     if "client_phone" in updates and updates["client_phone"]:

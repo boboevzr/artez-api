@@ -417,6 +417,9 @@ async def order_pay_info(order: dict, user) -> dict:
     discounts = {k: int(float(order.get(k) or 0)) for k in ("client_discount", "discount_sum", "delivery_discount", "manual_discount")}
     discounts["client_discount_pct"] = float(order.get("client_discount_pct") or 0)
     discounts["client_discount_kind"] = order.get("client_discount_kind")
+    # ручная скидка в % (16.11.2026) — «Скидка 12,52 % — N сум»; None — скидка суммой
+    discounts["manual_discount_pct"] = (float(order["manual_discount_pct"])
+                                        if order.get("manual_discount_pct") is not None else None)
     return {
         "ok": True, "order_num": order["order_num"], "status": st,
         # переплата (внесено больше итога) — только после замера, когда итог известен
