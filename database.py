@@ -5541,6 +5541,39 @@ async def _service_key_label(service_key: str, service_type: str | None) -> tupl
     return type_key, ru, ru, uz
 
 
+async def create_items_from_lead_lines(order_id: int, lines: list) -> list:
+    """Позиции заказа из services_json заявки (17.11.2026, «Стал заказом» в приложении):
+    [{service_key, type_key, qty}] — вариант ровно из заявки, цена — снимок прайса (как у водителя);
+    «шт» — одна позиция с количеством, м² — по одной на вещь (мойщик доизмерит). Скидки — recalc в create_order_item."""
+    if not pool: return []
+    result = []
+    for ln in lines or []:
+        if not isinstance(ln, dict):
+            continue
+        service_key = str(ln.get("service_key") or "")
+        try:
+            n = max(0, min(50, int(ln.get("qty") or 1)))
+        except (TypeError, ValueError):
+            n = 1
+        keyed = await _service_key_label(service_key, ln.get("type_key") or None)
+        if not keyed or not n:
+            continue
+        type_key, label, ru, uz = keyed
+        snap = await resolve_price_snapshot(service_key, type_key) or {}
+        price = snap.get("list_price") or 0
+        extra = {"service_ru": ru, "service_uz": uz}
+        if snap.get("unit_key_snap") == "pcs":
+            row = await create_order_item(order_id, label, n, price, **snap, **extra)
+            if row:
+                result.append(row)
+            continue
+        for _ in range(n):
+            row = await create_order_item(order_id, label, 0, price, **snap, **extra)
+            if row:
+                result.append(row)
+    return result
+
+
 async def create_empty_items_by_service(order_id: int, service_counts: dict[str, int],
                                         service_type: str | None = None) -> list:
     """Как create_empty_items, но с указанием названия услуги на каждую позицию —

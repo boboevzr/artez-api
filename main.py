@@ -738,6 +738,10 @@ async def _notify_new_lead(lead: dict, staff: dict):
                     row["id"], push_title, push_body,
                     lead_id=lead.get("id"), phone=client_phone, push_type="new_lead"
                 ))
+            # приложение (17.11.2026): та же группа ролей, без телефона в тексте
+            asyncio.create_task(_app_push_roles(
+                ["callcenter", "manager", "admin"], push_title, lead.get("client_name") or "—",
+                {"kind": "lead", "lead_id": lead.get("id")}))
         except Exception as _ex:
             logging.warning(f"_notify_new_lead push error: {_ex}")
 
@@ -4163,6 +4167,30 @@ async def _tg_lead_status(lead_id: int, status: str, refund: dict | None = None)
         logging.warning(f"_tg_lead_status {lead_id}: {type(e).__name__}: {e}")
 
 
+async def _app_push_roles(roles: list[str], title: str, body: str, data: dict, only_id: int | None = None):
+    """Push в приложение всем активным сотрудникам с ролью из roles (only_id — одному из них)."""
+    try:
+        if not db.pool:
+            return
+        async with db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT t.token FROM app_push_tokens t JOIN staff s ON s.id = t.subject_id "
+                "WHERE t.kind='staff' AND t.revoked_at IS NULL AND s.active IS TRUE AND s.role = ANY($1::text[]) "
+                "AND ($2::int IS NULL OR s.id = $2)", list(roles), only_id)
+        tokens = [r["token"] for r in rows]
+        if not tokens:
+            return
+        receipts = await _expo_send([{
+            "to": t, "sound": "default", "priority": "high", "channelId": "default",
+            "title": title, "body": body, "data": data,
+        } for t in tokens])
+        for t, rc in zip(tokens, receipts):
+            if (rc.get("details") or {}).get("error") == "DeviceNotRegistered":
+                await db.app_push_unregister(t)
+    except Exception as e:
+        logging.warning(f"_app_push_roles {roles}: {type(e).__name__}: {e}")
+
+
 async def _app_push_staff(staff_id: int, title: str, body: str, data: dict):
     """Push сотруднику в приложение (вход «Я сотрудник»); нет приложения — тихо ничего."""
     try:
@@ -6220,6 +6248,9 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
     lead = await db.get_lead_by_id(lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="Лид не найден")
+    # уже оформленную/закрытую заявку повторно в заказ не превращаем (повторное нажатие в приложении)
+    if body.get("items_from_services") and lead.get("status") in ("converted", "lost"):
+        raise HTTPException(status_code=409, detail="Заявка уже закрыта")
     name_parts = (lead.get("name") or "").split(maxsplit=1)
     first = name_parts[0] if name_parts else ""
     last  = name_parts[1] if len(name_parts) > 1 else ""
@@ -6256,6 +6287,17 @@ async def convert_lead_to_order(lead_id: int, body: dict = Body({}),
     await db.update_lead_status(lead_id, "converted")
     # Скидка 5% «заявка через бот/сайт»: заказ создаётся с source="staff", канал — из лида
     await db.mark_order_online_from_lead(lead.get("source"), order_num)
+    # приложение (17.11.2026): позиции из услуг заявки — цены по прайсу, «шт» одной позицией, м² по одной
+    if body.get("items_from_services") and lead.get("services_json"):
+        try:
+            lines = lead["services_json"]
+            if isinstance(lines, str):
+                lines = _json.loads(lines)
+            new_oid = await db.pool.fetchval("SELECT id FROM orders WHERE order_num=$1", order_num) if db.pool else None
+            if new_oid and isinstance(lines, list):
+                await db.create_items_from_lead_lines(new_oid, lines)
+        except Exception as e:
+            logging.warning(f"convert lead={lead_id}: items from services failed: {type(e).__name__}: {e}")
     # Промо-акция: заказ считается "использованием" одноразового окна только если
     # лид пришёл с сайта/бота и привязан к зарегистрированному пользователю.
     if lead.get("source") in ("site", "bot") and lead.get("client_phone"):
@@ -11771,8 +11813,49 @@ async def _app_push_chat(session: dict, staff_name: str, text: str):
         logging.warning(f"_app_push_chat {session.get('code')}: {type(e).__name__}: {e}")
 
 
+# Кто работает с чатом клиентов (17.11.2026): как в staff.html (_chatRoles). Раньше любой сотрудник
+# (мойщик, водитель) мог читать/брать/закрывать чаты и писать клиентам через WS.
+CHAT_ROLES = {"admin", "manager", "callcenter"}
+
+
+async def _chat_staff(staff=Depends(get_current_staff)):
+    if staff.get("role") not in CHAT_ROLES:
+        raise HTTPException(status_code=403, detail="Чат — для менеджера и колл-центра")
+    return staff
+
+
+CHAT_TEXT_MAX = 2000
+
+
+@app.post("/api/chat/{code}/send")
+async def chat_staff_send(code: str, text: str = Body(..., embed=True), staff=Depends(_chat_staff)):
+    """Ответ сотрудника без WebSocket (приложение). Как сообщение в ws_chat_staff, но только во ВЗЯТЫЙ
+    этим сотрудником чат (админ — в любой)."""
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="Пустое сообщение")
+    if len(text) > CHAT_TEXT_MAX:
+        raise HTTPException(status_code=400, detail=f"Сообщение длиннее {CHAT_TEXT_MAX} символов")
+    session = await db.get_chat_session(code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    if session["status"] == "closed":
+        raise HTTPException(status_code=409, detail="Чат закрыт")
+    if session.get("claimed_by") != staff["id"] and staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Сначала возьмите чат")
+    sname = f"{staff.get('first_name','') or ''} {staff.get('last_name','') or ''}".strip() or "Менеджер"
+    msg = await db.add_chat_message(session["id"], "staff", sname, text)
+    if not msg:
+        raise HTTPException(status_code=500, detail="Не удалось сохранить сообщение")
+    await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg)})
+    await _chat.broadcast_staff({"type": "message", "code": code, "msg": _msg_json(msg)}, exclude=staff["id"])
+    if session.get("source") == "app":
+        asyncio.create_task(_app_push_chat(session, sname, text))
+    return {"ok": True, "msg": _msg_json(msg)}
+
+
 @app.get("/api/chat/sessions")
-async def chat_sessions(staff=Depends(get_current_staff)):
+async def chat_sessions(staff=Depends(_chat_staff)):
     sessions = await db.get_active_chat_sessions()
     result = []
     for s in sessions:
@@ -11786,7 +11869,7 @@ async def chat_sessions(staff=Depends(get_current_staff)):
 
 
 @app.get("/api/chat/{code}/messages")
-async def chat_get_messages(code: str, staff=Depends(get_current_staff)):
+async def chat_get_messages(code: str, staff=Depends(_chat_staff)):
     session = await db.get_chat_session(code)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
@@ -11797,7 +11880,7 @@ async def chat_get_messages(code: str, staff=Depends(get_current_staff)):
 
 
 @app.post("/api/chat/{code}/claim")
-async def chat_claim(code: str, staff=Depends(get_current_staff)):
+async def chat_claim(code: str, staff=Depends(_chat_staff)):
     name = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or "Менеджер"
     session = await db.claim_chat_session(code, staff['id'], name)
     if not session:
@@ -11811,7 +11894,7 @@ async def chat_claim(code: str, staff=Depends(get_current_staff)):
 
 
 @app.post("/api/chat/{code}/close")
-async def chat_close(code: str, staff=Depends(get_current_staff)):
+async def chat_close(code: str, staff=Depends(_chat_staff)):
     session = await db.close_chat_session(code)
     if not session:
         raise HTTPException(404, "Сессия не найдена")
@@ -11822,7 +11905,7 @@ async def chat_close(code: str, staff=Depends(get_current_staff)):
 
 
 @app.post("/api/chat/templates/seed")
-async def seed_templates(staff=Depends(get_current_staff)):
+async def seed_templates(staff=Depends(_chat_staff)):
     if staff.get('role') not in ('admin',):
         raise HTTPException(403, "Только для admin")
     # принудительно засеять (даже если таблица не пустая)
@@ -11843,7 +11926,7 @@ async def chat_active_by_phone(phone: str):
 
 @app.get("/api/chat/history")
 async def chat_history(limit: int = 50, offset: int = 0, filter: str = "own",
-                       staff=Depends(get_current_staff)):
+                       staff=Depends(_chat_staff)):
     role = staff.get("role", "")
     can_see_all = role in ("admin", "manager")
     own_only = not can_see_all or filter == "own"
@@ -11857,24 +11940,24 @@ async def chat_history(limit: int = 50, offset: int = 0, filter: str = "own",
     return {"rows": rows, "can_see_all": can_see_all}
 
 @app.get("/api/chat/templates")
-async def get_templates(staff=Depends(get_current_staff)):
+async def get_templates(staff=Depends(_chat_staff)):
     rows = await db.get_all_chat_templates()
     return rows
 
 @app.get("/api/chat/templates/quick")
-async def get_quick_templates(lang: str = "uz", staff=Depends(get_current_staff)):
+async def get_quick_templates(lang: str = "uz", staff=Depends(_chat_staff)):
     rows = await db.get_chat_templates(lang=lang, key='quick')
     return rows
 
 @app.post("/api/chat/templates")
-async def create_template(body: dict = Body(...), staff=Depends(get_current_staff)):
+async def create_template(body: dict = Body(...), staff=Depends(_chat_staff)):
     if staff.get('role') not in ('admin', 'manager'):
         raise HTTPException(403, "Недостаточно прав")
     row = await db.upsert_chat_template(body)
     return row or {}
 
 @app.put("/api/chat/templates/{tid}")
-async def update_template(tid: int, body: dict = Body(...), staff=Depends(get_current_staff)):
+async def update_template(tid: int, body: dict = Body(...), staff=Depends(_chat_staff)):
     if staff.get('role') not in ('admin', 'manager'):
         raise HTTPException(403, "Недостаточно прав")
     body['id'] = tid
@@ -11882,7 +11965,7 @@ async def update_template(tid: int, body: dict = Body(...), staff=Depends(get_cu
     return row or {}
 
 @app.delete("/api/chat/templates/{tid}")
-async def del_template(tid: int, staff=Depends(get_current_staff)):
+async def del_template(tid: int, staff=Depends(_chat_staff)):
     if staff.get('role') not in ('admin', 'manager'):
         raise HTTPException(403, "Недостаточно прав")
     await db.delete_chat_template(tid)
@@ -11959,6 +12042,9 @@ async def ws_chat_client(websocket: WebSocket, code: str):
                 await _chat.send_staff(claimed, payload)
             else:
                 await _chat.broadcast_staff(payload)
+            asyncio.create_task(_app_push_roles(
+                list(CHAT_ROLES), f"💬 {_chat_staff_name(session)}", text if len(text) <= 160 else text[:157] + "…",
+                {"kind": "chat_staff", "code": code}, only_id=claimed or None))
             # Авто-ответ на первое сообщение клиента (через 3 сек)
             if is_first:
                 async def _send_auto_reply(c=code, sess=dict(session), cl=claimed):
@@ -11996,6 +12082,9 @@ async def ws_chat_staff(websocket: WebSocket, token: str):
     staff = await _staff_from_payload(payload)
     if not staff:
         await websocket.close(code=4001)
+        return
+    if staff.get("role") not in CHAT_ROLES:   # 17.11.2026: только те, кто отвечает в чате
+        await websocket.close(code=4003)
         return
     staff_id = staff["id"]
 
