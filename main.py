@@ -11302,6 +11302,14 @@ def _gen_chat_code() -> str:
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
 
 
+def _chat_clean_site_name(name: str) -> str:
+    """Имя из виджета сайта (не проверено): убираем «📱» и «из приложения», чтобы нельзя было выдать
+    себя за клиента приложения в списке чатов сотрудника."""
+    n = (name or "").replace("📱", "")
+    n = re.sub(r"[·\-–—,\s]*из\s+приложения", "", n, flags=re.IGNORECASE)
+    return n.strip()[:100]
+
+
 def _chat_staff_name(s: dict) -> str:
     """Имя клиента для сотрудников: чат из приложения помечен «📱 … · из приложения» (16.11.2026).
     В базе имя хранится как есть — шаблоны {name} в приветствиях клиенту не меняются."""
@@ -11319,7 +11327,7 @@ def _msg_json(msg: dict) -> dict:
 @app.post("/api/chat/start")
 async def chat_start(body: dict = Body(...)):
     client_phone = (body.get("client_phone") or "").strip()
-    client_name  = (body.get("client_name")  or "").strip()
+    client_name  = _chat_clean_site_name(body.get("client_name") or "")
     branch       = (body.get("branch")       or "").strip()
     lang         = (body.get("lang")         or "uz").strip().lower()[:5]
 
@@ -11360,7 +11368,7 @@ async def chat_start(body: dict = Body(...)):
 @app.post("/api/app/chat/start")
 async def app_chat_start(body: dict = Body(default={}), cur=Depends(_app_current)):
     """Чат с ARTEZ из приложения (16.11.2026): клиент приложения — по своему входу (телефон/имя из аккаунта).
-    Открытый чат этого номера (с сайта или из приложения) продолжается; иначе — новый с source='app'.
+    Открытый чат этого номера, начатый из приложения, продолжается; иначе — новый с source='app'.
     Дальше приложение говорит по тому же WebSocket, что и сайт (/ws/chat/client/{code});
     ответ сотрудника — push в приложение (_app_push_chat)."""
     if cur["kind"] != "client":
@@ -11369,7 +11377,8 @@ async def app_chat_start(body: dict = Body(default={}), cur=Depends(_app_current
     phone = (u.get("phone") or "").strip()
     name = (u.get("first_name") or "").strip()
     lang = {"ru": "ru", "uz": "uz", "uz_cyrl": "uz"}.get(str(body.get("lang") or ""), "uz")
-    active = await db.get_active_chat_by_phone(phone) if phone else None
+    # продолжаем только чат, начатый из приложения этим же номером (см. get_active_app_chat_by_phone)
+    active = await db.get_active_app_chat_by_phone(phone) if phone else None
     if active:
         return {"ok": True, "code": active["code"], "status": active["status"]}
     code = _gen_chat_code()

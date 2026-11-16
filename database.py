@@ -7374,6 +7374,17 @@ async def is_first_client_message(session_id: int) -> bool:
         )
         return count == 0
 
+async def get_active_app_chat_by_phone(phone: str) -> dict:
+    """Открытый чат ИЗ ПРИЛОЖЕНИЯ для этого номера. Чаты сайта сюда не попадают: там номер вводит
+    кто угодно и он не проверен — иначе чужой чат «с моим номером» подхватился бы в моём приложении."""
+    if not pool or not phone: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM chat_sessions WHERE client_phone=$1 AND source='app' AND status IN ('pending','active') ORDER BY created_at DESC LIMIT 1",
+            phone.strip()
+        )
+        return dict(row) if row else None
+
 async def get_active_chat_by_phone(phone: str) -> dict:
     """Найти активный/pending чат клиента по номеру телефона."""
     if not pool or not phone: return None
