@@ -7321,6 +7321,28 @@ async def add_order_payment(
     note:     str   = Body("", embed=False),
     staff=Depends(get_current_staff),
 ):
+    # 17.11.2026 (касса): раньше записать оплату на любой заказ мог любой сотрудник. Теперь — те же правила,
+    # что у кнопки «+ Добавить оплату» в staff.html: роли с доступом к заказам, кроме мойщика (у него своя
+    # карточка без оплаты); доставленный/отменённый — только долговой заказ (админ или «одобряет долги»).
+    # Способ — наличные/карта/перевод (онлайн-оплаты пишет только банк, pay.py); сумма > 0.
+    role = staff.get("role", "")
+    is_admin = staff.get("sub") == "admin" or role == "admin"
+    if not is_admin and ("orders" not in ROLE_PERMISSIONS.get(role, []) or role == "washer"):
+        raise HTTPException(status_code=403, detail="Нет права принимать оплату")
+    if method not in ("cash", "card", "transfer"):
+        raise HTTPException(status_code=400, detail="Способ оплаты — наличные, карта или перевод")
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Сумма — число")
+    if not (amount > 0) or amount != amount or amount > 1e10:
+        raise HTTPException(status_code=400, detail="Сумма должна быть больше 0")
+    _ord = await db.get_order_by_id(order_id)
+    if not _ord:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if _ord.get("status") in ("delivered", "cancelled"):
+        if not (_ord.get("debt_responsible_id") and (is_admin or staff.get("can_approve_debt"))):
+            raise HTTPException(status_code=403, detail="Заказ закрыт — оплату по долгу принимает админ или кто одобряет долги")
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
     row = await db.add_order_payment(order_id, amount, method, purpose, note, name, None, staff.get("id"))
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
