@@ -9615,7 +9615,8 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
 
 @app.post("/api/admin/orders/{order_id}/items/{item_id}/measure/claim")
 async def claim_measure_review(order_id: int, item_id: int, staff=Depends(get_current_staff)):
-    if not staff.get("can_approve_measure"):
+    # админ проверяет замеры и без отдельной галочки — как approve/reject (17.11.2026, приложение)
+    if not (staff.get("can_approve_measure") or staff.get("role") == "admin"):
         raise HTTPException(status_code=403, detail="Нет прав для проверки замеров")
     item = await db.claim_measure_review(item_id, staff["id"])
     if not item:
@@ -9675,7 +9676,7 @@ async def update_site_contacts(branch: str, data: SiteContactsIn, admin=Depends(
 
 @app.get("/api/staff/pending-reviews")
 async def get_pending_reviews(staff=Depends(get_current_staff)):
-    if not staff.get("can_approve_measure"):
+    if not (staff.get("can_approve_measure") or staff.get("role") == "admin"):
         return {"ok": True, "reviews": []}
     reviews = await db.get_pending_measure_reviews()
     # Вернуть только те, которые не приняты другим сотрудником (или приняты мной)
