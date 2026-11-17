@@ -136,9 +136,17 @@ async def startup():
     # if BOT_TOKEN and APP_URL:
     #     asyncio.create_task(_set_tg_webhook())
 
+_APP_MONEY_PUSH = {"payment_review": "review", "debt_approval": "review",
+                   "cash_handover": "cash", "cash_confirmed": "cash", "cash_rejected": "cash"}
+
+
 async def send_web_push(staff_id: int, title: str, body: str, lead_id: int = None, phone: str = None,
                         order_id: int = None, item_id: int = None, push_type: str = None,
                         driver_staff_id: int = None):
+    # 17.11.2026: денежные уведомления — ещё и в приложение (касса, «✔️ На проверке»)
+    if push_type in _APP_MONEY_PUSH:
+        asyncio.create_task(_app_push_staff(staff_id, title, body,
+                                            {"kind": _APP_MONEY_PUSH[push_type], "type": push_type, "order_id": order_id}))
     if not VAPID_PRIVATE or not VAPID_PUBLIC:
         return
     try:
@@ -7915,6 +7923,15 @@ async def staff_cash_handover(
     note:        str   = Body("", embed=True),
     staff=Depends(get_current_staff),
 ):
+    if not staff.get("id"):
+        raise HTTPException(status_code=403, detail="Только сотрудник")
+    if not (0 < amount <= 1_000_000_000):
+        raise HTTPException(status_code=400, detail="Укажите сумму больше 0")
+    if to_staff_id == staff.get("id"):
+        raise HTTPException(status_code=400, detail="Нельзя сдать самому себе")
+    if to_staff_id not in {c["id"] for c in await db.get_cashiers()}:
+        raise HTTPException(status_code=400, detail="Получатель — не кассир")
+    note = (note or "")[:500]
     from_name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
     row = await db.add_cash_handover(staff["id"], to_staff_id, amount, note)
     handover_id = row["id"]
@@ -7956,8 +7973,23 @@ async def staff_cash_handover(
     return {"ok": True, "handover": row}
 
 
+async def _handover_guard(handover_id: int, staff: dict):
+    """17.11.2026: подтвердить/отклонить передачу наличных может только тот, КОМУ сдают (или админ),
+    и только пока она ожидает — раньше любой сотрудник мог подтвердить чужую (и уже отклонённую) передачу."""
+    h = await db.pool.fetchrow("SELECT to_staff_id, status, COALESCE(to_type,'staff') AS to_type "
+                               "FROM cash_handovers WHERE id=$1", handover_id)
+    if not h or h["to_type"] != "staff":
+        raise HTTPException(status_code=404, detail="Не найдено")
+    is_admin = staff.get("sub") == "admin" or staff.get("role") == "admin"
+    if not is_admin and h["to_staff_id"] != staff.get("id"):
+        raise HTTPException(status_code=403, detail="Эту передачу подтверждает получатель")
+    if h["status"] != "pending":
+        raise HTTPException(status_code=409, detail="Передача уже обработана")
+
+
 @app.post("/api/admin/cash/staff-handover/{handover_id}/confirm")
 async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_staff)):
+    await _handover_guard(handover_id, staff)
     row = await db.confirm_cash_handover(handover_id, staff["id"])
     if not row:
         raise HTTPException(status_code=404, detail="Не найдено")
@@ -7994,6 +8026,7 @@ async def confirm_staff_handover(handover_id: int, staff=Depends(get_current_sta
 
 @app.post("/api/admin/cash/staff-handover/{handover_id}/reject")
 async def reject_staff_handover(handover_id: int, staff=Depends(get_current_staff)):
+    await _handover_guard(handover_id, staff)
     row = await db.reject_cash_handover(handover_id, staff["id"])
     if not row:
         raise HTTPException(status_code=404, detail="Не найдено или уже обработано")
@@ -8463,6 +8496,11 @@ async def create_expense(
     for_staff_id: int   = Body(None, embed=True),
     staff=Depends(get_current_staff),
 ):
+    if not (0 < amount <= 1_000_000_000):   # 17.11.2026: расход из приложения — сумма больше 0
+        raise HTTPException(status_code=400, detail="Укажите сумму больше 0")
+    if category_id not in {c["id"] for c in await db.get_expense_categories()}:
+        raise HTTPException(status_code=400, detail="Выберите категорию расхода")
+    description = (description or "")[:1000]
     branch = staff.get("branch") or ""
     row = await db.create_expense(category_id, amount, description, staff["id"], branch, for_staff_id)
     if not row:
@@ -8700,10 +8738,26 @@ async def get_unconfirmed_payments(_=Depends(get_current_staff)):
     return {"ok": True, "payments": rows}
 
 
+def _can_review_payments(staff: dict) -> bool:
+    return bool(staff.get("sub") == "admin" or staff.get("role") == "admin" or staff.get("can_manage_cash"))
+
+
+async def _payment_review_guard(order_id: int, payment_id: int, action: str):
+    """17.11.2026: оплата должна быть из этого заказа; повторно подтвердить/отклонить нельзя."""
+    p = await db.pool.fetchrow("SELECT order_id, confirmed, confirmed_at FROM order_payments WHERE id=$1", payment_id)
+    if not p or p["order_id"] != order_id:
+        raise HTTPException(status_code=404, detail="Платёж не найден")
+    if action == "confirm" and p["confirmed"]:
+        raise HTTPException(status_code=409, detail="Платёж уже подтверждён")
+    if action == "reject" and not p["confirmed"] and p["confirmed_at"] is not None:
+        raise HTTPException(status_code=409, detail="Платёж уже отклонён")
+
+
 @app.post("/api/admin/orders/{order_id}/payments/{payment_id}/confirm")
 async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_current_staff)):
-    if staff.get("sub") != "admin" and not staff.get("can_manage_cash"):
+    if not _can_review_payments(staff):
         raise HTTPException(status_code=403, detail="Нет доступа")
+    await _payment_review_guard(order_id, payment_id, "confirm")
     row = await db.confirm_payment(payment_id, staff["id"])
     if not row:
         raise HTTPException(status_code=404, detail="Платёж не найден")
@@ -8764,8 +8818,9 @@ async def confirm_payment(order_id: int, payment_id: int, staff=Depends(get_curr
 async def reject_payment(order_id: int, payment_id: int,
                          note: str = Body("", embed=True),
                          staff=Depends(get_current_staff)):
-    if staff.get("sub") != "admin" and not staff.get("can_manage_cash"):
+    if not _can_review_payments(staff):
         raise HTTPException(status_code=403, detail="Нет доступа")
+    await _payment_review_guard(order_id, payment_id, "reject")
     row = await db.reject_payment(payment_id, staff["id"], note)
     if not row:
         raise HTTPException(status_code=404, detail="Платёж не найден")
@@ -9625,10 +9680,32 @@ async def claim_measure_review(order_id: int, item_id: int, staff=Depends(get_cu
 
 @app.get("/api/staff/pending-payment-reviews")
 async def get_pending_payment_reviews(staff=Depends(get_current_staff)):
-    if not staff.get("can_manage_cash") and staff.get("sub") != "admin":
+    if not _can_review_payments(staff):
         return {"ok": True, "payments": []}
     payments = await db.get_unconfirmed_payments()
     return {"ok": True, "payments": payments}
+
+@app.get("/api/staff/review-counts")
+async def staff_review_counts(staff=Depends(get_current_staff)):
+    """«✔️ На проверке» (приложение, 17.11.2026): сколько ждёт решения — по правам сотрудника.
+    payments — карта/перевод (кассир, админ); debts — закрытие в долг (can_approve_debt, админ, менеджер);
+    discounts — запросы скидок водителей (админ, менеджер); handovers — мне сдают наличные."""
+    role = staff.get("role")
+    async with db.pool.acquire() as c:
+        payments = await c.fetchval("SELECT COUNT(*) FROM order_payments WHERE method IN ('card','transfer') "
+                                    "AND confirmed=FALSE AND confirmed_at IS NULL") if _can_review_payments(staff) else 0
+        debts = await c.fetchval("SELECT COUNT(*) FROM debt_approval_requests WHERE status='pending'") \
+            if (staff.get("can_approve_debt") or role in ("admin", "manager")) else 0
+        discounts = await c.fetchval("SELECT COUNT(*) FROM discount_requests WHERE status='pending'") \
+            if role in ("admin", "manager") else 0
+        handovers = await c.fetchval("SELECT COUNT(*) FROM cash_handovers WHERE to_staff_id=$1 AND status='pending' "
+                                     "AND COALESCE(to_type,'staff')='staff'", staff.get("id")) if staff.get("id") else 0
+    can = {"payments": _can_review_payments(staff),
+           "debts": bool(staff.get("can_approve_debt") or role in ("admin", "manager")),
+           "discounts": role in ("admin", "manager")}
+    return {"ok": True, "payments": int(payments or 0), "debts": int(debts or 0), "discounts": int(discounts or 0),
+            "handovers": int(handovers or 0), "total": int((payments or 0) + (debts or 0) + (discounts or 0)), "can": can}
+
 
 @app.get("/api/staff/pending-position-requests")
 async def get_pending_position_requests(staff=Depends(get_current_staff)):
@@ -10143,6 +10220,8 @@ async def approve_discount_request(
     role = staff.get("role")
     if role not in ("admin", "manager"):
         raise HTTPException(403, "Нет доступа")
+    if not (0 < approved_amount <= 100_000_000):
+        raise HTTPException(400, "Укажите сумму скидки больше 0")
     row = await db.resolve_discount_request(request_id, approved_amount, staff["id"])
     if not row:
         raise HTTPException(404, "Запрос не найден или уже обработан")
