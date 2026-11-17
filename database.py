@@ -7036,7 +7036,10 @@ async def get_routes(date: str | None = None, driver_id: int | None = None,
         rows = await conn.fetch(f"""
             SELECT r.*,
                    s.first_name || ' ' || s.last_name AS driver_name,
-                   COUNT(ro.id) AS order_count
+                   COUNT(ro.id) AS order_count,
+                   -- ход маршрута в списке (приложение, 17.11.2026)
+                   COUNT(ro.id) FILTER (WHERE ro.stop_status='done')    AS done_count,
+                   COUNT(ro.id) FILTER (WHERE ro.stop_status='skipped') AS skipped_count
             FROM routes r
             LEFT JOIN staff s ON s.id = r.driver_id
             LEFT JOIN route_orders ro ON ro.route_id = r.id

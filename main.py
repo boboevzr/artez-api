@@ -7560,6 +7560,26 @@ async def add_order_payment(
     return {"ok": True, "payment": row}
 
 
+_PAY_PURPOSES = ("prepayment", "partial", "final", "payment", "delivery")
+
+
+async def _payment_change_guard(order_id: int, existing, staff: dict) -> bool:
+    """Правка/удаление оплаты (17.11.2026 ночь): кассир/админ — всегда (кроме онлайн — проверено выше);
+    автор — только пока заказ не доставлен/не отменён и, для карты/перевода, пока кассир не проверил.
+    Иначе автор мог поменять сумму уже подтверждённой оплаты. Возвращает True для кассира/админа."""
+    cashier = bool(staff.get("sub") == "admin" or staff.get("role") == "admin" or staff.get("can_manage_cash"))
+    if cashier:
+        return True
+    if existing.get("created_by_staff_id") != staff.get("id") or not staff.get("id"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    st = await db.pool.fetchval("SELECT status FROM orders WHERE id=$1", order_id)
+    if st in ("delivered", "cancelled"):
+        raise HTTPException(status_code=403, detail="Заказ закрыт — изменить оплату может кассир")
+    if existing["method"] in ("card", "transfer") and existing["confirmed_at"] is not None:
+        raise HTTPException(status_code=403, detail="Оплата уже проверена кассиром — изменить может кассир")
+    return False
+
+
 @app.patch("/api/admin/orders/{order_id}/payments/{payment_id}")
 async def edit_order_payment(
     order_id:   int,
@@ -7576,12 +7596,21 @@ async def edit_order_payment(
         raise HTTPException(status_code=404, detail="Платёж не найден")
     if str(existing["method"] or "").startswith("online"):  # онлайн-оплата PLUM — только возвратом в «💳 Оплаты» (pay.py)
         raise HTTPException(status_code=400, detail="Онлайн-оплату нельзя изменить — оформите возврат в разделе «💳 Оплаты»")
-    can_edit = (staff.get("sub") == "admin"
-                or staff.get("can_manage_cash")
-                or existing.get("created_by_staff_id") == staff.get("id"))
-    if not can_edit:
-        raise HTTPException(status_code=403, detail="Нет доступа")
+    if not (0 < amount <= 1_000_000_000):
+        raise HTTPException(status_code=400, detail="Укажите сумму больше 0")
+    if method not in ("cash", "card", "transfer"):
+        raise HTTPException(status_code=400, detail="Способ — наличные, карта или перевод")
+    if purpose not in _PAY_PURPOSES and purpose != (existing.get("purpose") or ""):
+        raise HTTPException(status_code=400, detail="Неверный вид платежа")
+    cashier = await _payment_change_guard(order_id, existing, staff)
     row = await db.edit_order_payment(payment_id, amount, method, purpose)
+    if not cashier and method in ("card", "transfer") and (
+            existing["method"] != method or abs(float(existing["amount"] or 0) - amount) > 0.5):
+        # 17.11.2026: автор поменял карту/перевод — снова на проверку кассиру
+        await db.pool.execute("UPDATE order_payments SET confirmed=FALSE, confirmed_at=NULL, confirmed_by=NULL WHERE id=$1",
+                              payment_id)
+        async with db.pool.acquire() as _c:
+            await db._recalc_payment_status(_c, order_id)
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
     pLabel = {"prepayment":"Предоплата","partial":"Частичная оплата","final":"Окончательный расчёт"}
@@ -9280,11 +9309,7 @@ async def delete_order_payment(
         raise HTTPException(status_code=404, detail="Платёж не найден")
     if str(existing["method"] or "").startswith("online"):  # онлайн-оплата PLUM — только возвратом в «💳 Оплаты» (pay.py)
         raise HTTPException(status_code=400, detail="Онлайн-оплату нельзя удалить — оформите возврат в разделе «💳 Оплаты»")
-    can_delete = (staff.get("sub") == "admin"
-                  or staff.get("can_manage_cash")
-                  or existing.get("created_by_staff_id") == staff.get("id"))
-    if not can_delete:
-        raise HTTPException(status_code=403, detail="Нет доступа")
+    await _payment_change_guard(order_id, existing, staff)
     deleted = await db.delete_order_payment(payment_id)
     name = " ".join(filter(None,[staff.get("last_name"),staff.get("first_name")])) or staff.get("login","")
     mLabel = {"cash":"💵 Нал","card":"💳 Карта","transfer":"📲 Перевод"}
