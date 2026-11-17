@@ -9150,6 +9150,7 @@ async def cash_payment_history(year: int = None, month: int = None, day: int = 0
 @app.get("/api/media/{photo_id}")
 async def serve_order_photo(
     photo_id: int,
+    request: Request,
     t: str = None,
     authorization: str = Header(None),
 ):
@@ -9174,45 +9175,13 @@ async def serve_order_photo(
         if not order or order.get("client_phone") != payload.get("phone"):
             raise HTTPException(status_code=403)
 
+    return await _tg_file_response(row['tg_file_id'], request)
+
+async def _tg_file_response(file_id: str, request: Request):
+    """Файл из Telegram — отдаём сами (17.11.2026): раньше редирект на api.telegram.org (в ссылке
+    виден токен бота, .mov приходил как octet-stream и не играл). Тип по расширению + Range (Safari)."""
     async with aiohttp.ClientSession() as s:
-        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={row['tg_file_id']}") as r:
-            data = await r.json()
-    if not data.get("ok"):
-        raise HTTPException(status_code=502, detail="Не удалось получить файл")
-
-    from fastapi.responses import RedirectResponse
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
-    return RedirectResponse(url=file_url)
-
-@app.get("/api/item-media/{media_id}")
-async def serve_item_media(
-    media_id: int,
-    request: Request,
-    t: str = None,
-    authorization: str = Header(None),
-):
-    token = t or (authorization[7:] if authorization and authorization.startswith("Bearer ") else None)
-    if not token:
-        raise HTTPException(status_code=401)
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    except Exception:
-        raise HTTPException(status_code=401)
-
-    if payload.get("type") == "staff" and not await _staff_from_payload(payload):
-        raise HTTPException(status_code=401)
-
-    row = await db.get_item_media_by_id(media_id)
-    if not row:
-        raise HTTPException(status_code=404)
-
-    if payload.get("type") != "staff":
-        order = await db.get_order_by_id(row["order_id"])
-        if not order or order.get("client_phone") != payload.get("phone"):
-            raise HTTPException(status_code=403)
-
-    async with aiohttp.ClientSession() as s:
-        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={row['tg_file_id']}") as r:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile?file_id={file_id}") as r:
             data = await r.json()
     if not data.get("ok"):
         raise HTTPException(status_code=502, detail="Не удалось получить файл")
@@ -9251,6 +9220,35 @@ async def serve_item_media(
 
     return StreamingResponse(_body(), status_code=resp.status if resp.status in (200, 206) else 502,
                              media_type=ctype or resp.content_type or "application/octet-stream", headers=out)
+
+@app.get("/api/item-media/{media_id}")
+async def serve_item_media(
+    media_id: int,
+    request: Request,
+    t: str = None,
+    authorization: str = Header(None),
+):
+    token = t or (authorization[7:] if authorization and authorization.startswith("Bearer ") else None)
+    if not token:
+        raise HTTPException(status_code=401)
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(status_code=401)
+
+    if payload.get("type") == "staff" and not await _staff_from_payload(payload):
+        raise HTTPException(status_code=401)
+
+    row = await db.get_item_media_by_id(media_id)
+    if not row:
+        raise HTTPException(status_code=404)
+
+    if payload.get("type") != "staff":
+        order = await db.get_order_by_id(row["order_id"])
+        if not order or order.get("client_phone") != payload.get("phone"):
+            raise HTTPException(status_code=403)
+
+    return await _tg_file_response(row['tg_file_id'], request)
 
 @app.patch("/api/admin/orders/{order_id}/discount")
 async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
@@ -9673,8 +9671,13 @@ async def upload_item_media(
 
 @app.delete("/api/admin/orders/{order_id}/items/{item_id}/media/{media_id}")
 async def delete_item_media(order_id: int, item_id: int, media_id: int, staff=Depends(get_current_staff)):
-    # Fetch media type and item service before deleting
     media_row = await db.get_item_media_by_id(media_id)
+    if not media_row or media_row.get("item_id") != item_id or media_row.get("order_id") != order_id:
+        raise HTTPException(status_code=404, detail="Файл не найден")
+    _author = " ".join(filter(None, [staff.get("last_name"), staff.get("first_name")])) or staff.get("login", "")
+    if not (staff.get("role") in ("admin", "manager") or staff.get("can_approve_measure")
+            or staff.get("can_override_measure") or (media_row.get("created_by") or "") == _author):
+        raise HTTPException(status_code=403, detail="Удалить файл может автор или проверяющий замеры")
     await db.delete_item_media(media_id)
     sname = f"{staff.get('first_name','')} {staff.get('last_name','')}".strip() or staff.get('login','?')
     item_service = ''; item_pos3 = None
