@@ -6498,11 +6498,17 @@ async def set_order_packer(order_id: int,
     role, me = staff.get("role"), staff.get("login") or ""
     packer_login = (packer_login or "").strip()
     if role == "packer":
-        cur = await db.pool.fetchval("SELECT COALESCE(packer_login, '') FROM orders WHERE id=$1", order_id) if db.pool else None
-        if cur is None:
-            raise HTTPException(status_code=404, detail="Заказ не найден")
-        if not ((packer_login == me and cur in ("", me)) or (packer_login == "" and cur == me)):
+        # проверка и запись — одним UPDATE (ревью безопасности: двое одновременно не возьмут один заказ)
+        if packer_login not in (me, "") or not me:
             raise HTTPException(status_code=403, detail="Упаковщик может взять свободный заказ или отказаться от своего")
+        cond = "COALESCE(packer_login, '') IN ('', $3)" if packer_login else "packer_login = $3"
+        row = await db.pool.fetchrow(
+            f"UPDATE orders SET packer_login=$1 WHERE id=$2 AND {cond} RETURNING id", packer_login or None, order_id, me)
+        if not row:
+            exists = await db.pool.fetchval("SELECT 1 FROM orders WHERE id=$1", order_id)
+            raise HTTPException(status_code=404 if not exists else 409,
+                                detail="Заказ не найден" if not exists else "Заказ уже взял другой упаковщик")
+        return {"ok": True}
     elif role not in ("admin", "manager", "logistics") and staff.get("sub") != "admin":
         raise HTTPException(status_code=403, detail="Нет прав назначать упаковщика")
     async with db.pool.acquire() as conn:
