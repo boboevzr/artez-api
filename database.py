@@ -6169,6 +6169,75 @@ async def backfill_online_discount_from_leads() -> int:
     return len(rows)
 
 
+async def order_discount_view(order_id: int) -> dict | None:
+    """Окно «🏷 Скидка» (17.11.2026): авто-скидка (онлайн 5% / пенсионер-инвалид 10%) и почему её нет,
+    скидки самовывоза/доставки, ручная (сум/%), категория клиента заказа, итог: позиции → скидки → к оплате.
+    К оплате — как в staff/приложении: позиции − все скидки, вниз до 1000."""
+    if not pool or not order_id:
+        return None
+    await recalc_client_discount(order_id)   # свежие суммы (открытые заказы)
+    async with pool.acquire() as conn:
+        o = await conn.fetchrow("""
+            SELECT o.id, o.order_num, o.status, o.source, o.client_phone, o.client_discount_enabled,
+                   o.client_discount_online, o.pickup_type, o.self_pickup_discount, o.delivery_type,
+                   o.delivery_discount_pct,
+                   COALESCE(o.discount_sum,0) AS discount_sum, COALESCE(o.delivery_discount,0) AS delivery_discount,
+                   COALESCE(o.client_discount,0) AS client_discount, COALESCE(o.client_discount_pct,0) AS client_discount_pct,
+                   o.client_discount_kind, COALESCE(o.manual_discount,0) AS manual_discount, o.manual_discount_pct
+              FROM orders o WHERE o.id=$1""", order_id)
+        if not o:
+            return None
+        cc = await conn.fetchrow("""
+            SELECT cc.id, cc.first_name, cc.last_name, cc.discount_category,
+                   cc.discount_category_photo_file_id IS NOT NULL AS has_photo, cc.discount_category_verified_at,
+                   NULLIF(TRIM(CONCAT_WS(' ', st.first_name, st.last_name)), '') AS verified_by_name
+              FROM crm_clients cc LEFT JOIN staff st ON st.id = cc.discount_category_verified_by
+             WHERE cc.phone = $1 LIMIT 1""", o["client_phone"]) if o["client_phone"] else None
+    items_total = float((await get_order_items_billing(order_id))["order_total"] or 0)
+    has_old = (float(o["discount_sum"]) > 0 or float(o["delivery_discount"]) > 0
+               or (o["pickup_type"] == "self" and float(o["self_pickup_discount"] or 0) > 0)
+               or (o["delivery_type"] == "self"
+                   and (float(o["delivery_discount_pct"] or 0) > 0
+                        or float(await get_config("delivery_discount_pct") or 0) > 0)))
+    closed = o["status"] in ("delivered", "cancelled", "returned")
+    auto_amount = float(o["client_discount"]) if o["client_discount_kind"] else 0.0
+    why = None
+    if not auto_amount:
+        if closed:
+            why = "заказ закрыт — скидки уже не пересчитываются"
+        elif not o["client_discount_enabled"]:
+            why = "заказ создан до 17.10 — авто-скидок нет"
+        elif has_old:
+            why = "уже есть скидка за самовывоз/доставку — авто-скидка с ней не складывается"
+        else:
+            why = "заказ оформлен оператором (не через бот/сайт), пенсионер/инвалид не отмечен"
+    cat = cc["discount_category"] if cc and cc["discount_category"] in ("pensioner", "disabled") else None
+    manual = float(o["manual_discount"])
+    other = float(o["discount_sum"]) + float(o["delivery_discount"])
+    total_disc = auto_amount + manual + other
+    net = max(0.0, items_total - total_disc)
+    return {
+        "order_id": o["id"], "order_num": o["order_num"], "status": o["status"], "editable": not closed,
+        "items_total": items_total,
+        "auto": {"kind": o["client_discount_kind"] if auto_amount else None,
+                 "pct": float(o["client_discount_pct"]) if auto_amount else 0.0,
+                 "amount": auto_amount, "why": why},
+        "self_pickup": float(o["discount_sum"]), "self_delivery": float(o["delivery_discount"]),
+        "manual": {"amount": manual,
+                   "pct": float(o["manual_discount_pct"]) if o["manual_discount_pct"] is not None else None},
+        "total_discount": total_disc,
+        "to_pay": float(int(net) - int(net) % 1000),
+        "client": {"id": cc["id"] if cc else None,
+                   "name": (" ".join(filter(None, [cc["first_name"], cc["last_name"]])) if cc else "") or "",
+                   "phone": o["client_phone"] or "",
+                   "category": cat, "category_pct": CLIENT_DISCOUNT_CATEGORY_PCT,
+                   "has_photo": bool(cc and cc["has_photo"]) if cat else False,
+                   "verified_by_name": cc["verified_by_name"] if cat else None,
+                   "verified_at": cc["discount_category_verified_at"].isoformat()
+                                  if cat and cc["discount_category_verified_at"] else None},
+    }
+
+
 async def recalc_client_discount_by_phone(phone: str) -> None:
     """После смены категории клиента (пенсионер/инвалид) — пересчитать его открытые заказы."""
     if not pool or not phone:

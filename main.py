@@ -3370,16 +3370,16 @@ class ClientDiscountCategoryRequest(BaseModel):
 @app.put("/api/clients/{client_id}/discount-category")
 async def client_set_discount_category(client_id: int, req: ClientDiscountCategoryRequest,
                                        staff=Depends(get_current_staff)):
-    _require_clients_perm(staff)
+    if not _can_give_discount(staff):   # 17.11.2026, владелец: отмечают те, кто «Может давать скидку»
+        raise HTTPException(status_code=403, detail="Нет права давать скидку")
     existing = await db.get_crm_client_by_id(client_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Клиент не найден")
     category = (req.discount_category or "").strip() or None
     if category and category not in DISCOUNT_CATEGORIES:
         raise HTTPException(status_code=400, detail="Некорректная категория скидки")
-    pct = req.discount_category_pct if category else None
-    if category and (pct is None or not (0 < pct <= 100)):
-        raise HTTPException(status_code=400, detail="Укажите корректный процент скидки (0–100)")
+    # процент категории — всегда 10 % для всех (17.11.2026, владелец); присланный — игнорируем
+    pct = db.CLIENT_DISCOUNT_CATEGORY_PCT if category else None
     row = await db.set_crm_client_discount_category(
         client_id, category, pct, staff.get("id") if category else None
     )
@@ -3390,10 +3390,18 @@ async def client_set_discount_category(client_id: int, req: ClientDiscountCatego
 @app.post("/api/clients/{client_id}/discount-category/photo")
 async def client_upload_discount_photo(client_id: int, file: UploadFile = File(...),
                                        staff=Depends(get_current_staff)):
-    _require_clients_perm(staff)
+    if not _can_give_discount(staff):
+        raise HTTPException(status_code=403, detail="Нет права давать скидку")
     existing = await db.get_crm_client_by_id(client_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Клиент не найден")
+    file_id = await _tg_upload_discount_doc(file, existing, staff)
+    row = await db.save_crm_client_discount_photo(client_id, file_id)
+    return {"ok": True, "client": row}
+
+
+async def _tg_upload_discount_doc(file: UploadFile, existing: dict, staff: dict) -> str:
+    """Фото удостоверения льготы → медиа-канал TG; возвращает file_id (ошибка — HTTPException)."""
     media_ch = await _get_media_channel()
     if not BOT_TOKEN or not media_ch:
         raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
@@ -3414,13 +3422,12 @@ async def client_upload_discount_photo(client_id: int, file: UploadFile = File(.
     if not result.get("ok"):
         raise HTTPException(status_code=502, detail=f"Telegram: {result.get('description','upload failed')}")
     msg = result["result"]
-    file_id = msg["photo"][-1]["file_id"] if tg_type == "photo" else msg[tg_type]["file_id"]
-    row = await db.save_crm_client_discount_photo(client_id, file_id)
-    return {"ok": True, "client": row}
+    return msg["photo"][-1]["file_id"] if tg_type == "photo" else msg[tg_type]["file_id"]
 
 @app.get("/api/clients/{client_id}/discount-category/photo")
 async def client_get_discount_photo(client_id: int, staff=Depends(get_current_staff)):
-    _require_clients_perm(staff)
+    if not _can_give_discount(staff):
+        _require_clients_perm(staff)
     row = await db.get_crm_client_by_id(client_id)
     if not row or not row.get("discount_category_photo_file_id"):
         raise HTTPException(status_code=404, detail="Фото не найдено")
@@ -3449,6 +3456,69 @@ async def client_get_discount_photo(client_id: int, staff=Depends(get_current_st
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── «🏷 Скидка» одним окном в карточке заказа (17.11.2026, владелец) ──────────────
+def _disc_view_allowed(staff: dict):
+    if staff.get("role") in ("washer", "agent"):   # мойщик видит только прайс, агент — только лиды
+        raise HTTPException(status_code=403, detail="Нет доступа")
+
+
+@app.get("/api/staff/orders/{order_id}/discount")
+async def order_discount_get(order_id: int, staff=Depends(get_current_staff)):
+    _disc_view_allowed(staff)
+    v = await db.order_discount_view(order_id)
+    if not v:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    v["can_give_discount"] = _can_give_discount(staff)
+    return {"ok": True, "discount": v}
+
+
+@app.put("/api/staff/orders/{order_id}/client-category")
+async def order_client_category(order_id: int, category: str = Form(...), file: UploadFile | None = File(None),
+                                staff=Depends(get_current_staff)):
+    """«🎗 Пенсионер / ♿ инвалид» клиенту заказа — с фото удостоверения (обязательно, если фото ещё нет);
+    category=none — снять. Клиент ищется по телефону заказа, нет — создаётся. Скидка 10 % — сервер пересчитывает."""
+    if not _can_give_discount(staff):
+        raise HTTPException(status_code=403, detail="Нет права давать скидку")
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if order.get("status") in ("delivered", "cancelled", "returned"):
+        raise HTTPException(status_code=400, detail="Заказ закрыт — скидку уже не изменить")
+    phone = (order.get("client_phone") or "").strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail="У заказа нет телефона клиента")
+    category = (category or "").strip().lower()
+    if category in ("", "none", "null"):
+        category = None
+    elif category not in DISCOUNT_CATEGORIES:
+        raise HTTPException(status_code=400, detail="Категория — пенсионер или инвалид")
+    client = await db.get_crm_client_by_phone(phone)
+    if category:
+        has_photo = bool(client and client.get("discount_category_photo_file_id"))
+        if file is None and not has_photo:
+            raise HTTPException(status_code=400, detail="Нужно фото удостоверения")
+        if not client:
+            client = await db.upsert_crm_client(phone, order.get("client_first_name") or "",
+                                                order.get("client_last_name") or "", source="staff")
+        if not client:
+            raise HTTPException(status_code=500, detail="Не удалось создать клиента")
+        file_id = await _tg_upload_discount_doc(file, client, staff) if file is not None else None
+        await db.set_crm_client_discount_category(client["id"], category, db.CLIENT_DISCOUNT_CATEGORY_PCT, staff.get("id"))
+        if file_id:
+            await db.save_crm_client_discount_photo(client["id"], file_id)
+    elif client and client.get("discount_category"):
+        await db.set_crm_client_discount_category(client["id"], None, None, None)
+    await db.recalc_client_discount(order_id)
+    name = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
+    label = {"pensioner": "🎗 Пенсионер", "disabled": "♿ Инвалид"}.get(category or "", "")
+    await db.add_order_activity(order_id, staff.get("id"), name, "client_category",
+                                f"{label} — скидка {int(db.CLIENT_DISCOUNT_CATEGORY_PCT)}% (фото удостоверения)"
+                                if category else "Категория пенсионер/инвалид снята")
+    v = await db.order_discount_view(order_id)
+    v["can_give_discount"] = True
+    return {"ok": True, "discount": v}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
