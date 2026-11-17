@@ -12784,7 +12784,7 @@ CHAT_MEDIA_PER_10MIN = 20
 # только эти типы (ревью безопасности): SVG/HTML и прочее под видом картинки не принимаем — иначе отдача с нашего домена
 CHAT_PHOTO_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif"}
 CHAT_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/webm", "video/3gpp", "video/x-m4v"}
-_chat_media_locks: dict[str, asyncio.Lock] = {}
+_chat_media_locks: dict[str, list] = {}   # код чата → [Lock, сколько запросов держат/ждут]
 
 
 def _chat_media_magic_ok(kind: str, data: bytes) -> bool:
@@ -12854,12 +12854,16 @@ async def chat_send_media(code: str, request: Request, file: UploadFile = File(.
     if not _chat_media_magic_ok(kind, data):
         raise HTTPException(status_code=400, detail="Можно отправить только фото или видео")
     # лимит частоты — под блокировкой чата: проверка, загрузка и запись не обгоняют друг друга
-    lock = _chat_media_locks.setdefault(code, asyncio.Lock())
+    # одна блокировка на чат со счётчиком: удаляем, только когда её никто не держит и не ждёт
+    # (иначе ждущий и новый запрос получили бы разные блокировки и обошли лимит)
+    ent = _chat_media_locks.setdefault(code, [asyncio.Lock(), 0])
+    ent[1] += 1
     try:
-        async with lock:
+        async with ent[0]:
             return await _chat_media_store(code, session, who, sname, staff, kind, ctype, data, caption, file.filename)
     finally:
-        if not lock.locked():   # словарь блокировок не растёт (ревью e1)
+        ent[1] -= 1
+        if ent[1] <= 0 and _chat_media_locks.get(code) is ent:
             _chat_media_locks.pop(code, None)
 
 
