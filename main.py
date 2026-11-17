@@ -10366,7 +10366,7 @@ async def driver_deliver(
     note = f"Маршрут (web): доставлен клиенту{f', долг {debt:.0f} сум' if debt > 0 else ''}"
     async with db.pool.acquire() as conn:
         await conn.execute(
-            "UPDATE orders SET status='delivered', updated_at=NOW() WHERE id=$1", order_id)
+            "UPDATE orders SET status='delivered', delivered_at=COALESCE(delivered_at, NOW()), updated_at=NOW() WHERE id=$1", order_id)
         await conn.execute(
             "UPDATE route_orders SET stop_status='done' WHERE order_id=$1 AND stop_status!='done'", order_id)
         await conn.execute(

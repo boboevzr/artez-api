@@ -540,6 +540,8 @@ async def create_tables():
         # захват «водитель записывает оплату» (атомарный UPDATE … RETURNING вместо advisory lock на соединении пула)
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_pay_claim_at TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_pay_claim_token VARCHAR(32) DEFAULT NULL",
+        # 17.11.2026: дата «Доставлен» — от неё ЗП «за единицу»
+        "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ DEFAULT NULL",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         # Расходы: источник выплаты (сейф / банк / наличные)
@@ -3304,6 +3306,71 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
                     staff_id, k["metric"], float(k["target_value"]),
                     k.get("bonus_type", "fixed"), float(k.get("bonus_value") or 0))
 
+async def per_unit_earnings(conn, staff_logins: dict, date_from, date_to) -> dict:
+    """ЗП «за единицу» (17.11.2026, владелец): {staff_id: [позиция]} за период по дате «Доставлен» (Ташкент).
+    Мойщику — позиции, где он washer_login, заказ доставлен; м² — фактические м², шт — количество (sqm);
+    ставка из staff_salary_per_unit по услуге+варианту, иначе — та же услуга той же скорости, иначе «нет ставки»;
+    ставка «%» — от цены по прайсу (list_price × кол-во), не от цены со скидкой. «Замерил» на ЗП не влияет."""
+    out: dict = {}
+    if not staff_logins:
+        return out
+    login_to_id = {lg: sid for sid, lg in staff_logins.items() if lg}
+    item_rows = await conn.fetch("""
+        SELECT oi.washer_login, oi.service_key, oi.type_key,
+               COALESCE(oi.unit_key_snap, 'm2') AS unit,
+               COALESCE(oi.actual_sqm, oi.sqm, 0) AS qty,
+               COALESCE(oi.list_price, oi.price_per_sqm, 0) AS list_price,
+               COALESCE(oi.service_ru, oi.service) AS label,
+               (COALESCE(o.delivered_at,
+                         (SELECT MAX(h.created_at) FROM order_status_history h
+                           WHERE h.order_num = o.order_num AND h.new_status = 'delivered'),
+                         o.updated_at)::timestamptz AT TIME ZONE 'Asia/Tashkent')::date AS day
+          FROM order_items oi JOIN orders o ON o.id = oi.order_id
+         WHERE oi.washer_login = ANY($3::text[]) AND o.status = 'delivered'
+           AND (COALESCE(o.delivered_at,
+                         (SELECT MAX(h.created_at) FROM order_status_history h
+                           WHERE h.order_num = o.order_num AND h.new_status = 'delivered'),
+                         o.updated_at)::timestamptz AT TIME ZONE 'Asia/Tashkent')::date BETWEEN $1 AND $2
+    """, date_from, date_to, list(login_to_id))
+    rates_map: dict = {}
+    for r in await conn.fetch(
+            "SELECT staff_id, service_key, type_key, unit_rate, rate_type FROM staff_salary_per_unit "
+            "WHERE staff_id = ANY($1::int[]) AND service_key NOT IN ('__pickup__', '__delivery__')",
+            list(staff_logins)):
+        rates_map.setdefault(r['staff_id'], {})[(r['service_key'], r['type_key'])] = r
+    speed_of = {(r['service_key'], r['type_key']): r['speed_key']
+                for r in await conn.fetch("SELECT service_key, type_key, speed_key FROM service_types")}
+
+    def _speed(sk, tk):
+        return speed_of.get((sk, tk)) or ('express' if str(tk or '').startswith('express') else 'standard')
+
+    def _rate(rates: dict, sk, tk):
+        r = rates.get((sk, tk))
+        if r:
+            return r
+        sp = _speed(sk, tk)
+        for (rs, rt), row in rates.items():
+            if rs == sk and _speed(rs, rt) == sp:
+                return row
+        return None
+
+    for it in item_rows:
+        sid = login_to_id.get(it['washer_login'])
+        qty = float(it['qty'] or 0)
+        if not sid or qty <= 0:
+            continue
+        r = _rate(rates_map.get(sid, {}), it['service_key'], it['type_key'])
+        rtype = (r['rate_type'] or 'sum') if r else None
+        rate = float(r['unit_rate'] or 0) if r else None
+        base = qty * float(it['list_price'] or 0) if rtype == 'percent' else 0.0
+        earn = (base * rate / 100 if rtype == 'percent' else qty * rate) if r else 0.0
+        out.setdefault(sid, []).append({'day': str(it['day']), 'label': it['label'] or it['service_key'] or '—',
+                                        'unit': it['unit'], 'qty': qty, 'rate_type': rtype, 'rate': rate,
+                                        'base': base, 'earn': earn})
+    return out
+
+
+
 async def get_monthly_salary_calc(year: int, month: int) -> list:
     """Расчёт зарплаты всех активных сотрудников за месяц."""
     if not pool: return []
@@ -3451,6 +3518,12 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
         packing_map = {r['staff_id']: {'total': float(r['total_sum']), 'count': int(r['order_count'])}
                        for r in packing_rows}
 
+        # ── ЗП «за единицу» (17.11.2026, владелец) — общая функция per_unit_earnings ──
+        pu_types = ('per_unit', 'fixed_per_unit')
+        pu_items_map = await per_unit_earnings(
+            conn, {x['id']: x['login'] for x in staff_rows if (x['salary_type'] or '') in pu_types and x['login']},
+            start, end)
+
         results = []
         for s in staff_rows:
             sid      = s['id']
@@ -3469,9 +3542,9 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 'total':       None,
             }
 
-            # ── A: Фиксированная основа (fixed и fixed_percent) ──
+            # ── A: Фиксированная основа (fixed, fixed_percent, fixed_per_unit) ──
             fixed_earn = 0.0
-            if sal_type in ('fixed', 'fixed_percent'):
+            if sal_type in ('fixed', 'fixed_percent', 'fixed_per_unit'):
                 ts = ts_map.get(sid)
                 norm_hours = norm_days * 8.0
                 if ts:
@@ -3578,12 +3651,33 @@ async def get_monthly_salary_calc(year: int, month: int) -> list:
                 entry['calc']  = {'lines': calc_lines, 'norm_days': norm_days}
                 entry['total'] = round(fixed_earn + total_pct, 2)
 
+            # ── C2: За единицу (per_unit) и «оклад + за единицу» (fixed_per_unit) ──
+            elif sal_type in pu_types:
+                agg: dict = {}
+                unit_earn = 0.0
+                for it in pu_items_map.get(sid, []):
+                    key = (it['label'], it['unit'], it['rate_type'], it['rate'])
+                    ln = agg.setdefault(key, {'label': it['label'], 'unit': it['unit'], 'rate_type': it['rate_type'],
+                                              'rate': it['rate'], 'qty': 0.0, 'base': 0.0, 'earn': 0.0, 'count': 0,
+                                              'no_rate': it['rate'] is None})
+                    ln['qty'] += it['qty']; ln['base'] += it['base']; ln['earn'] += it['earn']; ln['count'] += 1
+                    unit_earn += it['earn']
+                lst = sorted(agg.values(), key=lambda x: (-x['earn'], x['label']))
+                for ln in lst:
+                    ln['qty'] = round(ln['qty'], 3); ln['earn'] = round(ln['earn'], 2); ln['base'] = round(ln['base'], 2)
+                calc = entry['calc'] if isinstance(entry['calc'], dict) else {}
+                calc.update({'per_unit': lst, 'unit_earn': round(unit_earn, 2), 'norm_days': norm_days})
+                if sal_type == 'fixed_per_unit' and fixed_earn:
+                    calc['fixed'] = {'rate': base, 'earn': fixed_earn}
+                entry['calc'] = calc
+                entry['total'] = round(fixed_earn + unit_earn, 2)
+
             # ── D: Прочие типы (не реализованы) ──
             elif sal_type not in ('fixed',):
                 entry['total'] = None
 
             # ── E: Часы из табеля для не-фиксированных типов ──
-            if sal_type not in ('fixed', 'fixed_percent'):
+            if sal_type not in ('fixed', 'fixed_percent', 'fixed_per_unit'):
                 ts = ts_map.get(sid)
                 if ts:
                     norm_hours = norm_days * 8.0
@@ -4124,7 +4218,7 @@ async def init_timesheet_month(year: int, month: int, until_today: bool = False)
             SELECT id, salary_type, hire_date FROM staff
             WHERE (active IS NULL OR active = TRUE)
               AND COALESCE(role,'') != 'agent'
-              AND COALESCE(salary_type,'') NOT IN ('percent','per_unit','per_point')
+              AND COALESCE(salary_type,'') NOT IN ('percent','per_unit','per_point')   -- fixed_per_unit — с окладом, в табель
         """)
         count = 0
         skipped = 0
@@ -5419,6 +5513,10 @@ async def update_order_status(order_id: int, status: str, note: str = "") -> dic
     async with pool.acquire() as conn:
         if status == 'washing':
             sql = "UPDATE orders SET status=$2, washed_at=NOW() WHERE id=$1 RETURNING *"
+        elif status == 'delivered':
+            # 17.11.2026: дата доставки — от неё считается ЗП «за единицу» (начисление только после «Доставлен»)
+            sql = """UPDATE orders SET status=$2, delivered_at=COALESCE(delivered_at, NOW()), postponed_until=NULL,
+                     postpone_reason=NULL, postponed_by=NULL WHERE id=$1 RETURNING *"""
         elif status == 'packing':
             sql = "UPDATE orders SET status=$2, packed_at=NOW() WHERE id=$1 RETURNING *"
         elif status != 'ready':
@@ -7829,7 +7927,7 @@ async def mark_order_delivered_with_debt(order_id: int, responsible_id: int,
         due = date.today() + timedelta(days=7)
     async with pool.acquire() as conn:
         await conn.execute("""
-            UPDATE orders SET status='delivered', debt_responsible_id=$2,
+            UPDATE orders SET status='delivered', delivered_at=COALESCE(delivered_at, NOW()), debt_responsible_id=$2,
                    debt_due_date=$3, debt_approved_at=NOW() WHERE id=$1
         """, order_id, responsible_id, due)
         await conn.execute(
@@ -8056,7 +8154,7 @@ async def resolve_debt_approval(request_id: int, resolution: str, resolved_by: i
         if resolution == 'approved' and responsible_id:
             due = date.today() + timedelta(days=7)
             await conn.execute("""
-                UPDATE orders SET status='delivered', debt_responsible_id=$2,
+                UPDATE orders SET status='delivered', delivered_at=COALESCE(delivered_at, NOW()), debt_responsible_id=$2,
                        debt_due_date=$3, debt_approved_at=NOW() WHERE id=$1
             """, r['order_id'], responsible_id, due)
             await conn.execute(
@@ -9087,7 +9185,7 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
         norm_days   = int((st['salary_work_days'] or 26)) if st else 26
         staff_login = (st['login'] or '') if st else ''
         norm_hours  = norm_days * 8.0
-        hourly_rate = sal_rate / norm_hours if (sal_type in ('fixed','fixed_percent') and norm_hours > 0) else 0.0
+        hourly_rate = sal_rate / norm_hours if (sal_type in ('fixed','fixed_percent','fixed_per_unit') and norm_hours > 0) else 0.0
 
         # Табель за месяц
         ts_rows = await conn.fetch(
@@ -9129,6 +9227,14 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
                     for r in day_rows
                 }
 
+        # ЗП «за единицу» по дням (17.11.2026): по дате «Доставлен», та же общая функция, что в месячном расчёте
+        unit_daily: dict = {}
+        if sal_type in ('per_unit', 'fixed_per_unit') and staff_login:
+            from datetime import timedelta as _td
+            for it in (await per_unit_earnings(conn, {staff_id: staff_login}, period,
+                                               period_end - _td(days=1))).get(staff_id, []):
+                unit_daily[it['day']] = round(unit_daily.get(it['day'], 0.0) + it['earn'], 2)
+
     # Карта табеля {date_str: hours}
     ts_map = {str(r['date']): float(r['hours'] or 0) for r in ts_rows
               if r['type'] in ('work', 'overtime')}
@@ -9158,7 +9264,7 @@ async def get_salary_daily_breakdown(staff_id: int, year: int, month: int) -> di
         # Начисление: из табеля (fixed) + мойка по дням (percent)
         hours_today = ts_map.get(date_str, 0.0)
         accrual = round(hourly_rate * hours_today, 2) if hourly_rate > 0 else 0.0
-        accrual = round(accrual + washing_daily.get(date_str, 0.0), 2)
+        accrual = round(accrual + washing_daily.get(date_str, 0.0) + unit_daily.get(date_str, 0.0), 2)
 
         advance = 0.0; salary_payment = 0.0; fine = 0.0; other = 0.0
         for e in entries:
