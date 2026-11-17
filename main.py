@@ -6422,11 +6422,7 @@ async def order_return(order_id: int, body: dict = Body({}), staff=Depends(get_c
     elif _can_drive(staff):
         if st != "delivery":
             raise HTTPException(status_code=400, detail="Водитель оформляет возврат только при доставке")
-        mine = await db.pool.fetchval(
-            "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
-            "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1", order_id, staff.get("id"))
-        if not mine:
-            raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
+        await _own_stop_guard(order_id, staff)
     else:
         raise HTTPException(status_code=403, detail="Возврат оформляет водитель или менеджер")
     reason = str(body.get("reason") or "bad_wash")
@@ -7504,13 +7500,7 @@ async def upload_order_photo(
     # Водитель (приложение/staff) — только к заказам СВОЕГО маршрута за последние дни (16.11.2026);
     # остальные роли — как раньше.
     if staff.get("role") == "driver":
-        async with db.pool.acquire() as conn:
-            mine = await conn.fetchval(
-                "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
-                "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1",
-                order_id, staff["id"])
-        if not mine:
-            raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
+        await _own_stop_guard(order_id, staff)
     media_ch = await _get_media_channel()
     if not BOT_TOKEN or not media_ch:
         raise HTTPException(status_code=503, detail="Медиа-хранилище не настроено")
@@ -10726,17 +10716,28 @@ async def get_my_route(staff=Depends(get_current_staff)):
     return {"ok": True, "routes": routes, "payment_events": payment_events}
 
 async def _own_stop_guard(order_id: int, staff: dict):
-    """Действия водителя по остановке («Забрал», «Доставил», «В долг», «Не забрал», отмены…) — только по заказу из
-    СВОЕГО маршрута за последние 3 дня (как оплата водителем). Раньше любой водитель мог отметить чужой заказ
+    """Действия водителя по остановке («Забрал», «Доставил», «В долг», «Не забрал», отмены…), оплата водителем,
+    возврат у двери, фото — только по заказу из СВОЕГО маршрута за последние 3 дня (последний маршрут заказа);
+    маршрут без водителя — любой водитель того же филиала; чужой назначенный — 403 с именем водителя. Раньше любой водитель мог отметить чужой заказ
     доставленным или закрыть его в долг. Админ/менеджер — без ограничения."""
     if staff.get("sub") == "admin" or staff.get("role") in ("admin", "manager"):
         return
     # последний маршрут заказа (если заказ перевели другому водителю — прежний уже не действует)
-    drv = await db.pool.fetchval(
-        "SELECT r.driver_id FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
+    r = await db.pool.fetchrow(
+        "SELECT r.driver_id, r.branch, NULLIF(TRIM(CONCAT_WS(' ', s.first_name, s.last_name)), '') AS driver_name "
+        "FROM route_orders ro JOIN routes r ON r.id = ro.route_id LEFT JOIN staff s ON s.id = r.driver_id "
         "WHERE ro.order_id=$1 AND r.date >= CURRENT_DATE - 3 ORDER BY r.date DESC, r.id DESC LIMIT 1", order_id)
-    if drv is None or drv != staff.get("id"):
-        raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
+    if not r:
+        raise HTTPException(status_code=403, detail="Заказ не в маршруте — попросите менеджера добавить его в маршрут")
+    if r["driver_id"] is None:
+        # маршрут без водителя — любой водитель того же филиала (как было в staff), чтобы утром не встала доставка
+        my_branch = (staff.get("branch") or "").strip()
+        if not my_branch or not (r["branch"] or "").strip() or my_branch == (r["branch"] or "").strip():
+            return
+        raise HTTPException(status_code=403, detail="Маршрут другого филиала")
+    if r["driver_id"] != staff.get("id"):
+        raise HTTPException(status_code=403, detail=f"Маршрут назначен {r['driver_name'] or 'другому водителю'}. "
+                                                    "Попросите менеджера переназначить")
 
 
 @app.post("/api/staff/my-route/stops/{order_id}/take-pickup")
@@ -11038,13 +11039,7 @@ async def driver_pay(
         order = await conn.fetchrow("SELECT * FROM orders WHERE id=$1", order_id)
         if not order:
             raise HTTPException(404, "Заказ не найден")
-        if staff.get("role") != "admin":
-            mine = await conn.fetchval(
-                "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
-                "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1",
-                order_id, staff["id"])
-            if not mine:
-                raise HTTPException(403, "Заказ не в вашем маршруте")
+    await _own_stop_guard(order_id, staff)   # та же проверка маршрута, что у «Доставил»
     # Одна оплата за раз по заказу: атомарный захват orders.driver_pay_claim_at (UPDATE … RETURNING), без
     # удержания соединения пула (advisory lock держал соединение и мог исчерпать пул). Повтор ждёт первую
     # (до ~10 с, соединение не держит) и видит её; зависший захват истекает через 2 мин (сама запись — мс).
