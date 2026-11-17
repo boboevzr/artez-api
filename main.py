@@ -7047,8 +7047,9 @@ async def _items_edit_guard(order_id: int, staff: dict, deleting: bool = False) 
         raise HTTPException(status_code=403, detail="Нет доступа к позициям заказа")
     if not is_admin and staff.get("can_edit_items") is False:
         raise HTTPException(status_code=403, detail="Нет права менять позиции — включается в карточке сотрудника")
-    if deleting and role == "washer":
-        raise HTTPException(status_code=403, detail="Удалить позицию может менеджер")
+    # удалить позицию — только менеджер и админ (владелец 17.11.2026: «с удалением осторожнее»)
+    if deleting and not is_admin and role != "manager":
+        raise HTTPException(status_code=403, detail="Удалить позицию может только менеджер")
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
