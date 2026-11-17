@@ -627,6 +627,14 @@ async def create_tables():
         )""",
         "CREATE INDEX IF NOT EXISTS idx_attendance_events_staff ON staff_attendance_events(staff_id)",
         "CREATE INDEX IF NOT EXISTS idx_attendance_events_created ON staff_attendance_events(created_at)",
+        # «Приход только у цеха» (17.11.2026): координаты отметки, точность GPS, расстояние до цеха,
+        # автозакрытие незакрытой отметки в 23:59; у сотрудника — «отмечаться в любом месте»
+        "ALTER TABLE staff_attendance_events ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION",
+        "ALTER TABLE staff_attendance_events ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION",
+        "ALTER TABLE staff_attendance_events ADD COLUMN IF NOT EXISTS accuracy_m INTEGER",
+        "ALTER TABLE staff_attendance_events ADD COLUMN IF NOT EXISTS distance_m INTEGER",
+        "ALTER TABLE staff_attendance_events ADD COLUMN IF NOT EXISTS auto_closed BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE staff ADD COLUMN IF NOT EXISTS attendance_anywhere BOOLEAN DEFAULT FALSE",
         # Журнал отправок чека клиенту — для предупреждения о повторной отправке
         """CREATE TABLE IF NOT EXISTS order_receipt_log (
             id          SERIAL PRIMARY KEY,
@@ -4153,7 +4161,7 @@ async def reset_timesheet_month(year: int, month: int) -> dict:
 #  ОТМЕТКИ ПРИХОДА/УХОДА (staff_attendance)
 # ══════════════════════════════════════
 
-async def attendance_check_in(staff_id: int) -> dict:
+async def attendance_check_in(staff_id: int, geo: dict | None = None) -> dict:
     if not pool: return {}
     today = datetime.now(_TASHKENT).date()
     async with pool.acquire() as conn:
@@ -4165,14 +4173,15 @@ async def attendance_check_in(staff_id: int) -> dict:
         """, staff_id, today)
         if events and events[-1]["event_type"] == "in":
             return {"error": "already_in"}
+        g = geo or {}
         row = await conn.fetchrow("""
-            INSERT INTO staff_attendance_events (staff_id, event_type)
-            VALUES ($1, 'in')
-            RETURNING id, staff_id, event_type, created_at
-        """, staff_id)
+            INSERT INTO staff_attendance_events (staff_id, event_type, lat, lon, accuracy_m, distance_m)
+            VALUES ($1, 'in', $2, $3, $4, $5)
+            RETURNING id, staff_id, event_type, created_at, distance_m
+        """, staff_id, g.get("lat"), g.get("lon"), g.get("accuracy_m"), g.get("distance_m"))
         return dict(row) if row else {}
 
-async def attendance_check_out(staff_id: int) -> dict:
+async def attendance_check_out(staff_id: int, geo: dict | None = None) -> dict:
     if not pool: return {}
     today = datetime.now(_TASHKENT).date()
     async with pool.acquire() as conn:
@@ -4184,12 +4193,39 @@ async def attendance_check_out(staff_id: int) -> dict:
         """, staff_id, today)
         if not events or events[-1]["event_type"] == "out":
             return {"error": "not_checked_in"}
+        g = geo or {}
         row = await conn.fetchrow("""
-            INSERT INTO staff_attendance_events (staff_id, event_type)
-            VALUES ($1, 'out')
-            RETURNING id, staff_id, event_type, created_at
-        """, staff_id)
+            INSERT INTO staff_attendance_events (staff_id, event_type, lat, lon, accuracy_m, distance_m)
+            VALUES ($1, 'out', $2, $3, $4, $5)
+            RETURNING id, staff_id, event_type, created_at, distance_m
+        """, staff_id, g.get("lat"), g.get("lon"), g.get("accuracy_m"), g.get("distance_m"))
         return dict(row) if row else {}
+
+async def attendance_autoclose() -> int:
+    """Незакрытый приход прошлых дней → уход в 23:59:59 того дня (Ташкент) с пометкой auto_closed
+    («уход не отмечен»). На оклад не влияет: он считается по табелю, отметки — только учёт."""
+    if not pool: return 0
+    today = datetime.now(_TASHKENT).date()
+    n = 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT DISTINCT ON (staff_id) staff_id, event_type, created_at
+            FROM staff_attendance_events
+            ORDER BY staff_id, created_at DESC, id DESC
+        """)
+        for r in rows:
+            if r["event_type"] != "in":
+                continue
+            day = r["created_at"].astimezone(_TASHKENT).date()
+            if day >= today:
+                continue
+            end = datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=_TASHKENT)
+            await conn.execute("""
+                INSERT INTO staff_attendance_events (staff_id, event_type, created_at, auto_closed)
+                VALUES ($1, 'out', $2, TRUE)
+            """, r["staff_id"], end)
+            n += 1
+    return n
 
 def _pair_attendance_sessions(events: list) -> list:
     """Pairs consecutive in/out events (sorted ascending by created_at) into sessions."""
@@ -4197,11 +4233,14 @@ def _pair_attendance_sessions(events: list) -> list:
     open_session = None
     for ev in events:
         if ev["event_type"] == "in":
-            open_session = {"check_in_at": ev["created_at"], "check_out_at": None}
+            open_session = {"check_in_at": ev["created_at"], "check_out_at": None,
+                            "in_distance_m": ev.get("distance_m"), "out_distance_m": None, "auto_out": False}
             sessions.append(open_session)
         elif ev["event_type"] == "out":
             if open_session is not None and open_session["check_out_at"] is None:
                 open_session["check_out_at"] = ev["created_at"]
+                open_session["out_distance_m"] = ev.get("distance_m")
+                open_session["auto_out"] = bool(ev.get("auto_closed"))
                 open_session = None
             # else: stray "out" with no open session — defensively skip it
     return sessions
@@ -4218,7 +4257,7 @@ async def get_attendance_today(staff_id: int) -> dict:
     today = datetime.now(_TASHKENT).date()
     async with pool.acquire() as conn:
         events = await conn.fetch("""
-            SELECT id, staff_id, event_type, created_at
+            SELECT id, staff_id, event_type, created_at, distance_m, auto_closed
             FROM staff_attendance_events
             WHERE staff_id=$1 AND (created_at AT TIME ZONE 'Asia/Tashkent')::date = $2
             ORDER BY created_at
@@ -4233,6 +4272,8 @@ async def get_attendance_today(staff_id: int) -> dict:
                 {
                     "check_in_at": s["check_in_at"].isoformat() if s["check_in_at"] else None,
                     "check_out_at": s["check_out_at"].isoformat() if s["check_out_at"] else None,
+                    "in_distance_m": s.get("in_distance_m"), "out_distance_m": s.get("out_distance_m"),
+                    "auto_out": s.get("auto_out", False),
                 }
                 for s in sessions
             ],
@@ -4243,7 +4284,7 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
     if not pool: return []
     async with pool.acquire() as conn:
         sql = """
-            SELECT a.staff_id, a.event_type, a.created_at,
+            SELECT a.staff_id, a.event_type, a.created_at, a.distance_m, a.auto_closed,
                    s.first_name, s.last_name, s.role, s.branch, s.salary_type
             FROM staff_attendance_events a
             JOIN staff s ON s.id = a.staff_id
@@ -4264,6 +4305,8 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
             groups.setdefault(key, []).append({
                 "event_type": r["event_type"],
                 "created_at": r["created_at"],
+                "distance_m": r["distance_m"],
+                "auto_closed": r["auto_closed"],
             })
             if key not in meta:
                 meta[key] = {
@@ -4286,6 +4329,8 @@ async def get_admin_attendance(year: int, month: int, staff_id: int = None) -> l
                     {
                         "check_in_at": s["check_in_at"].isoformat() if s["check_in_at"] else None,
                         "check_out_at": s["check_out_at"].isoformat() if s["check_out_at"] else None,
+                        "in_distance_m": s.get("in_distance_m"), "out_distance_m": s.get("out_distance_m"),
+                        "auto_out": s.get("auto_out", False),
                     }
                     for s in sessions
                 ],

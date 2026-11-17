@@ -121,6 +121,7 @@ async def startup():
     asyncio.create_task(_debt_reminder_worker())
     asyncio.create_task(_postpone_reminder_worker())
     asyncio.create_task(_delivery_digest_worker())
+    asyncio.create_task(_attendance_autoclose_worker())
     asyncio.create_task(_route_rollover_worker())
     await db.ensure_sms_dispatch_table()
     await db.ensure_sms_operator_prices()
@@ -527,6 +528,18 @@ async def _send_delivery_digest(kind: str):
         text = _build_delivery_digest(mine, now, kind)
         if text:
             await send_tg(rcp["tg_id"], text[:4000])
+
+
+async def _attendance_autoclose_worker():
+    """Незакрытые отметки прошлых дней закрываются уходом в 23:59 («уход не отмечен») — раз в 10 минут."""
+    while True:
+        try:
+            n = await db.attendance_autoclose()
+            if n:
+                logging.info(f"attendance autoclose: {n}")
+        except Exception as e:
+            logging.warning(f"attendance autoclose error: {e}")
+        await asyncio.sleep(600)
 
 
 async def _delivery_digest_worker():
@@ -1433,6 +1446,7 @@ def _staff_public(s: dict) -> dict:
         "fired":                bool(s.get("fired", False)),
         "can_view_timesheet":   bool(s.get("can_view_timesheet", False)),
         "hide_client_phone":    bool(s.get("hide_client_phone", False)),
+        "attendance_anywhere":  bool(s.get("attendance_anywhere", False)),
         "salary_type":          s.get("salary_type"),
     }
 
@@ -1710,26 +1724,110 @@ async def reset_timesheet_month_ep(year: int, month: int, body: dict, me=Depends
 #  ОТМЕТКИ ПРИХОДА/УХОДА (staff_attendance)
 # ══════════════════════════════════════
 
+# ── «Приход только у цеха» (17.11.2026, владелец) ─────────────────────────────
+# Точка цеха — branch_<филиал>_location из настроек сайта (та же, что на карте водителя),
+# радиус — config attendance_radius_m (по умолчанию 20 м). Принимаем, если
+# (расстояние − погрешность GPS) ≤ радиус; погрешность > 100 м — просим выйти к окну.
+# У сотрудника «Отметка прихода: в любом месте» (staff.attendance_anywhere) — без проверки.
+_ATT_MAX_ACCURACY_M = 100
+_BRANCH_KEY = {"зарафшан": "zarafshan", "навои": "navoi", "zarafshon": "zarafshan", "navoiy": "navoi"}
+
+
+def _parse_geo_point(v):
+    if not v:
+        return None
+    try:
+        j = _json.loads(v)
+        if isinstance(j, dict) and j.get("lat") is not None and j.get("lon") is not None:
+            return float(j["lat"]), float(j["lon"])
+    except Exception:
+        pass
+    try:
+        a, b = [float(x) for x in str(v).split(",")[:2]]
+        return a, b
+    except Exception:
+        return None
+
+
+def _distance_m(lat1, lon1, lat2, lon2) -> float:
+    import math
+    r = 6371000.0
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * r * math.asin(math.sqrt(a))
+
+
+async def _attendance_radius_m() -> int:
+    try:
+        v = int(float(await db.get_config("attendance_radius_m") or 20))
+    except Exception:
+        v = 20
+    return max(5, min(v, 5000))
+
+
+async def _attendance_geo(me: dict, lat, lon, accuracy, *, enforce: bool) -> dict:
+    """Координаты отметки + расстояние до цеха филиала сотрудника. enforce — для «Пришёл»."""
+    geo = {}
+    if lat is not None and lon is not None:
+        try:
+            geo = {"lat": float(lat), "lon": float(lon),
+                   "accuracy_m": int(round(float(accuracy))) if accuracy is not None else None}
+        except (TypeError, ValueError):
+            geo = {}
+    branch = _BRANCH_KEY.get((me.get("branch") or "").strip().lower(), (me.get("branch") or "").strip().lower())
+    depot = _parse_geo_point(await _get_cfg(f"branch_{branch}_location")) if branch else None
+    if geo and depot:
+        geo["distance_m"] = int(round(_distance_m(geo["lat"], geo["lon"], depot[0], depot[1])))
+    if not enforce or me.get("attendance_anywhere"):
+        return geo
+    if not geo:
+        raise HTTPException(status_code=400, detail={"code": "geo_required",
+            "message": "Включите геолокацию — приход отмечается только у цеха"})
+    acc = geo.get("accuracy_m")
+    if acc is not None and acc > _ATT_MAX_ACCURACY_M:
+        raise HTTPException(status_code=400, detail={"code": "geo_inaccurate", "accuracy_m": acc,
+            "message": f"Слабый сигнал GPS (±{acc} м) — выйдите к окну или во двор и попробуйте снова"})
+    if depot is None:
+        # точка цеха не задана в настройках — не блокируем работу, расстояние не пишем
+        logging.warning(f"attendance: нет точки цеха для филиала {branch!r} (staff {me.get('id')})")
+        return geo
+    radius = await _attendance_radius_m()
+    if geo["distance_m"] - (acc or 0) > radius:
+        raise HTTPException(status_code=400, detail={"code": "too_far", "distance_m": geo["distance_m"],
+            "radius_m": radius, "message": f"Вы в {geo['distance_m']} м от цеха — отметиться можно не дальше {radius} м"})
+    return geo
+
+
 @app.post("/api/staff/attendance/checkin")
-async def attendance_checkin_ep(me=Depends(get_current_staff)):
+async def attendance_checkin_ep(me=Depends(get_current_staff),
+                                lat: float | None = Body(None, embed=True),
+                                lon: float | None = Body(None, embed=True),
+                                accuracy: float | None = Body(None, embed=True)):
     # 17.11.2026 (владелец): отмечаются ВСЕ сотрудники, кроме агентов. На ЗП не влияет:
     # отметки идут только в отчёт посещаемости; оклад считается по табелю, как раньше,
     # у сдельных/процентных часы табеля только показываются (database.py, блок E).
     if me.get("role") == "agent":
         raise HTTPException(status_code=403, detail="Агентам отметка прихода/ухода не нужна")
-    row = await db.attendance_check_in(me["id"])
+    geo = await _attendance_geo(me, lat, lon, accuracy, enforce=True)
+    row = await db.attendance_check_in(me["id"], geo)
     if row.get("error") == "already_in":
         raise HTTPException(status_code=400, detail="Вы уже отметили приход, сначала отметьте уход")
     return {"ok": True, "attendance": row}
 
 @app.post("/api/staff/attendance/checkout")
-async def attendance_checkout_ep(me=Depends(get_current_staff)):
+async def attendance_checkout_ep(me=Depends(get_current_staff),
+                                 lat: float | None = Body(None, embed=True),
+                                 lon: float | None = Body(None, embed=True),
+                                 accuracy: float | None = Body(None, embed=True)):
     # 17.11.2026 (владелец): отмечаются ВСЕ сотрудники, кроме агентов. На ЗП не влияет:
     # отметки идут только в отчёт посещаемости; оклад считается по табелю, как раньше,
     # у сдельных/процентных часы табеля только показываются (database.py, блок E).
     if me.get("role") == "agent":
         raise HTTPException(status_code=403, detail="Агентам отметка прихода/ухода не нужна")
-    row = await db.attendance_check_out(me["id"])
+    # «Ушёл» — из любого места, координаты только записываем
+    geo = await _attendance_geo(me, lat, lon, accuracy, enforce=False)
+    row = await db.attendance_check_out(me["id"], geo)
     if row.get("error") == "not_checked_in":
         raise HTTPException(status_code=400, detail="Сначала отметьте приход")
     return {"ok": True, "attendance": row}
@@ -1738,6 +1836,17 @@ async def attendance_checkout_ep(me=Depends(get_current_staff)):
 async def attendance_today_ep(me=Depends(get_current_staff)):
     data = await db.get_attendance_today(me["id"])
     return {"ok": True, **data}
+
+@app.get("/api/admin/settings/attendance-radius")
+async def get_attendance_radius(_=Depends(get_admin)):
+    return {"ok": True, "radius_m": await _attendance_radius_m()}
+
+@app.put("/api/admin/settings/attendance-radius")
+async def save_attendance_radius(radius_m: int = Body(..., embed=True), _=Depends(get_admin)):
+    if not 5 <= radius_m <= 5000:
+        raise HTTPException(status_code=400, detail="Радиус — от 5 до 5000 м")
+    await db.set_config("attendance_radius_m", str(radius_m))
+    return {"ok": True, "radius_m": radius_m}
 
 @app.get("/api/admin/attendance")
 async def admin_attendance_ep(year: int, month: int, staff_id: int = None,
@@ -9601,6 +9710,8 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     can_view_timesheet:   bool = Body(False, embed=True),
     hide_client_phone:    bool = Body(False, embed=True),
     order_stages:         str  = Body(None,  embed=True),
+    # «Отметка прихода: в любом месте» (17.11.2026); None — старая админка → не трогать
+    attendance_anywhere:  bool | None = Body(None, embed=True),
     # None — не прислали (старая админка) → оставить как есть
     notify_delivery_digest: bool | None = Body(None, embed=True)):
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
@@ -9614,7 +9725,8 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                    can_accept_payment=$12, can_manage_cash=$13, notify_new_users=$14,
                    can_approve_debt=$15, can_drive=$16, can_view_timesheet=$17,
                    hide_client_phone=$18, can_edit_price=$19,
-                   notify_delivery_digest=COALESCE($20, notify_delivery_digest)
+                   notify_delivery_digest=COALESCE($20, notify_delivery_digest),
+                   attendance_anywhere=COALESCE($21, attendance_anywhere)
                WHERE id=$1
                RETURNING id, can_edit_items, can_measure, can_approve_measure,
                          can_override_measure,
@@ -9622,14 +9734,14 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
                          can_edit_confirmed, can_send_pickup, can_edit_delivery,
                          can_accept_payment, can_manage_cash, notify_new_users,
                          can_approve_debt, can_drive, can_view_timesheet, hide_client_phone,
-                         can_edit_price, notify_delivery_digest""",
+                         can_edit_price, notify_delivery_digest, attendance_anywhere""",
             staff_id, can_edit_items, can_measure, can_approve_measure,
             can_override_measure,
             can_create_order, can_confirm_order, order_stages or None,
             can_edit_confirmed, can_send_pickup, can_edit_delivery,
             can_accept_payment, can_manage_cash, notify_new_users, can_approve_debt,
             can_drive, can_view_timesheet, hide_client_phone, can_edit_price,
-            notify_delivery_digest)
+            notify_delivery_digest, attendance_anywhere)
     if not row:
         raise HTTPException(status_code=404, detail="Сотрудник не найден")
     return {"ok": True, **dict(row)}
