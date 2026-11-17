@@ -1712,8 +1712,11 @@ async def reset_timesheet_month_ep(year: int, month: int, body: dict, me=Depends
 
 @app.post("/api/staff/attendance/checkin")
 async def attendance_checkin_ep(me=Depends(get_current_staff)):
-    if me.get("salary_type") not in ("fixed", "fixed_percent"):
-        raise HTTPException(status_code=403, detail="Доступно только для сотрудников с окладом")
+    # 17.11.2026 (владелец): отмечаются ВСЕ сотрудники, кроме агентов. На ЗП не влияет:
+    # отметки идут только в отчёт посещаемости; оклад считается по табелю, как раньше,
+    # у сдельных/процентных часы табеля только показываются (database.py, блок E).
+    if me.get("role") == "agent":
+        raise HTTPException(status_code=403, detail="Агентам отметка прихода/ухода не нужна")
     row = await db.attendance_check_in(me["id"])
     if row.get("error") == "already_in":
         raise HTTPException(status_code=400, detail="Вы уже отметили приход, сначала отметьте уход")
@@ -1721,8 +1724,11 @@ async def attendance_checkin_ep(me=Depends(get_current_staff)):
 
 @app.post("/api/staff/attendance/checkout")
 async def attendance_checkout_ep(me=Depends(get_current_staff)):
-    if me.get("salary_type") not in ("fixed", "fixed_percent"):
-        raise HTTPException(status_code=403, detail="Доступно только для сотрудников с окладом")
+    # 17.11.2026 (владелец): отмечаются ВСЕ сотрудники, кроме агентов. На ЗП не влияет:
+    # отметки идут только в отчёт посещаемости; оклад считается по табелю, как раньше,
+    # у сдельных/процентных часы табеля только показываются (database.py, блок E).
+    if me.get("role") == "agent":
+        raise HTTPException(status_code=403, detail="Агентам отметка прихода/ухода не нужна")
     row = await db.attendance_check_out(me["id"])
     if row.get("error") == "not_checked_in":
         raise HTTPException(status_code=400, detail="Сначала отметьте приход")
