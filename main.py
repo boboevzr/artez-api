@@ -1758,6 +1758,10 @@ def _distance_m(lat1, lon1, lat2, lon2) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+def _fmt_dist(m: int) -> str:
+    return f"{m} м" if m < 1000 else f"{m / 1000:.1f} км".replace(".", ",")
+
+
 async def _attendance_radius_m() -> int:
     try:
         v = int(float(await db.get_config("attendance_radius_m") or 20))
@@ -1795,7 +1799,7 @@ async def _attendance_geo(me: dict, lat, lon, accuracy, *, enforce: bool) -> dic
     radius = await _attendance_radius_m()
     if geo["distance_m"] - (acc or 0) > radius:
         raise HTTPException(status_code=400, detail={"code": "too_far", "distance_m": geo["distance_m"],
-            "radius_m": radius, "message": f"Вы в {geo['distance_m']} м от цеха — отметиться можно не дальше {radius} м"})
+            "radius_m": radius, "message": f"Вы в {_fmt_dist(geo['distance_m'])} от цеха — отметиться можно не дальше {radius} м"})
     return geo
 
 
