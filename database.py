@@ -8432,7 +8432,7 @@ async def get_routes_today(branch: str | None = None) -> list:
             where_clause += " AND r.branch = $1"
             vals = [branch]
         rows = await conn.fetch(f"""
-            SELECT r.id AS route_id, r.name, r.date::text, r.type, r.status AS route_status, r.branch,
+            SELECT r.id AS route_id, r.name, r.date::text, r.type, r.status AS route_status, r.branch, r.driver_id,
                    TRIM(COALESCE(s.first_name,'') || ' ' || COALESCE(s.last_name,'')) AS driver_name,
                    ro.sort_order, ro.stop_status, ro.driver_confirmed, ro.leg,
                    o.id AS order_id, o.order_num, o.status AS order_status,
@@ -8462,6 +8462,7 @@ async def get_routes_today(branch: str | None = None) -> list:
                                "type": row["type"], "status": row["route_status"],
                                "branch": row["branch"],
                                "driver_name": row["driver_name"] or None,
+                               "driver_id": row["driver_id"],  # приложение: «Мои» маршруты (17.11)
                                "stops": []}
             routes[rid]["stops"].append({
                 "order_id":       row["order_id"],
@@ -8502,6 +8503,11 @@ async def get_routes_today(branch: str | None = None) -> list:
             oid = s["order_id"]
             s["items_total"] = item_totals[oid] if oid in item_totals else s["total_price"]
             s.pop("total_price", None)
+            # к оплате — как в staff «Доставка» и order_discount_view: позиции − скидки, вниз до 1000;
+            # due — остаток после оплат. Приложение берёт деньги отсюда, не считает само (17.11).
+            net = max(0, int(float(s["items_total"] or 0) - float(s["total_discount"] or 0)))
+            s["to_pay"] = float(net - net % 1000)
+            s["due"] = float(max(0, s["to_pay"] - float(s["paid_amount"] or 0)))
         return list(routes.values())
 
 async def driver_set_stop_status(order_id: int, status: str):
