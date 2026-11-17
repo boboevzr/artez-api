@@ -6912,8 +6912,14 @@ async def admin_update_order_item(order_id: int, item_id: int,
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     can_bypass_lock = staff.get("role") == "admin" or staff.get("can_edit_price", False)
-    locked_statuses = {"delivered", "cancelled"} if can_bypass_lock \
-        else {"packing", "ready", "delivery", "delivered", "cancelled"}
+    # 17.11.2026 (владелец): менеджер после мойки тоже добавляет/правит позиции и мерит —
+    # до доставки (Упаковка/Готов открыты); остальным роли — как было.
+    if can_bypass_lock:
+        locked_statuses = {"delivered", "cancelled"}
+    elif staff.get("role") == "manager":
+        locked_statuses = {"delivery", "delivered", "cancelled"}
+    else:
+        locked_statuses = {"packing", "ready", "delivery", "delivered", "cancelled"}
     if order.get("status") in locked_statuses:
         raise HTTPException(status_code=403, detail="Редактирование позиций недоступно в этом статусе заказа")
     sqm = req.sqm
