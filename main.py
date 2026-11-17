@@ -4309,7 +4309,10 @@ async def _app_push_staff(staff_id: int, title: str, body: str, data: dict):
     try:
         tokens = await db.app_push_tokens_for_staff(int(staff_id))
         if not tokens:
+            # без токена push молча терялся — пишем, чтобы было видно (17.11.2026)
+            logging.info(f"app push staff={staff_id}: нет токена приложения — «{title}» не отправлен")
             return
+        logging.info(f"app push staff={staff_id}: «{title}» → {len(tokens)} устр.")
         receipts = await _expo_send([{
             "to": t["token"], "sound": "default", "priority": "high", "channelId": "default",
             "title": title, "body": body, "data": data,
@@ -9173,6 +9176,7 @@ async def serve_order_photo(
 @app.get("/api/item-media/{media_id}")
 async def serve_item_media(
     media_id: int,
+    request: Request,
     t: str = None,
     authorization: str = Header(None),
 ):
@@ -9202,9 +9206,40 @@ async def serve_item_media(
     if not data.get("ok"):
         raise HTTPException(status_code=502, detail="Не удалось получить файл")
 
-    from fastapi.responses import RedirectResponse
-    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{data['result']['file_path']}"
-    return RedirectResponse(url=file_url)
+    # 17.11.2026: раньше — редирект на api.telegram.org (в ссылке виден токен бота, .mov приходил
+    # как octet-stream и не проигрывался). Теперь отдаём сами: тип по расширению + Range (Safari без
+    # 206 видео не играет). .mov с iPhone — тот же MP4-контейнер, браузеру называем video/mp4.
+    from fastapi.responses import StreamingResponse
+    file_path = data["result"]["file_path"]
+    file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+    ext = file_path.rsplit(".", 1)[-1].lower() if "." in file_path else ""
+    ctype = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp",
+             "heic": "image/heic", "mp4": "video/mp4", "mov": "video/mp4", "m4v": "video/mp4",
+             "webm": "video/webm", "3gp": "video/3gpp"}.get(ext)
+    fwd = {}
+    if request.headers.get("range"):
+        fwd["Range"] = request.headers["range"]
+    session = aiohttp.ClientSession()
+    try:
+        resp = await session.get(file_url, headers=fwd)
+    except Exception:
+        await session.close()
+        raise HTTPException(status_code=502, detail="Не удалось получить файл")
+    out = {"Accept-Ranges": "bytes", "Cache-Control": "private, max-age=3600"}
+    for h in ("Content-Length", "Content-Range"):
+        if h in resp.headers:
+            out[h] = resp.headers[h]
+
+    async def _body():
+        try:
+            async for chunk in resp.content.iter_chunked(64 * 1024):
+                yield chunk
+        finally:
+            resp.release()
+            await session.close()
+
+    return StreamingResponse(_body(), status_code=resp.status if resp.status in (200, 206) else 502,
+                             media_type=ctype or resp.content_type or "application/octet-stream", headers=out)
 
 @app.patch("/api/admin/orders/{order_id}/discount")
 async def admin_set_order_discount(order_id: int, staff=Depends(get_current_staff),
@@ -9279,6 +9314,11 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
                     f"Замер «{svc}» ожидает вашего утверждения",
                     order_id=order_id, item_id=item_id, push_type="measure"
                 ))
+                # и в приложение сотрудника (17.11.2026, владелец: «нет уведомления в приложении»)
+                if ap["id"] != staff.get("id"):
+                    asyncio.create_task(_app_push_staff(ap["id"], f"📐 Новый замер — {order_num}",
+                                                        f"Замер «{svc}» ожидает вашего утверждения",
+                                                        {"kind": "measure", "order_id": order_id, "item_id": item_id}))
         except Exception as _pe:
             logging.warning(f"measure push error: {_pe}")
     elif action == "approve":
