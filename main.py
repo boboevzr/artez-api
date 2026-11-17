@@ -1730,6 +1730,9 @@ async def reset_timesheet_month_ep(year: int, month: int, body: dict, me=Depends
 # (расстояние − погрешность GPS) ≤ радиус; погрешность > 100 м — просим выйти к окну.
 # У сотрудника «Отметка прихода: в любом месте» (staff.attendance_anywhere) — без проверки.
 _ATT_MAX_ACCURACY_M = 100
+# Владелец 17.11.2026: «в любом месте» пока — водителям и операторам (по роли); остальным — у цеха,
+# отдельным людям (тестировщики) — переключатель в карточке сотрудника (staff.attendance_anywhere)
+_ATT_ANYWHERE_ROLES = ("driver", "callcenter")
 _BRANCH_KEY = {"зарафшан": "zarafshan", "навои": "navoi", "zarafshon": "zarafshan", "navoiy": "navoi"}
 
 
@@ -1783,7 +1786,7 @@ async def _attendance_geo(me: dict, lat, lon, accuracy, *, enforce: bool) -> dic
     depot = _parse_geo_point(await _get_cfg(f"branch_{branch}_location")) if branch else None
     if geo and depot:
         geo["distance_m"] = int(round(_distance_m(geo["lat"], geo["lon"], depot[0], depot[1])))
-    if not enforce or me.get("attendance_anywhere"):
+    if not enforce or me.get("attendance_anywhere") or me.get("role") in _ATT_ANYWHERE_ROLES:
         return geo
     if not geo:
         raise HTTPException(status_code=400, detail={"code": "geo_required",
