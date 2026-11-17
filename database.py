@@ -3385,14 +3385,17 @@ async def get_order_returns(order_id: int) -> list:
         for r in rets:
             items = await conn.fetch("""
                 SELECT ri.item_id, ri.washer_login, ri.was_credited, ri.fine,
-                       COALESCE(oi.service_ru, oi.service) AS label
+                       COALESCE(oi.service_ru, oi.service) AS label,
+                       NULLIF(TRIM(CONCAT_WS(' ', st.first_name, st.last_name)), '') AS washer_name
                   FROM order_return_items ri LEFT JOIN order_items oi ON oi.id = ri.item_id
+                  LEFT JOIN staff st ON st.login = ri.washer_login
                  WHERE ri.return_id=$1 ORDER BY ri.item_id""", r["id"])
             d = dict(r)
             for k in ("created_at", "decided_at"):
                 if d.get(k): d[k] = d[k].isoformat()
             d["fine_total"] = float(d.get("fine_total") or 0)
             d["items"] = [{"item_id": i["item_id"], "label": i["label"], "washer_login": i["washer_login"],
+                           "washer_name": i["washer_name"] or i["washer_login"],
                            "fine": float(i["fine"] or 0)} for i in items]
             out.append(d)
         return out

@@ -11035,6 +11035,22 @@ async def save_measure_stage(stage: str = Body(..., embed=True), _=Depends(get_a
     await db.set_config("measure_stage", stage)
     return {"ok": True, "stage": stage}
 
+# «🔁 Возврат за плохую работу» — фикс. штраф мойщику за КАЖДУЮ вернувшуюся вещь (17.11.2026, владелец; по умолчанию 0)
+@app.get("/api/admin/settings/return-fine")
+async def get_return_fine(_=Depends(get_admin)):
+    try:
+        v = max(0, int(float(await db.get_config("return_fine_amount") or 0)))
+    except (TypeError, ValueError):
+        v = 0
+    return {"ok": True, "amount": v}
+
+@app.put("/api/admin/settings/return-fine")
+async def save_return_fine(amount: float = Body(..., embed=True), _=Depends(get_admin)):
+    if not (0 <= amount <= 10_000_000):
+        raise HTTPException(status_code=400, detail="Сумма от 0 до 10 000 000")
+    await db.set_config("return_fine_amount", str(int(amount)))
+    return {"ok": True, "amount": int(amount)}
+
 @app.put("/api/admin/settings/delivery-discount")
 async def save_delivery_discount(discount: float = Body(..., embed=True), _=Depends(get_admin)):
     await db.set_config("delivery_discount_pct", str(discount))
