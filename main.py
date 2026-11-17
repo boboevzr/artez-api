@@ -1417,6 +1417,8 @@ def _staff_public(s: dict) -> dict:
         "can_accept_payment":  s.get("can_accept_payment", False),
         "can_manage_cash":     s.get("can_manage_cash", False),
         "can_refund_prepay":   bool(s.get("can_refund_prepay", False)),  # pay.py: возврат онлайн-предоплаты из staff
+        # тогл «Может давать скидку» (17.11.2026); админ/менеджер могут всегда — это учитывают staff.html и сервер
+        "can_give_discount":   bool(s.get("can_give_discount", False)),
         "can_approve_debt":    s.get("can_approve_debt", False),
         "can_drive":           s.get("can_drive", False),
         "notify_new_users":    s.get("notify_new_users", False),
@@ -6165,12 +6167,11 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
                "pickup_type","self_pickup_discount","discount_sum","manual_discount","manual_discount_pct",
                "delivery_type","delivery_discount","delivery_discount_pct"}
     updates = {k: v for k, v in body.items() if k in allowed}
-    # Ручная скидка (сумма или %) — только тем, кому интерфейс показывает поле «Скидка» (16.11.2026):
-    # admin.html — админ; staff.html — вкладка «Оплата» карточки заказа (все роли с orders, КРОМЕ мойщика:
-    # у него своя карточка без оплаты). Мойщик прямым запросом скидку больше не ставит.
-    # Скидки самовывоза/доставки (discount_sum, delivery_discount) — как раньше (их шлёт staff сам при правке).
-    if ("manual_discount" in updates or "manual_discount_pct" in updates) and role == "washer":
-        raise HTTPException(status_code=403, detail="Нет права менять скидку заказа")
+    # Ручная скидка (сумма или %) — 17.11.2026, владелец: по умолчанию только админ и менеджер; другим —
+    # переключатель «Может давать скидку» в карточке сотрудника (staff.can_give_discount). staff.html прячет поле
+    # у тех, у кого права нет. Скидки самовывоза/доставки (discount_sum, delivery_discount) — как раньше.
+    if ("manual_discount" in updates or "manual_discount_pct" in updates) and not _can_give_discount(staff):
+        raise HTTPException(status_code=403, detail="Нет права давать скидку — включается в карточке сотрудника")
     # Ручная скидка в % (16.11.2026): «12,52» или 12.52, 0 < % ≤ 100, до 2 знаков; сумму считает сервер
     # (db.recalc_manual_discount_pct). Пусто/0 — % снят. Скидка суммой (manual_discount) снимает %.
     if "manual_discount_pct" in updates:
@@ -9476,6 +9477,24 @@ async def admin_set_item_washer(order_id: int, item_id: int, staff=Depends(get_c
     except Exception as e:
         logging.warning(f"item_updated broadcast error: {e}")
     return {"ok": True, "item": _item_for(staff, item)}
+
+def _can_give_discount(s: dict) -> bool:
+    """Ручная скидка заказа (17.11.2026, владелец): админ и менеджер — всегда; остальным — тогл в карточке."""
+    return bool(s.get("sub") == "admin" or s.get("role") in ("admin", "manager") or s.get("can_give_discount") is True)
+
+
+@app.patch("/api/admin/staff/{staff_id}/can-give-discount")
+async def admin_set_can_give_discount(staff_id: int, _staff=Depends(_get_admin),
+                                      value: bool = Body(..., embed=True)):
+    """Тогл «Может давать скидку» в карточке сотрудника (admin.html)."""
+    if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
+    async with db.pool.acquire() as conn:
+        row = await conn.fetchrow("UPDATE staff SET can_give_discount=$2 WHERE id=$1 RETURNING id, can_give_discount",
+                                  staff_id, value)
+    if not row:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    return {"ok": True, **dict(row)}
+
 
 @app.patch("/api/admin/staff/{staff_id}/can-edit-items")
 async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),

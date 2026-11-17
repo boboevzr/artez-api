@@ -1417,6 +1417,8 @@ async def create_tables():
     # ── Шаг 19: флаг водителя ────────────────────────────────────────────
     async with pool.acquire() as c:
         await c.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS can_drive BOOLEAN DEFAULT FALSE;")
+        # 17.11.2026: ручная скидка заказа — кроме админа/менеджера только с этим тоглом
+        await c.execute("ALTER TABLE staff ADD COLUMN IF NOT EXISTS can_give_discount BOOLEAN DEFAULT FALSE;")
 
     # ── Шаг 20: промо-акции (generic-модель, одна кампания засеяна) ──────
     async with pool.acquire() as c:
