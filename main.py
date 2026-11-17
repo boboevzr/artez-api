@@ -1913,6 +1913,12 @@ async def get_route(route_id: int, me=Depends(get_current_staff)):
     await db.recalc_route_statuses()
     route = await db.get_route(route_id)
     if not route: raise HTTPException(status_code=404)
+    # 17.11.2026 ночь (ревью): водитель видит только свой маршрут; скрытые телефоны — скрыты и в остановках
+    if me.get("role") == "driver" and route.get("driver_id") != me.get("id"):
+        raise HTTPException(status_code=403, detail="Это не ваш маршрут")
+    if me.get("hide_client_phone"):
+        for _st in route.get("stops") or []:
+            _st["client_phone"] = ""; _st["client_phone2"] = ""
     if route.get("date"): route["date"] = str(route["date"])
     for s in route.get("stops", []):
         if s.get("created_at"): s["created_at"] = s["created_at"].isoformat()
@@ -2379,6 +2385,9 @@ async def _auto_sync_route_channel(route_id: int) -> None:
 
 @app.post("/api/admin/routes/{route_id}/send-to-delivery-group")
 async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_staff)):
+    # 17.11.2026 ночь (ревью): как send-to-driver — адреса и телефоны клиентов в канал шлют только логистика
+    if me.get("sub") != "admin" and me.get("role") not in ("admin", "logistics", "manager"):
+        raise HTTPException(403, "Нет доступа")
     route = await db.get_route(route_id)
     if not route:
         raise HTTPException(404, "Маршрут не найден")
@@ -2537,7 +2546,7 @@ async def create_lead(req: LeadCreateRequest, staff=Depends(get_current_staff)):
     creator_id = None if staff.get("sub") == "admin" else staff.get("id")
     # агент автоматически становится agent_id лида
     agent_id = req.volunteer_id
-    if role == "agent" and not agent_id:
+    if role == "agent":   # 17.11.2026 ночь: агент записывает заявку только на себя (не на другого агента)
         agent_id = creator_id
     lead_source = "agent" if role == "agent" else "staff"
     lead = await db.create_lead({
@@ -2594,6 +2603,8 @@ async def get_leads(status: str = None, branch: str = None,
 async def update_lead(lead_id: int, body: dict, staff=Depends(require_perm("leads"))):
     allowed = {"client_name","client_phone","client_phone2","branch","address","short_address","delivery_address","delivery_short_address","note","volunteer_id","location","location_address","delivery_location","delivery_location_address","region_id","house_number","apartment_number","pickup_type","delivery_type","pickup_date","pickup_time"}
     fields = {k: v for k, v in body.items() if k in allowed}
+    if "volunteer_id" in fields and not (staff.get("sub") == "admin" or staff.get("role") in ("admin", "manager")):
+        raise HTTPException(status_code=403, detail="Агента заявки меняет админ или менеджер")   # 17.11.2026 ночь
     lead = await db.update_lead(lead_id, **fields)
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
     await db.add_lead_call(lead_id, operator_id, action="edited", note="Лид отредактирован")
@@ -2648,6 +2659,25 @@ async def update_lead_status(lead_id: int, body: dict,
         raise HTTPException(status_code=400, detail="Неверный статус")
     operator_id = None if staff.get("sub") == "admin" else staff.get("id")
     order_num = body.get("order_num")
+    # 17.11.2026 ночь (ревью): водитель/логист закрывают («Стал заказом»/«Потерян» — тут же возврат онлайн-предоплаты)
+    # только заявку, взятую ими; «Стал заказом» — только с настоящим открытым заказом этого клиента (иначе скидку
+    # «заявка через бот/сайт» можно было навесить на любой заказ, указав его номер)
+    if status in ("converted", "lost") or order_num:
+        ld = await db.pool.fetchrow("SELECT assigned_to, client_phone, client_phone2 FROM leads WHERE id=$1", lead_id)
+        if not ld:
+            raise HTTPException(status_code=404, detail="Лид не найден")
+        if staff.get("role") in ("driver", "logistics") and ld["assigned_to"] != staff.get("id"):
+            raise HTTPException(status_code=403, detail="Закрыть заявку может тот, кто её взял, или менеджер")
+        if order_num:
+            o = await db.pool.fetchrow("SELECT client_phone, status, created_at FROM orders WHERE order_num=$1", str(order_num))
+            if not o or o["status"] in ("delivered", "cancelled"):
+                raise HTTPException(status_code=400, detail="Заказ с таким номером не найден или уже закрыт")
+            phones = {normalize_phone(str(p)) for p in (ld["client_phone"], ld["client_phone2"]) if p}
+            from datetime import datetime as _DT, timezone as _TZ, timedelta as _TD
+            _ca = o["created_at"]
+            fresh = _ca is not None and (_DT.now(_TZ.utc) - (_ca if _ca.tzinfo else _ca.replace(tzinfo=_TZ(_TD(hours=5))))) < _TD(days=1)
+            if normalize_phone(str(o["client_phone"] or "")) not in phones and not fresh:
+                raise HTTPException(status_code=400, detail="Этот заказ не по этой заявке (другой телефон)")
     if status == "converted" and order_num:
         await db.convert_lead_to_order(lead_id, order_num, operator_id or 0)
         # заказ оформлен формой «Новый заказ» из лида — скидка «бот/сайт», как и в /convert
@@ -3073,6 +3103,8 @@ async def staff_orders(status: str = None, branch: str = None, limit: int = 50, 
 @app.get("/api/staff/orders/own")
 async def staff_own_orders(status: str = None, limit: int = 50, offset: int = 0,
                             search: str = None, staff=Depends(get_current_staff)):
+    if staff.get("role") == "agent":   # 17.11.2026 ночь (ревью): агент видит только свои лиды, не заказы
+        raise HTTPException(status_code=403, detail="Нет доступа")
     result, total = await db.get_admin_orders(
         status=status, branch=staff.get("branch"), limit=limit, offset=offset, search=search,
         search_phone=not staff.get("hide_client_phone"))
@@ -6359,6 +6391,8 @@ async def get_debt_orders(_=Depends(_get_admin)):
 
 @app.get("/api/admin/orders/{order_id}")
 async def admin_get_order(order_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") == "agent":   # 17.11.2026 ночь (ревью): агент видит только свои лиды, не заказы
+        raise HTTPException(status_code=403, detail="Нет доступа")
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
@@ -6524,6 +6558,46 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
         updates["manual_discount_pct"] = None
     if not updates:
         raise HTTPException(status_code=400, detail="Нет данных для обновления")
+    # 17.11.2026 ночь (ревью безопасности): данные заказа (клиент, адрес, способы и % самовывоза/доставки, срок…)
+    # правит админ или сотрудник с «править подтверждённый» — как кнопка ✏️ в staff и в приложении. Раньше любой
+    # с правом «orders» (мойщик, упаковщик, водитель) мог через API поменять клиента или поставить скидку.
+    is_admin_staff = role == "admin" or staff.get("sub") == "admin"
+    free_keys = {"manual_discount", "manual_discount_pct", "discount_sum", "delivery_discount", "note"}
+    if not is_admin_staff and not staff.get("can_edit_confirmed") and any(k not in free_keys for k in updates):
+        raise HTTPException(status_code=403, detail="Править заказ может админ или сотрудник с правом «править подтверждённый»")
+    for k in ("self_pickup_discount", "delivery_discount_pct"):
+        if k in updates:
+            try:
+                updates[k] = float(updates[k] or 0)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Скидка в % — число")
+            if not (0 <= updates[k] <= 100):
+                raise HTTPException(status_code=400, detail="Скидка в % — от 0 до 100")
+    # Скидки «клиент привозит/забирает» — сумма считается ЗДЕСЬ от % и суммы позиций (присланная сумма не берётся):
+    # staff при открытии «Оплаты» присылает пересчитанные суммы от любой роли — теперь подменить их нельзя.
+    pick_keys, deliv_keys = {"pickup_type", "self_pickup_discount", "discount_sum"}, {"delivery_type", "delivery_discount_pct", "delivery_discount"}
+    if any(k in updates for k in pick_keys | deliv_keys):
+        eff = {**dict(order), **updates}
+        total = float((await db.get_order_items_billing(order_id))["order_total"] or 0)
+        if any(k in updates for k in pick_keys):
+            sp = float(eff.get("self_pickup_discount") or 0)
+            if eff.get("pickup_type") == "self":
+                updates["discount_sum"] = float(int(total * sp / 100 + 0.5)) if sp > 0 else 0.0
+            elif "pickup_type" in updates and order.get("pickup_type") == "self":
+                updates["discount_sum"] = 0.0          # перестал быть самовывозом — скидки нет
+            else:
+                updates.pop("discount_sum", None)      # не самовывоз — сумму не трогаем
+        if any(k in updates for k in deliv_keys):
+            dp = float(eff.get("delivery_discount_pct") or 0) or float(await db.get_config("delivery_discount_pct") or 0)
+            if eff.get("delivery_type") == "self":
+                updates["delivery_discount"] = float(int(total * dp / 100 + 0.5)) if dp > 0 else 0.0
+            elif "delivery_type" in updates and order.get("delivery_type") == "self":
+                updates["delivery_discount"] = 0.0
+            else:
+                updates.pop("delivery_discount", None)
+        if not updates:
+            return {"ok": True, "order": {k: str(v) if hasattr(v, 'isoformat') else v for k, v in dict(order).items()
+                                          if not (staff.get("hide_client_phone") and k in ("client_phone", "client_phone2"))}}
     if "client_phone" in updates and updates["client_phone"]:
         normalized_phone = normalize_phone(str(updates["client_phone"]))
         if not PHONE_RE.match(normalized_phone):
@@ -6543,8 +6617,10 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
             updates["deadline"] = None
     try:
         updated = await db.update_order(order_id, **updates)
-        return {"ok": True, "order": {k: str(v) if hasattr(v, 'isoformat') else v
-                                      for k, v in updated.items()}}
+        out = {k: str(v) if hasattr(v, 'isoformat') else v for k, v in updated.items()}
+        if staff.get("hide_client_phone"):   # 17.11.2026: скрытый телефон не возвращаем и в ответе на правку
+            out["client_phone"] = ""; out["client_phone2"] = ""
+        return {"ok": True, "order": out}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Ошибка обновления: {str(e)}")
 
@@ -6742,6 +6818,15 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
     _cur = await db.get_order_by_id(order_id)
     if not _cur:
         raise HTTPException(status_code=404, detail="Заказ не найден")
+    # 17.11.2026 ночь (ревью): закрытый заказ не «оживляет» упаковщик/логист — из «Доставлен» только админ и
+    # менеджер (как в staff — выпадающий список только у админа), из «Отменён» — ещё и логист.
+    _is_adm = role == "admin" or staff.get("sub") == "admin"
+    if _cur.get("status") == "delivered" and status != "delivered" and not (_is_adm or role == "manager"):
+        raise HTTPException(status_code=403, detail="Доставленный заказ меняет админ или менеджер")
+    if _cur.get("status") == "cancelled" and status != "cancelled" and not (_is_adm or role in ("manager", "logistics")):
+        raise HTTPException(status_code=403, detail="Отменённый заказ возвращает админ, менеджер или логист")
+    if packer_login and not (_is_adm or role in ("manager", "logistics") or packer_login == staff.get("login")):
+        raise HTTPException(status_code=403, detail="Упаковщика назначает менеджер или логист")
     _stage = await _measure_stage()
     _left = await _measure_block(order_id, _cur.get("status", ""), status, _stage)
     if _left:
@@ -7404,7 +7489,9 @@ async def admin_delete_order_item(order_id: int, item_id: int, staff=Depends(get
     return {"ok": True}
 
 @app.get("/api/admin/orders/{order_id}/photos")
-async def get_order_photos(order_id: int, _=Depends(get_current_staff)):
+async def get_order_photos(order_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") == "agent":   # 17.11.2026 ночь (ревью): агент видит только свои лиды, не заказы
+        raise HTTPException(status_code=403, detail="Нет доступа")
     photos = await db.get_order_photos(order_id)
     return {"ok": True, "photos": photos}
 
@@ -9374,7 +9461,9 @@ async def delete_order_payment(
 
 
 @app.get("/api/admin/orders/{order_id}/activity")
-async def get_order_activity(order_id: int, _=Depends(get_current_staff)):
+async def get_order_activity(order_id: int, staff=Depends(get_current_staff)):
+    if staff.get("role") == "agent":   # 17.11.2026 ночь (ревью): агент видит только свои лиды, не заказы
+        raise HTTPException(status_code=403, detail="Нет доступа")
     rows = await db.get_order_activity(order_id)
     return {"ok": True, "activity": rows}
 
@@ -10215,6 +10304,13 @@ async def staff_mark_delivered(
     role = staff.get("role")
     if role not in ("admin", "manager") and not staff.get("can_approve_debt"):
         raise HTTPException(403, "Нет доступа")
+    # 17.11.2026 ночь (ревью): «Доставлен» вручную — только из «Готов»/«Доставка» (раньше и отменённый/новый
+    # можно было закрыть «доставленным» с долгом)
+    _st = await db.pool.fetchval("SELECT status FROM orders WHERE id=$1", order_id)
+    if _st is None:
+        raise HTTPException(404, "Заказ не найден")
+    if _st not in ("ready", "delivery"):
+        raise HTTPException(400, "«Доставлен» — только из «Готов» или «Доставка»")
     debt = await db.get_order_debt_amount(order_id)
     if debt > 0 and not due_date:
         from datetime import date, timedelta
