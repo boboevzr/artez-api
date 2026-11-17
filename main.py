@@ -2673,11 +2673,8 @@ async def update_lead_status(lead_id: int, body: dict,
             if not o or o["status"] in ("delivered", "cancelled"):
                 raise HTTPException(status_code=400, detail="Заказ с таким номером не найден или уже закрыт")
             phones = {normalize_phone(str(p)) for p in (ld["client_phone"], ld["client_phone2"]) if p}
-            from datetime import datetime as _DT, timezone as _TZ, timedelta as _TD
-            _ca = o["created_at"]
-            fresh = _ca is not None and (_DT.now(_TZ.utc) - (_ca if _ca.tzinfo else _ca.replace(tzinfo=_TZ(_TD(hours=5))))) < _TD(days=1)
-            if normalize_phone(str(o["client_phone"] or "")) not in phones and not fresh:
-                raise HTTPException(status_code=400, detail="Этот заказ не по этой заявке (другой телефон)")
+            if normalize_phone(str(o["client_phone"] or "")) not in phones:
+                raise HTTPException(status_code=400, detail="Телефон в заказе не совпадает с заявкой — исправьте телефон в заявке или заказе")
     if status == "converted" and order_num:
         await db.convert_lead_to_order(lead_id, order_num, operator_id or 0)
         # заказ оформлен формой «Новый заказ» из лида — скидка «бот/сайт», как и в /convert
@@ -3135,7 +3132,7 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
             staff_label = f"{staff_label} (@{login})"
         branch = req.branch or staff.get("branch") or ""
         location = req.location or ""
-        await db.save_site_order({
+        order_num = await db.save_site_order({   # фактический номер (при совпадении — следующий)
             "order_num":   order_num,
             "first_name":  req.first_name,
             "last_name":   "",
@@ -3180,8 +3177,9 @@ async def staff_create_order(req: StaffOrderRequest, staff=Depends(require_perm(
         if _row:
             order_id = _row["id"]
             if req.items or req.item_count:
-                await (db.create_empty_items_by_service(order_id, req.items, req.service_type) if req.items
-                       else db.create_empty_items(order_id, req.item_count))
+                _its = {str(k)[:200]: max(0, min(int(v or 0), 100)) for k, v in list((req.items or {}).items())[:50]}   # 17.11.2026: пределы
+                await (db.create_empty_items_by_service(order_id, _its, req.service_type) if any(_its.values())
+                       else db.create_empty_items(order_id, max(1, min(int(req.item_count or 1), 200))))
         return {"ok": True, "order_num": order_num, "id": order_id, "item_count": req.item_count or len(req.items or [])}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Ошибка: {type(e).__name__}: {e}")
@@ -6676,7 +6674,7 @@ async def _convert_lead_locked(lead_id: int, body: dict, staff: dict):
     lead_note = lead.get("note") or ""
     note_text = f"Конвертирован из лида #{lead_id}" + (f". {lead_note}" if lead_note else "")
     staff_label = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login") or "сотрудник"
-    await db.save_site_order({
+    order_num = await db.save_site_order({   # фактический номер (при совпадении — следующий)
         "order_num":     order_num,
         "first_name":    first,
         "last_name":     last,

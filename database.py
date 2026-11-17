@@ -2059,8 +2059,14 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
             "site": "Заявка создана через сайт / Buyurtma sayt orqali yaratildi",
             "staff": "Заявка создана сотрудником / Buyurtma xodim tomonidan yaratildi",
         }.get(source, "Заявка создана / Buyurtma yaratildi")
-    async with pool.acquire() as conn:
-        await conn.execute("""
+    # 17.11.2026 ночь: номер берётся как «последний + 1» — при двух одновременных созданиях (двойное нажатие, бот)
+    # второй INSERT раньше молча пропускался (ON CONFLICT DO NOTHING), а позиции цеплялись к чужому заказу.
+    # Теперь: вставка вернула id — наш; конфликт — берём следующий номер и пробуем снова.
+    for _attempt in range(6):
+      if _attempt:
+          data = {**data, "order_num": await get_next_order_num()}
+      async with pool.acquire() as conn:
+        new_id = await conn.fetchval("""
             INSERT INTO orders (
                 order_num, source,
                 client_tg_id, client_first_name, client_last_name, client_phone, client_phone2,
@@ -2077,6 +2083,7 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
                 $24, 'new', $25, $26, $27
             )
             ON CONFLICT (order_num) DO NOTHING
+            RETURNING id
         """,
             data.get("order_num"),
             source,
@@ -2108,11 +2115,14 @@ async def save_site_order(data: dict, source: str = "site", staff_name: str = ""
             data.get("house_number") or "",
             data.get("apartment_number") or "",
         )
+        if new_id is None:
+            continue   # номер занят — следующий
         await conn.execute("""
             INSERT INTO order_status_history (order_num, new_status, note)
             VALUES ($1, 'new', $2)
         """, data.get("order_num"), source_note)
-    return data.get("order_num", "")
+        return data.get("order_num", "")
+    raise RuntimeError("Не удалось выдать номер заказа — попробуйте ещё раз")
 
 
 async def get_order_by_phone_pending(phone: str) -> dict | None:
