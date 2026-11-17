@@ -12687,6 +12687,19 @@ async def chat_staff_send(code: str, text: str = Body(..., embed=True), staff=De
 CHAT_MEDIA_PHOTO_MAX = 10 * 1024 * 1024
 CHAT_MEDIA_VIDEO_MAX = 50 * 1024 * 1024
 CHAT_MEDIA_PER_10MIN = 20
+# только эти типы (ревью безопасности): SVG/HTML и прочее под видом картинки не принимаем — иначе отдача с нашего домена
+CHAT_PHOTO_TYPES = {"image/jpeg", "image/jpg", "image/png", "image/webp", "image/heic", "image/heif"}
+CHAT_VIDEO_TYPES = {"video/mp4", "video/quicktime", "video/webm", "video/3gpp", "video/x-m4v"}
+_chat_media_locks: dict[str, asyncio.Lock] = {}
+
+
+def _chat_media_magic_ok(kind: str, data: bytes) -> bool:
+    """Первые байты файла совпадают с заявленным видом (фото: JPEG/PNG/WEBP/HEIC; видео: MP4/MOV/3GP — ftyp, WEBM)."""
+    head = data[:16]
+    if kind == "photo":
+        return (head.startswith(b"\xff\xd8\xff") or head.startswith(b"\x89PNG\r\n\x1a\n")
+                or (head[:4] == b"RIFF" and head[8:12] == b"WEBP") or head[4:8] == b"ftyp")
+    return head[4:8] == b"ftyp" or head.startswith(b"\x1a\x45\xdf\xa3")
 
 
 async def _chat_media_sender(code: str, authorization: str | None):
@@ -12714,23 +12727,37 @@ async def _chat_media_sender(code: str, authorization: str | None):
 
 
 @app.post("/api/chat/{code}/media")
-async def chat_send_media(code: str, file: UploadFile = File(...), caption: str = Form(""),
+async def chat_send_media(code: str, request: Request, file: UploadFile = File(...), caption: str = Form(""),
                           authorization: str = Header(None)):
+    try:   # тело явно больше предела — отказ сразу (без разбора файла)
+        if int(request.headers.get("content-length") or 0) > CHAT_MEDIA_VIDEO_MAX + 1024 * 1024:
+            raise HTTPException(status_code=413, detail="Фото — до 10 МБ, видео — до 50 МБ")
+    except ValueError:
+        pass
     session, who, sname, staff = await _chat_media_sender(code, authorization)
     ctype = (file.content_type or "").lower()
-    if ctype.startswith("image/"):
+    if ctype in CHAT_PHOTO_TYPES:
         kind, limit = "photo", CHAT_MEDIA_PHOTO_MAX
-    elif ctype.startswith("video/"):
+    elif ctype in CHAT_VIDEO_TYPES:
         kind, limit = "video", CHAT_MEDIA_VIDEO_MAX
     else:
         raise HTTPException(status_code=400, detail="Можно отправить только фото или видео")
-    if await db.count_recent_chat_media(session["id"], 10) >= CHAT_MEDIA_PER_10MIN:
-        raise HTTPException(status_code=429, detail="Слишком много файлов — подождите несколько минут")
     data = await file.read(limit + 1)
     if not data:
         raise HTTPException(status_code=400, detail="Пустой файл")
     if len(data) > limit:
         raise HTTPException(status_code=413, detail="Фото — до 10 МБ, видео — до 50 МБ")
+    if not _chat_media_magic_ok(kind, data):
+        raise HTTPException(status_code=400, detail="Можно отправить только фото или видео")
+    # лимит частоты — под блокировкой чата: проверка, загрузка и запись не обгоняют друг друга
+    lock = _chat_media_locks.setdefault(code, asyncio.Lock())
+    async with lock:
+        return await _chat_media_store(code, session, who, sname, staff, kind, ctype, data, caption, file.filename)
+
+
+async def _chat_media_store(code, session, who, sname, staff, kind, ctype, data, caption, filename):
+    if await db.count_recent_chat_media(session["id"], 10) >= CHAT_MEDIA_PER_10MIN:
+        raise HTTPException(status_code=429, detail="Слишком много файлов — подождите несколько минут")
     caption = (caption or "").strip()[:CHAT_TEXT_MAX]
     media_ch = await _get_media_channel()
     if not BOT_TOKEN or not media_ch:
@@ -12740,7 +12767,7 @@ async def chat_send_media(code: str, file: UploadFile = File(...), caption: str 
     method, field = ("sendDocument", "document") if as_doc else (("sendPhoto", "photo") if kind == "photo" else ("sendVideo", "video"))
     form = aiohttp.FormData()
     form.add_field("chat_id", str(media_ch))
-    form.add_field(field, data, filename=file.filename or ("chat.jpg" if kind == "photo" else "chat.mp4"), content_type=ctype)
+    form.add_field(field, data, filename=(filename or ("chat.jpg" if kind == "photo" else "chat.mp4"))[:100], content_type=ctype)
     form.add_field("caption", f"💬 Чат {code} · {'сотрудник' if who == 'staff' else 'клиент'}")
     try:
         async with aiohttp.ClientSession() as s:
@@ -12790,7 +12817,17 @@ async def chat_get_media(code: str, msg_id: int, request: Request):
     row = await db.get_chat_media(session["id"], msg_id)
     if not row:
         raise HTTPException(status_code=404)
-    return await _tg_file_response(row["media_file_id"], request)
+    resp = await _tg_file_response(row["media_file_id"], request)
+    # тип — по виду вложения из белого списка, а не из ответа Telegram; браузер не угадывает тип и не исполняет
+    ct = resp.media_type or ""
+    if row["media_kind"] == "video":
+        if not ct.startswith("video/"):
+            resp.headers["content-type"] = "video/mp4"
+    elif ct not in ("image/jpeg", "image/png", "image/webp", "image/heic"):
+        resp.headers["content-type"] = "image/jpeg"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Content-Security-Policy"] = "sandbox; default-src 'none'"
+    return resp
 
 
 @app.get("/api/chat/sessions")
