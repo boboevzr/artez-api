@@ -7697,7 +7697,7 @@ async def get_unconfirmed_payments() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT p.*,
-                   o.client_first_name, o.client_last_name, o.short_address,
+                   o.order_num, o.client_first_name, o.client_last_name, o.short_address,
                    TRIM(COALESCE(s.last_name,'') || ' ' || COALESCE(s.first_name,'')) AS staff_full_name,
                    s.phone AS staff_phone
             FROM order_payments p
