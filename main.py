@@ -9052,6 +9052,9 @@ async def admin_measure_item(order_id: int, item_id: int, staff=Depends(get_curr
         raise HTTPException(status_code=400, detail="Заказ закрыт — замер менять нельзя")
     if action == "submit" and not (is_admin or staff.get("can_override_measure")):
         _stage = await _measure_stage()
+        # 17.11.2026 (владелец): менеджер мерит уже с «В мастерской» — независимо от этапа замера
+        if staff.get("role") == "manager" and _flow_idx("received") < _flow_idx(_stage):
+            _stage = "received"
         if not (_flow_idx(_stage) <= _flow_idx(_st) < _flow_idx("delivery")):
             raise HTTPException(status_code=400,
                 detail=f"Замер — с этапа «{_ORDER_STATUS_RU_SHORT.get(_stage, _stage)}» и до доставки")
