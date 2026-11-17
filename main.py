@@ -8586,8 +8586,10 @@ async def _own_expense_guard(expense_id: int, staff: dict):
     Админ — может (он и так утверждает всё)."""
     if staff.get("role") == "admin" or staff.get("sub") == "admin":
         return
-    author = await db.pool.fetchval("SELECT created_by_staff_id FROM expenses WHERE id=$1", expense_id)
-    if author is not None and author == staff.get("id"):
+    row = await db.pool.fetchrow("SELECT created_by_staff_id, for_staff_id FROM expenses WHERE id=$1", expense_id)
+    me = staff.get("id")
+    if row and me is not None and me in (row["created_by_staff_id"], row["for_staff_id"]):
+        # свой — и созданный мной, и «для сотрудника» на меня (аванс себе)
         raise HTTPException(status_code=403, detail="Свой расход утверждает другой кассир или админ")
 
 
@@ -8653,6 +8655,7 @@ async def pay_expense(
         raise HTTPException(status_code=403, detail="Нет доступа")
     if paid_from not in ("cash", "safe", "bank"):
         raise HTTPException(status_code=400, detail="Некорректный источник выплаты")
+    await _own_expense_guard(expense_id, staff)
     row = await db.mark_expense_paid(expense_id, staff["id"], paid_from)
     if not row:
         raise HTTPException(status_code=404, detail="Расход не найден или не в статусе 'утверждён'")
@@ -8944,6 +8947,35 @@ async def get_receipt_file(order_id: int, payment_id: int, staff=Depends(get_cur
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/admin/expenses/{expense_id}/receipt-file")
+async def get_expense_receipt_file(expense_id: int, staff=Depends(get_current_staff)):
+    """Чек расхода (17.11.2026 ночь): в expenses.receipt_url лежит file_id Telegram, а не ссылка — отдаём файл.
+    Видят: автор расхода, кассир, админ."""
+    row = await db.pool.fetchrow("SELECT receipt_url, created_by_staff_id FROM expenses WHERE id=$1", expense_id)
+    if not row or not row["receipt_url"]:
+        raise HTTPException(status_code=404, detail="Чек не найден")
+    if not (staff.get("sub") == "admin" or staff.get("role") == "admin" or staff.get("can_manage_cash")
+            or row["created_by_staff_id"] == staff.get("id")):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    if str(row["receipt_url"]).startswith("http"):
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(row["receipt_url"])
+    if not BOT_TOKEN:
+        raise HTTPException(status_code=503, detail="Бот не настроен")
+    from fastapi.responses import StreamingResponse
+    async with aiohttp.ClientSession() as s:
+        async with s.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getFile", params={"file_id": row["receipt_url"]},
+                         timeout=aiohttp.ClientTimeout(total=10)) as r:
+            data = await r.json()
+        if not data.get("ok"):
+            raise HTTPException(status_code=404, detail="Файл не найден в TG")
+        file_path = data["result"]["file_path"]
+        async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=aiohttp.ClientTimeout(total=30)) as fr:
+            content = await fr.read()
+    return StreamingResponse(iter([content]), media_type=_sniff_media_type(content, file_path),
+                             headers={"Content-Disposition": "inline"})
 
 
 @app.get("/api/staff/payments/{payment_id}/receipt")
@@ -9737,11 +9769,46 @@ async def staff_review_counts(staff=Depends(get_current_staff)):
             if role in ("admin", "manager") else 0
         handovers = await c.fetchval("SELECT COUNT(*) FROM cash_handovers WHERE to_staff_id=$1 AND status='pending' "
                                      "AND COALESCE(to_type,'staff')='staff'", staff.get("id")) if staff.get("id") else 0
+    # расходы на утверждение (кассир — своего филиала, кроме своих; админ — все свои уровни)
+    expenses = 0
+    if staff.get("can_manage_cash") or role == "admin":
+        expenses = len(await _expenses_to_review(staff))
     can = {"payments": _can_review_payments(staff),
            "debts": bool(staff.get("can_approve_debt") or role in ("admin", "manager")),
-           "discounts": role in ("admin", "manager")}
+           "discounts": role in ("admin", "manager"),
+           "expenses": bool(staff.get("can_manage_cash") or role == "admin")}
     return {"ok": True, "payments": int(payments or 0), "debts": int(debts or 0), "discounts": int(discounts or 0),
-            "handovers": int(handovers or 0), "total": int((payments or 0) + (debts or 0) + (discounts or 0)), "can": can}
+            "expenses": expenses, "handovers": int(handovers or 0),
+            "total": int((payments or 0) + (debts or 0) + (discounts or 0) + expenses), "can": can}
+
+
+async def _expenses_to_review(staff: dict) -> list:
+    """Расходы, которые этот сотрудник может утвердить сейчас: кассир — pending своего филиала (уровень manager/both),
+    кроме своих; админ — ещё и уровня admin и уже одобренные кассиром. Без дублей."""
+    is_admin = staff.get("role") == "admin"
+    rows = list(await db.get_pending_expenses_for_manager(None if is_admin else staff.get("branch")))
+    if is_admin:
+        rows += await db.get_pending_expenses_for_admin()
+    seen, out = set(), []
+    for e in rows:
+        if e["id"] in seen or (not is_admin and staff.get("id") in (e.get("created_by_staff_id"), e.get("for_staff_id"))):
+            continue
+        seen.add(e["id"])
+        out.append(e)
+    return out
+
+
+@app.get("/api/staff/expenses-to-review")
+async def staff_expenses_to_review(staff=Depends(get_current_staff)):
+    """«✔️ На проверке» → «Расходы» (приложение, 17.11.2026 ночь)."""
+    if not (staff.get("can_manage_cash") or staff.get("role") == "admin"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    rows = await _expenses_to_review(staff)
+    for e in rows:
+        for k in ("created_at", "manager_at", "admin_at", "paid_at"):
+            if e.get(k) and hasattr(e[k], "isoformat"):
+                e[k] = e[k].isoformat()
+    return {"ok": True, "expenses": rows}
 
 
 @app.get("/api/staff/pending-position-requests")
