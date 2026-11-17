@@ -1373,6 +1373,9 @@ async def create_tables():
         await c.execute("""
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_pending BOOLEAN DEFAULT FALSE;
         ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_at TIMESTAMPTZ DEFAULT NULL;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_note TEXT DEFAULT NULL;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_count INTEGER DEFAULT NULL;
+        ALTER TABLE orders ADD COLUMN IF NOT EXISTS pos_request_by INTEGER DEFAULT NULL;
         """)
 
     # ── Шаг 12: контакты филиалов ────────────────────────────────────────

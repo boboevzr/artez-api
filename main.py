@@ -9818,9 +9818,16 @@ async def get_pending_position_requests(staff=Depends(get_current_staff)):
         return {"ok": True, "order_ids": []}
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id FROM orders WHERE pos_request_pending=TRUE"
+            "SELECT o.id, o.order_num, o.status, o.client_first_name, o.client_last_name, "
+            "o.pos_request_at, o.pos_request_note, o.pos_request_count, "
+            "TRIM(COALESCE(s.first_name,'') || ' ' || COALESCE(s.last_name,'')) AS requested_by, "
+            "(SELECT COUNT(*) FROM order_items WHERE order_id=o.id) AS item_count "
+            "FROM orders o LEFT JOIN staff s ON s.id=o.pos_request_by "
+            "WHERE o.pos_request_pending=TRUE ORDER BY o.pos_request_at"
         )
-    return {"ok": True, "order_ids": [r["id"] for r in rows]}
+    # order_ids — как раньше (staff.html поллит его); requests — подробно для приложения (17.11.2026)
+    reqs = [{**dict(r), "pos_request_at": r["pos_request_at"].isoformat() if r["pos_request_at"] else None} for r in rows]
+    return {"ok": True, "order_ids": [r["id"] for r in rows], "requests": reqs}
 
 # ── Контакты филиалов (публичный GET) ────────────────────────────────────────
 @app.get("/api/site-contacts")
@@ -9872,12 +9879,16 @@ async def request_position(
     count: int = Body(1,  embed=True),
     staff=Depends(get_current_staff)
 ):
-    """Мойщик просит добавить позицию — пуш всем с can_approve_measure."""
+    """Мойщик просит добавить позицию — пуш всем с can_approve_measure (web + приложение).
+    17.11.2026 (приложение): текст, количество и кто просил сохраняются — менеджер видит запрос в списке;
+    номер заказа — order_num (было order_number → всегда «#id»)."""
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(404, "Заказ не найден")
+    count = max(1, min(int(count or 1), 50))
+    note = (note or "").strip()[:500]
     washer_name  = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "Мойщик")
-    order_num    = order.get("order_number") or f"#{order_id}"
+    order_num    = order.get("order_num") or f"#{order_id}"
     items        = await db.get_order_items(order_id)
     current_cnt  = len(items)
     add_str      = f"+{count}" if count > 1 else "+1"
@@ -9889,23 +9900,29 @@ async def request_position(
             a["id"], title, body,
             order_id=order_id, push_type="position_request"
         ))
-    # Ставим флаг pending в БД
+        if a["id"] != staff.get("id"):
+            asyncio.create_task(_app_push_staff(a["id"], title, body, {"kind": "position", "order_id": order_id}))
+    # Ставим флаг pending в БД (+ что и кто просил — 17.11.2026)
     if db.pool:
         async with db.pool.acquire() as conn:
             await conn.execute(
-                "UPDATE orders SET pos_request_pending=TRUE, pos_request_at=NOW() WHERE id=$1",
-                order_id
+                "UPDATE orders SET pos_request_pending=TRUE, pos_request_at=NOW(), "
+                "pos_request_note=$2, pos_request_count=$3, pos_request_by=$4 WHERE id=$1",
+                order_id, note or None, count, staff.get("id")
             )
     return {"ok": True}
 
 @app.post("/api/staff/orders/{order_id}/claim-position-request")
 async def claim_position_request(order_id: int, staff=Depends(get_current_staff)):
-    """Менеджер принимает запрос — уведомляем остальных чтобы не дублировали."""
+    """Менеджер принимает запрос — уведомляем остальных чтобы не дублировали.
+    17.11.2026: принять может тот, кто вправе добавлять позиции (admin/manager/can_approve_measure)."""
+    if not (staff.get("role") in ("admin", "manager") or staff.get("can_approve_measure")):
+        raise HTTPException(403, "Принять запрос может менеджер")
     order = await db.get_order_by_id(order_id)
     if not order:
         raise HTTPException(404, "Заказ не найден")
     my_id       = staff["id"]
-    order_num   = order.get("order_number") or f"#{order_id}"
+    order_num   = order.get("order_num") or f"#{order_id}"
     my_name     = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
     title = f"✅ {order_num} — принято"
     body  = f"{my_name} принял запрос на добавление позиции"
