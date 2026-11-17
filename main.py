@@ -10731,10 +10731,10 @@ async def _own_stop_guard(order_id: int, staff: dict):
         raise HTTPException(status_code=403, detail="Заказ не в маршруте — попросите менеджера добавить его в маршрут")
     if r["driver_id"] is None:
         # маршрут без водителя — любой водитель того же филиала (как было в staff), чтобы утром не встала доставка
-        my_branch = (staff.get("branch") or "").strip()
-        if not my_branch or not (r["branch"] or "").strip() or my_branch == (r["branch"] or "").strip():
+        my_branch, r_branch = (staff.get("branch") or "").strip(), (r["branch"] or "").strip()
+        if my_branch and r_branch and my_branch == r_branch:   # оба филиала указаны и совпадают — иначе закрыто
             return
-        raise HTTPException(status_code=403, detail="Маршрут другого филиала")
+        raise HTTPException(status_code=403, detail="Маршрут без водителя — попросите менеджера назначить вас")
     if r["driver_id"] != staff.get("id"):
         raise HTTPException(status_code=403, detail=f"Маршрут назначен {r['driver_name'] or 'другому водителю'}. "
                                                     "Попросите менеджера переназначить")
