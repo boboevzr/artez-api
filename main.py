@@ -6490,9 +6490,21 @@ async def get_packers(_=Depends(get_current_staff)):
 async def set_order_packer(order_id: int,
                             packer_login: str = Body(..., embed=True),
                             staff=Depends(get_current_staff)):
+    # 17.11.2026: раньше любой сотрудник мог назначить кого угодно упаковщиком любого заказа.
+    # Упаковщик — только взять свободный заказ себе или отказаться от своего; назначать — admin/manager/логист.
+    role, me = staff.get("role"), staff.get("login") or ""
+    packer_login = (packer_login or "").strip()
+    if role == "packer":
+        cur = await db.pool.fetchval("SELECT COALESCE(packer_login, '') FROM orders WHERE id=$1", order_id) if db.pool else None
+        if cur is None:
+            raise HTTPException(status_code=404, detail="Заказ не найден")
+        if not ((packer_login == me and cur in ("", me)) or (packer_login == "" and cur == me)):
+            raise HTTPException(status_code=403, detail="Упаковщик может взять свободный заказ или отказаться от своего")
+    elif role not in ("admin", "manager", "logistics") and staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Нет прав назначать упаковщика")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
-            "UPDATE orders SET packer_login=$1 WHERE id=$2 RETURNING id", packer_login, order_id)
+            "UPDATE orders SET packer_login=$1 WHERE id=$2 RETURNING id", packer_login or None, order_id)
     if not row:
         raise HTTPException(status_code=404, detail="Заказ не найден")
     return {"ok": True}
