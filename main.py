@@ -1837,17 +1837,6 @@ async def attendance_today_ep(me=Depends(get_current_staff)):
     data = await db.get_attendance_today(me["id"])
     return {"ok": True, **data}
 
-@app.get("/api/admin/settings/attendance-radius")
-async def get_attendance_radius(_=Depends(get_admin)):
-    return {"ok": True, "radius_m": await _attendance_radius_m()}
-
-@app.put("/api/admin/settings/attendance-radius")
-async def save_attendance_radius(radius_m: int = Body(..., embed=True), _=Depends(get_admin)):
-    if not 5 <= radius_m <= 5000:
-        raise HTTPException(status_code=400, detail="Радиус — от 5 до 5000 м")
-    await db.set_config("attendance_radius_m", str(radius_m))
-    return {"ok": True, "radius_m": radius_m}
-
 @app.get("/api/admin/attendance")
 async def admin_attendance_ep(year: int, month: int, staff_id: int = None,
                                me=Depends(get_current_staff)):
@@ -10774,6 +10763,17 @@ async def save_self_pickup_discount(discount: float = Body(..., embed=True), _=D
 async def get_delivery_discount(_=Depends(get_admin)):
     val = await db.get_config("delivery_discount_pct")
     return {"ok": True, "discount": float(val) if val else 0.0}
+
+@app.get("/api/admin/settings/attendance-radius")
+async def get_attendance_radius(_=Depends(get_admin)):
+    return {"ok": True, "radius_m": await _attendance_radius_m()}
+
+@app.put("/api/admin/settings/attendance-radius")
+async def save_attendance_radius(radius_m: int = Body(..., embed=True), _=Depends(get_admin)):
+    if not 5 <= radius_m <= 5000:
+        raise HTTPException(status_code=400, detail="Радиус — от 5 до 5000 м")
+    await db.set_config("attendance_radius_m", str(radius_m))
+    return {"ok": True, "radius_m": radius_m}
 
 @app.get("/api/settings/delivery-discount")
 async def get_delivery_discount_public():
