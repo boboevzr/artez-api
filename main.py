@@ -12806,12 +12806,22 @@ async def _chat_media_sender(code: str, authorization: str | None):
     if session["status"] == "closed":
         raise HTTPException(status_code=409, detail="Чат закрыт")
     if authorization and authorization.startswith("Bearer "):
+        tok = authorization[7:]
         try:
-            payload = jwt.decode(authorization[7:], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+            payload = jwt.decode(tok, JWT_SECRET, algorithms=[JWT_ALGORITHM])
         except Exception:
+            # протухший/битый токен СОТРУДНИКА — 401, а не «клиент» (ревью e1): иначе фото ушло бы от имени клиента
+            try:
+                claims = jwt.get_unverified_claims(tok)
+            except Exception:
+                claims = {}
+            if claims.get("type") == "staff":
+                raise HTTPException(status_code=401, detail="Войдите заново")
             payload = {}
         if payload.get("type") == "staff":
             staff = await _staff_from_payload(payload)
+            if not staff:
+                raise HTTPException(status_code=401, detail="Войдите заново")
             if not staff or staff.get("role") not in CHAT_ROLES:
                 raise HTTPException(status_code=403, detail="Чат — для менеджера и колл-центра")
             if session.get("claimed_by") != staff["id"] and staff.get("role") != "admin":
@@ -12847,8 +12857,12 @@ async def chat_send_media(code: str, request: Request, file: UploadFile = File(.
         raise HTTPException(status_code=400, detail="Можно отправить только фото или видео")
     # лимит частоты — под блокировкой чата: проверка, загрузка и запись не обгоняют друг друга
     lock = _chat_media_locks.setdefault(code, asyncio.Lock())
-    async with lock:
-        return await _chat_media_store(code, session, who, sname, staff, kind, ctype, data, caption, file.filename)
+    try:
+        async with lock:
+            return await _chat_media_store(code, session, who, sname, staff, kind, ctype, data, caption, file.filename)
+    finally:
+        if not lock.locked():   # словарь блокировок не растёт (ревью e1)
+            _chat_media_locks.pop(code, None)
 
 
 async def _chat_media_store(code, session, who, sname, staff, kind, ctype, data, caption, filename):
