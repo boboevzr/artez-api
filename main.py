@@ -3405,6 +3405,17 @@ class ClientDiscountCategoryRequest(BaseModel):
     discount_category: str | None = None       # 'pensioner' | 'disabled' | None — снять категорию
     discount_category_pct: float | None = None  # обязателен при установке категории
 
+def _safe_file_kw(ctype: str) -> dict:
+    """Чеки и фото документов (17.11.2026 ночь): в браузере открываем только картинки/видео/PDF; остальное —
+    скачиванием. nosniff + CSP sandbox — даже открытый файл не выполнит скрипт от имени сайта."""
+    ctype = (ctype or "").split(";")[0].strip().lower()
+    safe = ctype in ("image/jpeg", "image/png", "image/webp", "image/gif", "image/heic", "application/pdf") or ctype.startswith("video/")
+    return {"media_type": ctype if safe else "application/octet-stream",
+            "headers": {"Content-Disposition": "inline" if safe else "attachment",
+                        "X-Content-Type-Options": "nosniff",
+                        "Content-Security-Policy": "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'"}}
+
+
 @app.put("/api/clients/{client_id}/discount-category")
 async def client_set_discount_category(client_id: int, req: ClientDiscountCategoryRequest,
                                        staff=Depends(get_current_staff)):
@@ -3488,8 +3499,7 @@ async def client_get_discount_photo(client_id: int, staff=Depends(get_current_st
                      "application/octet-stream")
             async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
                 content = await fr.read()
-        return StreamingResponse(iter([content]), media_type=ctype,
-                                 headers={"Content-Disposition": "inline"})
+        return StreamingResponse(iter([content]), **_safe_file_kw(ctype))
     except HTTPException:
         raise
     except Exception as e:
@@ -9016,8 +9026,7 @@ async def get_receipt_file(order_id: int, payment_id: int, staff=Depends(get_cur
             async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
                 content = await fr.read()
         ctype = _sniff_media_type(content, file_path)
-        return StreamingResponse(iter([content]), media_type=ctype,
-                                 headers={"Content-Disposition": "inline"})
+        return StreamingResponse(iter([content]), **_safe_file_kw(ctype))
     except HTTPException:
         raise
     except Exception as e:
@@ -9049,8 +9058,7 @@ async def get_expense_receipt_file(expense_id: int, staff=Depends(get_current_st
         file_path = data["result"]["file_path"]
         async with s.get(f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}", timeout=aiohttp.ClientTimeout(total=30)) as fr:
             content = await fr.read()
-    return StreamingResponse(iter([content]), media_type=_sniff_media_type(content, file_path),
-                             headers={"Content-Disposition": "inline"})
+    return StreamingResponse(iter([content]), **_safe_file_kw(_sniff_media_type(content, file_path)))
 
 
 @app.get("/api/staff/payments/{payment_id}/receipt")
@@ -9079,8 +9087,7 @@ async def get_driver_payment_receipt(payment_id: int, _=Depends(get_current_staf
             async with s.get(file_url, timeout=aiohttp.ClientTimeout(total=30)) as fr:
                 content = await fr.read()
         ctype = _sniff_media_type(content, file_path)
-        return StreamingResponse(iter([content]), media_type=ctype,
-                                 headers={"Content-Disposition": "inline"})
+        return StreamingResponse(iter([content]), **_safe_file_kw(ctype))
     except HTTPException:
         raise
     except Exception as e:
