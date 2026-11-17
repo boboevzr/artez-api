@@ -10332,6 +10332,56 @@ async def get_pending_discount_requests(staff=Depends(get_current_staff)):
     rows = await db.get_pending_discount_requests()
     return {"ok": True, "requests": rows}
 
+@app.post("/api/staff/orders/{order_id}/discount-request")
+async def staff_discount_request(order_id: int, body: dict = Body({}), staff=Depends(get_current_staff)):
+    """Сотрудник без права «Может давать скидку» просит скидку (17.11.2026 ночь) — решают админ/менеджер
+    в «✔️ На проверке» → «Скидки» (одобрение добавляет сумму к ручной скидке заказа)."""
+    if staff.get("role") in ("washer", "agent") or not staff.get("id"):
+        raise HTTPException(status_code=403, detail="Нет доступа")
+    if _can_give_discount(staff):
+        raise HTTPException(status_code=400, detail="Вы можете дать скидку сами — в окне «🏷 Скидка»")
+    try:
+        amount = float(body.get("amount") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Сумма — число")
+    note = str(body.get("note") or "").strip()[:300]
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    if order.get("status") in ("delivered", "cancelled", "returned"):
+        raise HTTPException(status_code=400, detail="Заказ закрыт — скидку уже не попросить")
+    total = float((await db.get_order_items_billing(order_id))["order_total"] or 0)
+    if not (0 < amount <= total):
+        raise HTTPException(status_code=400, detail="Сумма скидки — больше 0 и не больше суммы заказа")
+    if not note:
+        raise HTTPException(status_code=400, detail="Напишите причину скидки")
+    async with db.pool.acquire() as c:
+        async with c.transaction():
+            await c.execute("SELECT 1 FROM orders WHERE id=$1 FOR UPDATE", order_id)   # двойное нажатие — один запрос
+            if await c.fetchval("SELECT 1 FROM discount_requests WHERE order_id=$1 AND status='pending'", order_id):
+                raise HTTPException(status_code=409, detail="По этому заказу уже есть запрос скидки — ждёт решения")
+            rid = await c.fetchval(
+                "INSERT INTO discount_requests (order_id, order_num, requested_amount, requested_by_staff_id, note) "
+                "VALUES ($1,$2,$3,$4,$5) RETURNING id", order_id, order.get("order_num"), amount, staff["id"], note)
+    name = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
+    await db.add_order_activity(order_id, staff.get("id"), name, "discount_requested",
+                                f"🏷 Просит скидку {int(amount):,} сум — {note}".replace(",", " "))
+    asyncio.create_task(_app_push_roles(["manager", "admin"], "🏷 Запрос скидки",
+                                        f"{order.get('order_num') or order_id} · {int(amount):,} сум · {name}".replace(",", " "),
+                                        {"kind": "review", "type": "discount_request", "order_id": order_id}))
+    return {"ok": True, "request_id": rid}
+
+
+async def _notify_discount_requester(row: dict, approved: bool):
+    sid = row.get("requested_by_staff_id")
+    if not sid:
+        return
+    amt = int(float(row.get("approved_amount") or row.get("requested_amount") or 0))
+    title = "✅ Скидка одобрена" if approved else "❌ Скидку не дали"
+    body = f"{row.get('order_num') or ''} · {amt:,} сум".replace(",", " ")
+    asyncio.create_task(_app_push_staff(sid, title, body, {"kind": "order", "order_id": row.get("order_id")}))
+
+
 @app.post("/api/discount-requests/{request_id}/approve")
 async def approve_discount_request(
     request_id: int,
@@ -10346,6 +10396,10 @@ async def approve_discount_request(
     row = await db.resolve_discount_request(request_id, approved_amount, staff["id"])
     if not row:
         raise HTTPException(404, "Запрос не найден или уже обработан")
+    # сумма заказа изменилась — пересчитать статус оплаты сразу (правило владельца 17.11)
+    async with db.pool.acquire() as _c:
+        await db._recalc_payment_status(_c, row["order_id"])
+    await _notify_discount_requester(row, True)
     return {"ok": True, "request": row}
 
 @app.post("/api/discount-requests/{request_id}/reject")
@@ -10359,6 +10413,7 @@ async def reject_discount_request(
     row = await db.reject_discount_request(request_id, staff["id"])
     if not row:
         raise HTTPException(404, "Запрос не найден или уже обработан")
+    await _notify_discount_requester(row, False)
     return {"ok": True, "request": row}
 
 # ── driver delivery (web) ──────────────────────────────────────────────────────

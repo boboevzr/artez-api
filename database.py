@@ -1468,6 +1468,8 @@ async def create_tables():
             resolved_by     INTEGER REFERENCES staff(id) ON DELETE SET NULL
         );
         CREATE INDEX IF NOT EXISTS idx_discount_requests_status ON discount_requests(status);
+        ALTER TABLE discount_requests ADD COLUMN IF NOT EXISTS requested_by_staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL;
+        ALTER TABLE discount_requests ADD COLUMN IF NOT EXISTS note TEXT;
         """)
 
     # ── Шаг 18: запросы долгового одобрения ──────────────────────────────────
@@ -8275,9 +8277,11 @@ async def get_pending_discount_requests() -> list:
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT dr.*, o.client_first_name, o.client_last_name,
-                   COALESCE(o.total_price,0) AS order_total
+                   COALESCE(o.total_price,0) AS order_total,
+                   NULLIF(TRIM(CONCAT_WS(' ', rs.first_name, rs.last_name)), '') AS requested_by_name
             FROM discount_requests dr
             LEFT JOIN orders o ON o.id = dr.order_id
+            LEFT JOIN staff rs ON rs.id = dr.requested_by_staff_id
             WHERE dr.status='pending'
             ORDER BY dr.created_at ASC
         """)
