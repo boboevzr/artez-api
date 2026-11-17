@@ -8581,12 +8581,23 @@ async def pending_for_admin(staff=Depends(get_current_staff)):
     rows = await db.get_pending_expenses_for_admin()
     return {"ok": True, "expenses": rows}
 
+async def _own_expense_guard(expense_id: int, staff: dict):
+    """17.11.2026 ночь: кассир не утверждает и не отклоняет СВОЙ расход (раньше утверждал сам себе → «выплачен»).
+    Админ — может (он и так утверждает всё)."""
+    if staff.get("role") == "admin" or staff.get("sub") == "admin":
+        return
+    author = await db.pool.fetchval("SELECT created_by_staff_id FROM expenses WHERE id=$1", expense_id)
+    if author is not None and author == staff.get("id"):
+        raise HTTPException(status_code=403, detail="Свой расход утверждает другой кассир или админ")
+
+
 @app.patch("/api/admin/expenses/{expense_id}/approve")
 async def approve_expense(expense_id: int, staff=Depends(get_current_staff)):
     is_admin = staff.get("role") == "admin"
     can_manage = staff.get("can_manage_cash") or is_admin
     if not can_manage:
         raise HTTPException(status_code=403, detail="Нет доступа")
+    await _own_expense_guard(expense_id, staff)
     if is_admin:
         row = await db.approve_expense_admin(expense_id, staff["id"])
     else:
@@ -8618,6 +8629,7 @@ async def reject_expense(
     can_manage = staff.get("can_manage_cash") or staff.get("role") == "admin"
     if not can_manage:
         raise HTTPException(status_code=403, detail="Нет доступа")
+    await _own_expense_guard(expense_id, staff)
     row = await db.reject_expense(expense_id, staff["id"], reason)
     if not row:
         raise HTTPException(status_code=404, detail="Расход не найден или уже обработан")

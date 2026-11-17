@@ -7476,7 +7476,7 @@ async def confirm_cash_handover(handover_id: int, confirmed_by: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
             UPDATE cash_handovers SET status='confirmed', confirmed_at=NOW(), confirmed_by=$2
-            WHERE id=$1 RETURNING *
+            WHERE id=$1 AND status='pending' RETURNING *   -- 17.11.2026: повторно не подтверждаем
         """, handover_id, confirmed_by)
         return dict(row) if row else {}
 
