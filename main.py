@@ -10515,11 +10515,15 @@ async def driver_pickup_take(order_id: int, req: PickupTakeRequest, staff=Depend
     if order.get("status") not in ("new", "confirmed"):
         raise HTTPException(400, f"Статус заказа: {order.get('status')}")
     name = _driver_name(staff)
+    # 17.11.2026 ночь: разумные пределы — одним запросом нельзя создать тысячи позиций
+    req_items = {str(k)[:200]: max(0, min(int(v or 0), 100)) for k, v in list((req.items or {}).items())[:50]}
+    if sum(req_items.values()) > 200:
+        raise HTTPException(400, "Слишком много вещей за раз — не больше 200")
 
-    if req.mode == "by_service" and req.items:
-        items = await db.create_empty_items_by_service(order_id, req.items, order.get("service_type"))
+    if req.mode == "by_service" and any(req_items.values()):
+        items = await db.create_empty_items_by_service(order_id, req_items, order.get("service_type"))
     else:
-        items = await db.create_empty_items(order_id, max(1, req.count or 1))
+        items = await db.create_empty_items(order_id, max(1, min(req.count or 1, 200)))
 
     await db.update_order_status(order_id, "pickup",
         note=f"Забрал у клиента: {name} ({len(items)} поз.)")
@@ -10627,6 +10631,19 @@ async def get_my_route(staff=Depends(get_current_staff)):
         logging.warning(f"payment_events: {_pe}")
     return {"ok": True, "routes": routes, "payment_events": payment_events}
 
+async def _own_stop_guard(order_id: int, staff: dict):
+    """Действия водителя по остановке («Забрал», «Доставил», «В долг», «Не забрал», отмены…) — только по заказу из
+    СВОЕГО маршрута за последние 3 дня (как оплата водителем). Раньше любой водитель мог отметить чужой заказ
+    доставленным или закрыть его в долг. Админ/менеджер — без ограничения."""
+    if staff.get("sub") == "admin" or staff.get("role") in ("admin", "manager"):
+        return
+    mine = await db.pool.fetchval(
+        "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
+        "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1", order_id, staff.get("id"))
+    if not mine:
+        raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
+
+
 @app.post("/api/staff/my-route/stops/{order_id}/take-pickup")
 async def driver_route_take_pickup(order_id: int, req: PickupTakeRequest, staff=Depends(get_current_staff)):
     """«Забрал» на маршруте типа «Забор» — confirmed/new → pickup, создаёт пустые
@@ -10634,16 +10651,21 @@ async def driver_route_take_pickup(order_id: int, req: PickupTakeRequest, staff=
     (тот же ad-hoc флоу без маршрута) — здесь ещё синхронизируем route_orders,
     иначе точка маршрута не отметится выполненной в списке."""
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     order = await db.get_order_by_id(order_id)
     if not order: raise HTTPException(404, "Заказ не найден")
     if order.get("status") not in ("new", "confirmed"):
         raise HTTPException(400, f"Статус заказа: {order.get('status')}")
     name = _driver_name(staff)
+    # 17.11.2026 ночь: разумные пределы — одним запросом нельзя создать тысячи позиций
+    req_items = {str(k)[:200]: max(0, min(int(v or 0), 100)) for k, v in list((req.items or {}).items())[:50]}
+    if sum(req_items.values()) > 200:
+        raise HTTPException(400, "Слишком много вещей за раз — не больше 200")
 
-    if req.mode == "by_service" and req.items:
-        items = await db.create_empty_items_by_service(order_id, req.items, order.get("service_type"))
+    if req.mode == "by_service" and any(req_items.values()):
+        items = await db.create_empty_items_by_service(order_id, req_items, order.get("service_type"))
     else:
-        items = await db.create_empty_items(order_id, max(1, req.count or 1))
+        items = await db.create_empty_items(order_id, max(1, min(req.count or 1, 200)))
 
     await db.update_order_status(order_id, "pickup",
         note=f"Забрал у клиента (маршрут): {name} ({len(items)} поз.)")
@@ -10661,6 +10683,7 @@ async def driver_route_undo_pickup(order_id: int, staff=Depends(get_current_staf
     удаляет созданные пустые позиции, возвращает точку маршрута в pending (зеркалит
     bot.py: action == "undo" для cur == "pickup")."""
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     order = await db.get_order_by_id(order_id)
     if not order: raise HTTPException(404, "Заказ не найден")
     if order.get("status") != "pickup":
@@ -10678,6 +10701,7 @@ async def driver_route_undo_pickup(order_id: int, staff=Depends(get_current_staf
 @app.post("/api/staff/my-route/stops/{order_id}/take-delivery")
 async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     name = _driver_name(staff)
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT status FROM orders WHERE id=$1", order_id)
@@ -10697,6 +10721,7 @@ async def driver_take_delivery(order_id: int, staff=Depends(get_current_staff)):
 @app.post("/api/staff/my-route/stops/{order_id}/undo-delivery")
 async def driver_undo_delivery(order_id: int, staff=Depends(get_current_staff)):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     name = _driver_name(staff)
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT status FROM orders WHERE id=$1", order_id)
@@ -10713,6 +10738,7 @@ async def driver_undo_delivery(order_id: int, staff=Depends(get_current_staff)):
 @app.post("/api/staff/my-route/stops/{order_id}/not-taken")
 async def driver_not_taken(order_id: int, reason_index: int = Body(..., embed=True), staff=Depends(get_current_staff)):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     name = _driver_name(staff)
     idx = reason_index if 0 <= reason_index < len(_NOT_TAKEN_REASONS) else len(_NOT_TAKEN_REASONS)-1
     reason = _NOT_TAKEN_REASONS[idx]
@@ -10727,6 +10753,7 @@ async def driver_not_taken(order_id: int, reason_index: int = Body(..., embed=Tr
 @app.post("/api/staff/my-route/stops/{order_id}/returned")
 async def driver_returned(order_id: int, reason_index: int = Body(..., embed=True), staff=Depends(get_current_staff)):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     name = _driver_name(staff)
     idx = reason_index if 0 <= reason_index < len(_RETURNED_REASONS) else len(_RETURNED_REASONS)-1
     reason = _RETURNED_REASONS[idx]
@@ -10745,6 +10772,7 @@ async def driver_resume_stop(order_id: int, staff=Depends(get_current_staff)):
     skipped → pending (статус заказа не трогаем — returned уже вернул его в ready,
     not-taken его не менял). Только пока маршрут не закрыт и заказ не отменён."""
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     name = _driver_name(staff)
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -10777,6 +10805,7 @@ async def driver_deliver(
     staff=Depends(get_current_staff)
 ):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     name = _driver_name(staff)
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("SELECT status FROM orders WHERE id=$1", order_id)
@@ -10803,6 +10832,7 @@ async def driver_deliver(
 @app.post("/api/staff/my-route/stops/{order_id}/close-with-debt")
 async def driver_close_with_debt(order_id: int, staff=Depends(get_current_staff)):
     if not _can_drive(staff): raise HTTPException(403, "Нет доступа")
+    await _own_stop_guard(order_id, staff)   # 17.11.2026: только заказ из своего маршрута
     # Проверить нет ли уже pending-запроса
     async with db.pool.acquire() as conn:
         existing = await conn.fetchrow(
