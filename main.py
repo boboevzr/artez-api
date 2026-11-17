@@ -6748,13 +6748,24 @@ async def postpone_order_delivery(order_id: int,
     return {"ok": True, "order": order}
 
 
+# Согласованная доставка — только эти роли (как _DSLOT_ROLES в staff.html и в приложении; 17.11.2026).
+# Раньше хватало права «orders» — мойщик/водитель/упаковщик могли поставить её прямым запросом.
+DSLOT_ROLES = {"admin", "manager", "logistics", "callcenter"}
+
+
+async def _dslot_staff(staff=Depends(require_perm("orders"))):
+    if staff.get("role") not in DSLOT_ROLES and staff.get("sub") != "admin":
+        raise HTTPException(status_code=403, detail="Согласовать доставку может менеджер, логист или колл-центр")
+    return staff
+
+
 @app.post("/api/admin/orders/{order_id}/delivery-slot")
 async def set_order_delivery_slot_ep(order_id: int,
                                      date: str = Body(..., embed=True),
                                      time_from: str | None = Body(None, embed=True),
                                      time_to: str | None = Body(None, embed=True),
                                      note: str = Body("", embed=True),
-                                     staff=Depends(require_perm("orders"))):
+                                     staff=Depends(_dslot_staff)):
     """Согласованная с клиентом доставка: день + окно времени (+ примечание оператора).
     Каждое изменение — в историю заказа; сводка и контроль — _delivery_digest_worker."""
     from datetime import date as _date, time as _time, datetime as _dt, timezone as _tz, timedelta as _td
@@ -6780,7 +6791,7 @@ async def set_order_delivery_slot_ep(order_id: int,
 
 
 @app.delete("/api/admin/orders/{order_id}/delivery-slot")
-async def clear_order_delivery_slot_ep(order_id: int, staff=Depends(require_perm("orders"))):
+async def clear_order_delivery_slot_ep(order_id: int, staff=Depends(_dslot_staff)):
     order = await db.clear_order_delivery_slot(order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Заказ не найден")
