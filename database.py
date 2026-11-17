@@ -542,6 +542,69 @@ async def create_tables():
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS driver_pay_claim_token VARCHAR(32) DEFAULT NULL",
         # 17.11.2026: дата «Доставлен» — от неё ЗП «за единицу»
         "ALTER TABLE orders ADD COLUMN IF NOT EXISTS delivered_at TIMESTAMPTZ DEFAULT NULL",
+        # 17.11.2026 «🔁 Возврат в мастерскую» + ЗП «за единицу»: позиция засчитывается мойщику ОДИН раз при «Доставлен»
+        # статус «returned» в CHECK (тот же список задаёт и бот при старте — artez_bot/database.py)
+        "ALTER TABLE orders DROP CONSTRAINT IF EXISTS orders_status_check",
+        """ALTER TABLE orders ADD CONSTRAINT orders_status_check CHECK (status IN (
+           'new','confirmed','pickup','received','washing','drying','packing','ready','delivery','delivered','cancelled','returned'))""",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS credited_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS credited_login VARCHAR(100) DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS credited_excluded BOOLEAN DEFAULT FALSE",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS bad_work_login VARCHAR(100) DEFAULT NULL",
+        # перемывка ДРУГИМ мойщиком позиции, засчитанной браковщику в прошлом (закрытом) месяце — отдельный засчёт
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS rework_credited_at TIMESTAMPTZ DEFAULT NULL",
+        "ALTER TABLE order_items ADD COLUMN IF NOT EXISTS rework_login VARCHAR(100) DEFAULT NULL",
+        """CREATE TABLE IF NOT EXISTS order_returns (
+            id               SERIAL PRIMARY KEY,
+            order_id         INTEGER REFERENCES orders(id) ON DELETE CASCADE,
+            reason           VARCHAR(20) NOT NULL DEFAULT 'bad_wash',
+            note             TEXT DEFAULT '',
+            from_status      VARCHAR(20),
+            marked_by_staff_id INTEGER,
+            marked_by_name   VARCHAR(200),
+            created_at       TIMESTAMPTZ DEFAULT NOW(),
+            decision         VARCHAR(20) DEFAULT NULL,
+            decided_by_name  VARCHAR(200),
+            decided_at       TIMESTAMPTZ,
+            fine_total       NUMERIC(12,2) DEFAULT 0
+        )""",
+        """CREATE TABLE IF NOT EXISTS order_return_items (
+            return_id        INTEGER REFERENCES order_returns(id) ON DELETE CASCADE,
+            item_id          INTEGER REFERENCES order_items(id) ON DELETE CASCADE,
+            washer_login     VARCHAR(100),
+            was_credited     BOOLEAN DEFAULT FALSE,
+            fine             NUMERIC(12,2) DEFAULT 0,
+            PRIMARY KEY (return_id, item_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_order_returns_order ON order_returns(order_id)",
+        # засчёт позиций при «Доставлен» — триггером: любой путь (API, бот, прямой SQL) засчитывает одинаково
+        """CREATE OR REPLACE FUNCTION artez_credit_items() RETURNS trigger AS $$
+           BEGIN
+             UPDATE order_items
+                SET credited_at = NOW(), credited_login = washer_login,
+                    credited_excluded = (bad_work_login IS NOT NULL AND washer_login = bad_work_login)
+              WHERE order_id = NEW.id AND credited_at IS NULL AND washer_login IS NOT NULL AND washer_login <> '';
+             UPDATE order_items
+                SET rework_credited_at = NOW(), rework_login = washer_login
+              WHERE order_id = NEW.id AND bad_work_login IS NOT NULL AND credited_at IS NOT NULL
+                AND credited_login = bad_work_login AND rework_credited_at IS NULL
+                AND washer_login IS NOT NULL AND washer_login <> '' AND washer_login <> bad_work_login;
+             RETURN NEW;
+           END $$ LANGUAGE plpgsql""",
+        "DROP TRIGGER IF EXISTS trg_artez_credit_items ON orders",
+        """CREATE TRIGGER trg_artez_credit_items AFTER UPDATE OF status ON orders
+           FOR EACH ROW WHEN (NEW.status = 'delivered' AND OLD.status IS DISTINCT FROM 'delivered')
+           EXECUTE FUNCTION artez_credit_items()""",
+        # разово: уже доставленные позиции засчитаны по дате доставки (как считал шаг 1)
+        """UPDATE order_items oi
+              SET credited_at = COALESCE(o.delivered_at,
+                                         (SELECT MAX(h.created_at) FROM order_status_history h
+                                           WHERE h.order_num = o.order_num AND h.new_status = 'delivered'),
+                                         o.updated_at)::timestamptz,
+                  credited_login = oi.washer_login
+             FROM orders o
+            WHERE o.id = oi.order_id AND o.status = 'delivered' AND oi.credited_at IS NULL
+              AND oi.washer_login IS NOT NULL AND oi.washer_login <> ''""",
         "ALTER TABLE cash_handovers ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         "ALTER TABLE expenses ADD COLUMN IF NOT EXISTS shift_id INTEGER REFERENCES cash_shifts(id) ON DELETE SET NULL DEFAULT NULL",
         # Расходы: источник выплаты (сейф / банк / наличные)
@@ -3047,6 +3110,7 @@ async def get_admin_orders(status: str = None, statuses: list = None, branch: st
         q = f"""
             SELECT o.*,
                    COALESCE(i.cnt, 0)::int AS item_count,
+                   EXISTS (SELECT 1 FROM order_returns rt WHERE rt.order_id = o.id AND rt.decision IS NULL) AS return_pending,
                    COALESCE(i.corr, 0)::int AS corrected_count,
                    COALESCE(i.pend, 0)::int AS measure_pending_count,
                    COALESCE((SELECT SUM(COALESCE(price_per_sqm,0)*COALESCE(sqm,0))
@@ -3306,6 +3370,120 @@ async def save_staff_salary(staff_id: int, data: dict) -> None:
                     staff_id, k["metric"], float(k["target_value"]),
                     k.get("bonus_type", "fixed"), float(k.get("bonus_value") or 0))
 
+async def return_pending(order_id: int) -> bool:
+    """Есть «🔁 Возврат» без решения менеджера (17.11.2026)."""
+    if not pool: return False
+    return bool(await pool.fetchval(
+        "SELECT 1 FROM order_returns WHERE order_id=$1 AND decision IS NULL LIMIT 1", order_id))
+
+
+async def get_order_returns(order_id: int) -> list:
+    if not pool: return []
+    async with pool.acquire() as conn:
+        rets = await conn.fetch("SELECT * FROM order_returns WHERE order_id=$1 ORDER BY id DESC", order_id)
+        out = []
+        for r in rets:
+            items = await conn.fetch("""
+                SELECT ri.item_id, ri.washer_login, ri.was_credited, ri.fine,
+                       COALESCE(oi.service_ru, oi.service) AS label
+                  FROM order_return_items ri LEFT JOIN order_items oi ON oi.id = ri.item_id
+                 WHERE ri.return_id=$1 ORDER BY ri.item_id""", r["id"])
+            d = dict(r)
+            for k in ("created_at", "decided_at"):
+                if d.get(k): d[k] = d[k].isoformat()
+            d["fine_total"] = float(d.get("fine_total") or 0)
+            d["items"] = [{"item_id": i["item_id"], "label": i["label"], "washer_login": i["washer_login"],
+                           "fine": float(i["fine"] or 0)} for i in items]
+            out.append(d)
+        return out
+
+
+async def create_order_return(order_id: int, item_ids: list, reason: str, note: str,
+                              staff_id, staff_name: str, from_status: str) -> dict:
+    """«🔁 Возврат в мастерскую»: запоминаем вещи, их мойщика и был ли уже засчёт; заказ → «returned»,
+    остановка доставки в маршруте — выполнена."""
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch("""
+                SELECT id, washer_login, credited_at, credited_login, COALESCE(credited_excluded, FALSE) AS excl
+                  FROM order_items WHERE order_id=$1 AND id = ANY($2::int[]) FOR UPDATE""", order_id, item_ids)
+            if len(rows) != len(item_ids):
+                raise ValueError("Позиции не из этого заказа")
+            rid = await conn.fetchval("""
+                INSERT INTO order_returns (order_id, reason, note, from_status, marked_by_staff_id, marked_by_name)
+                VALUES ($1,$2,$3,$4,$5,$6) RETURNING id""", order_id, reason, note, from_status, staff_id, staff_name)
+            for r in rows:
+                was = bool(r["credited_at"] and r["credited_login"] and r["credited_login"] == r["washer_login"] and not r["excl"])
+                await conn.execute("""
+                    INSERT INTO order_return_items (return_id, item_id, washer_login, was_credited)
+                    VALUES ($1,$2,$3,$4)""", rid, r["id"], r["washer_login"], was)
+            await conn.execute("""
+                UPDATE route_orders SET stop_status='done'
+                 WHERE order_id=$1 AND COALESCE(stop_status,'') NOT IN ('done','skipped')""", order_id)
+    await update_order_status(order_id, "returned",
+                              note=f"🔁 Возврат в мастерскую: {'плохая мойка' if reason == 'bad_wash' else 'другое'} ({staff_name})")
+    return next((x for x in await get_order_returns(order_id) if x["id"] == rid), {"id": rid})
+
+
+async def decide_order_return(return_id: int, bad_work: bool, staff_name: str, staff_id) -> dict:
+    """Решение менеджера. Плохая работа → мойщику позиции: если позиция уже засчитана ему — штраф на её заработок
+    (по ставкам «за единицу») в текущем месяце и сброс засчёта (повторная доставка засчитает её заново: тому же
+    мойщику — 0 через bad_work_login, другому — как обычно); + фикс. штраф return_fine_amount за позицию."""
+    from datetime import date as _date
+    period = _date.today().replace(day=1)
+    try:
+        fixed = max(0.0, float(await get_config("return_fine_amount") or 0))
+    except (TypeError, ValueError):
+        fixed = 0.0
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            ret = await conn.fetchrow("SELECT * FROM order_returns WHERE id=$1 FOR UPDATE", return_id)
+            if not ret:
+                raise LookupError
+            if ret["decision"]:
+                raise ValueError("По этому возврату уже решено")
+            order_num = await conn.fetchval("SELECT order_num FROM orders WHERE id=$1", ret["order_id"]) or ""
+            total = 0.0
+            if bad_work:
+                items = await conn.fetch("SELECT * FROM order_return_items WHERE return_id=$1", return_id)
+                for ri in items:
+                    orig = ri["washer_login"]
+                    if not orig:
+                        continue
+                    await conn.execute("UPDATE order_items SET bad_work_login=$2 WHERE id=$1", ri["item_id"], orig)
+                    sid = await conn.fetchval("SELECT id FROM staff WHERE login=$1", orig)
+                    earn = 0.0
+                    it = await conn.fetchrow("SELECT credited_at, credited_login, COALESCE(service_ru, service) AS label "
+                                             "FROM order_items WHERE id=$1", ri["item_id"])
+                    if sid and it and it["credited_at"] and it["credited_login"] == orig:
+                        d = (it["credited_at"] + __import__("datetime").timedelta(hours=5)).date()
+                        if d.replace(day=1) >= period:
+                            # засчитано в ЭТОМ месяце — просто снимаем засчёт: расчёт месяца её не покажет
+                            # (повторная доставка: тот же мойщик — 0, другой — как обычно)
+                            await conn.execute("UPDATE order_items SET credited_at=NULL, credited_login=NULL, "
+                                               "credited_excluded=FALSE WHERE id=$1", ri["item_id"])
+                        else:
+                            # засчитано в прошлом (закрытом) месяце — его не трогаем, снимаем заработок штрафом сейчас
+                            for e in (await per_unit_earnings(conn, {sid: orig}, d, d)).get(sid, []):
+                                if e.get("item_id") == ri["item_id"]:
+                                    earn = float(e["earn"] or 0)
+                    fine = round(earn + fixed, 2)
+                    if sid and fine > 0:
+                        await conn.execute("""
+                            INSERT INTO salary_ledger (staff_id, period, type, amount, note, created_by, fine_reason)
+                            VALUES ($1,$2,'fine',$3,$4,$5,$6)""", sid, period, -fine,
+                            f"🔁 Возврат за плохую работу: {order_num}, {it['label'] if it else ''}".strip(", "),
+                            staff_id, "return_bad_work")
+                    await conn.execute("UPDATE order_return_items SET fine=$3 WHERE return_id=$1 AND item_id=$2",
+                                       return_id, ri["item_id"], fine)
+                    total += fine
+            await conn.execute("""
+                UPDATE order_returns SET decision=$2, decided_by_name=$3, decided_at=NOW(), fine_total=$4 WHERE id=$1""",
+                return_id, "bad_work" if bad_work else "not_bad", staff_name, round(total, 2))
+            order_id = ret["order_id"]
+    return next((x for x in await get_order_returns(order_id) if x["id"] == return_id), {"id": return_id})
+
+
 async def per_unit_earnings(conn, staff_logins: dict, date_from, date_to) -> dict:
     """ЗП «за единицу» (17.11.2026, владелец): {staff_id: [позиция]} за период по дате «Доставлен» (Ташкент).
     Мойщику — позиции, где он washer_login, заказ доставлен; м² — фактические м², шт — количество (sqm);
@@ -3315,22 +3493,27 @@ async def per_unit_earnings(conn, staff_logins: dict, date_from, date_to) -> dic
     if not staff_logins:
         return out
     login_to_id = {lg: sid for sid, lg in staff_logins.items() if lg}
+    # 17.11.2026: по ЗАСЧИТАННЫМ позициям (credited_* ставит триггер при «Доставлен», один раз) — повторная доставка
+    # после «🔁 Возврата» не платит дважды; перемывка своего брака (credited_excluded) — 0.
     item_rows = await conn.fetch("""
-        SELECT oi.washer_login, oi.service_key, oi.type_key,
+        SELECT oi.id AS item_id, oi.credited_login AS washer_login, oi.service_key, oi.type_key,
                COALESCE(oi.unit_key_snap, 'm2') AS unit,
                COALESCE(oi.actual_sqm, oi.sqm, 0) AS qty,
                COALESCE(oi.list_price, oi.price_per_sqm, 0) AS list_price,
                COALESCE(oi.service_ru, oi.service) AS label,
-               (COALESCE(o.delivered_at,
-                         (SELECT MAX(h.created_at) FROM order_status_history h
-                           WHERE h.order_num = o.order_num AND h.new_status = 'delivered'),
-                         o.updated_at)::timestamptz AT TIME ZONE 'Asia/Tashkent')::date AS day
-          FROM order_items oi JOIN orders o ON o.id = oi.order_id
-         WHERE oi.washer_login = ANY($3::text[]) AND o.status = 'delivered'
-           AND (COALESCE(o.delivered_at,
-                         (SELECT MAX(h.created_at) FROM order_status_history h
-                           WHERE h.order_num = o.order_num AND h.new_status = 'delivered'),
-                         o.updated_at)::timestamptz AT TIME ZONE 'Asia/Tashkent')::date BETWEEN $1 AND $2
+               COALESCE(oi.credited_excluded, FALSE) AS excluded,
+               (oi.credited_at AT TIME ZONE 'Asia/Tashkent')::date AS day
+          FROM order_items oi JOIN orders o ON o.id = oi.order_id AND o.status <> 'cancelled'   -- без удалённых/отменённых
+         WHERE oi.credited_login = ANY($3::text[]) AND oi.credited_at IS NOT NULL
+           AND (oi.credited_at AT TIME ZONE 'Asia/Tashkent')::date BETWEEN $1 AND $2
+        UNION ALL
+        SELECT oi.id, oi.rework_login, oi.service_key, oi.type_key, COALESCE(oi.unit_key_snap, 'm2'),
+               COALESCE(oi.actual_sqm, oi.sqm, 0), COALESCE(oi.list_price, oi.price_per_sqm, 0),
+               COALESCE(oi.service_ru, oi.service), FALSE,
+               (oi.rework_credited_at AT TIME ZONE 'Asia/Tashkent')::date
+          FROM order_items oi JOIN orders o ON o.id = oi.order_id AND o.status <> 'cancelled'
+         WHERE oi.rework_login = ANY($3::text[]) AND oi.rework_credited_at IS NOT NULL
+           AND (oi.rework_credited_at AT TIME ZONE 'Asia/Tashkent')::date BETWEEN $1 AND $2
     """, date_from, date_to, list(login_to_id))
     rates_map: dict = {}
     for r in await conn.fetch(
@@ -3364,7 +3547,10 @@ async def per_unit_earnings(conn, staff_logins: dict, date_from, date_to) -> dic
         rate = float(r['unit_rate'] or 0) if r else None
         base = qty * float(it['list_price'] or 0) if rtype == 'percent' else 0.0
         earn = (base * rate / 100 if rtype == 'percent' else qty * rate) if r else 0.0
-        out.setdefault(sid, []).append({'day': str(it['day']), 'label': it['label'] or it['service_key'] or '—',
+        label = it['label'] or it['service_key'] or '—'
+        if it['excluded']:   # перемывка своего брака после «🔁 Возврата» — бесплатно
+            earn, base, label = 0.0, 0.0, f"🔁 {label} — перемывка (возврат за плохую работу)"
+        out.setdefault(sid, []).append({'item_id': it['item_id'], 'day': str(it['day']), 'label': label,
                                         'unit': it['unit'], 'qty': qty, 'rate_type': rtype, 'rate': rate,
                                         'base': base, 'earn': earn})
     return out
@@ -5881,7 +6067,7 @@ async def recalc_manual_discount_pct(order_id: int) -> None:
     async with pool.acquire() as conn:
         o = await conn.fetchrow("SELECT status, manual_discount_pct, COALESCE(manual_discount,0) AS md "
                                 "FROM orders WHERE id=$1", order_id)
-    if not o or o["manual_discount_pct"] is None or o["status"] in ("delivered", "cancelled"):
+    if not o or o["manual_discount_pct"] is None or o["status"] in ("delivered", "cancelled", "returned"):
         return
     base = (await get_order_items_billing(order_id))["order_total"]
     amount = float(int(base * float(o["manual_discount_pct"]) / 100 + 0.5))  # half-up, до сума
@@ -5914,7 +6100,7 @@ async def recalc_client_discount(order_id: int) -> dict | None:
                      LIMIT 1) AS category
             FROM orders o WHERE o.id=$1
         """, order_id)
-    if not o or not o["client_discount_enabled"] or o["status"] in ("delivered", "cancelled"):
+    if not o or not o["client_discount_enabled"] or o["status"] in ("delivered", "cancelled", "returned"):
         return None
 
     has_old = (float(o["discount_sum"]) > 0 or float(o["delivery_discount"]) > 0

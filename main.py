@@ -1236,12 +1236,14 @@ RECEIPT_ACCESS_ROLES = {"admin", "manager", "logistics", "packer", "washer", "ca
 # Допустимые переходы статусов для мойщиков
 WASHER_STATUS_FLOW = {
     "received": "washing",
+    "returned": "washing",   # «🔁 Возврат в мастерскую» → перемывка (17.11.2026)
     "washing":  "drying",
     "drying":   "packing",
     "packing":  "ready",
 }
 ALL_ORDER_STATUSES = [
-    "new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled"
+    "new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered","cancelled",
+    "returned",   # 17.11.2026: «🔁 Возврат в мастерскую» — ставится только через POST /api/staff/orders/{id}/return
 ]
 
 # ── Этап замера (16.11.2026, владелец) ─────────────────────────────────────────
@@ -1251,7 +1253,8 @@ ALL_ORDER_STATUSES = [
 MEASURE_STAGES = ("received", "washing", "drying", "packing")
 _ORDER_STATUS_RU_SHORT = {"new": "Новый", "confirmed": "Подтверждён", "pickup": "Вывоз", "received": "В мастерской",
                           "washing": "Мойка", "drying": "Сушка", "packing": "Упаковка", "ready": "Готов",
-                          "delivery": "Доставка", "delivered": "Доставлен", "cancelled": "Отменён"}
+                          "delivery": "Доставка", "delivered": "Доставлен", "cancelled": "Отменён",
+                          "returned": "Возврат"}
 _ORDER_FLOW = ["new","confirmed","pickup","received","washing","drying","packing","ready","delivery","delivered"]
 MEASURED_OK_STATUSES = ("approved", "confirmed")
 
@@ -1265,6 +1268,8 @@ async def _measure_stage() -> str:
 
 
 def _flow_idx(status: str) -> int:
+    if status == "returned":   # «🔁 Возврат» — вещи снова в мастерской: для этапа замера как «В мастерской»
+        status = "received"
     return _ORDER_FLOW.index(status) if status in _ORDER_FLOW else -1
 
 
@@ -2028,7 +2033,7 @@ _ORDER_STATUS_RU = {
     "new": "Новый", "confirmed": "Подтверждён", "pickup": "Вывоз",
     "received": "В мастерской", "washing": "Мойка", "drying": "Сушка",
     "packing": "Упаковка", "ready": "Готов", "delivery": "Доставка",
-    "delivered": "Доставлен", "cancelled": "Отменён",
+    "delivered": "Доставлен", "cancelled": "Отменён", "returned": "🔁 Возврат",
 }
 
 async def _is_route_closed_for_order(order_id: int) -> bool:
@@ -3025,7 +3030,7 @@ async def bulk_delete_orders(body: dict, _=Depends(require_perm("orders"))):
 # Какие статусы видит сотрудник в зависимости от этапа
 _STAGE_STATUSES = {
     "pickup":  {"new", "confirmed", "pickup", "cancelled"},
-    "wash":    {"received", "washing", "cancelled"},
+    "wash":    {"received", "returned", "washing", "cancelled"},
     "dry":     {"washing", "drying", "cancelled"},
     "pack":    {"drying", "packing", "ready", "cancelled"},
     "deliver": {"ready", "delivery", "delivered", "cancelled"},
@@ -6283,7 +6288,99 @@ async def admin_get_order(order_id: int, staff=Depends(get_current_staff)):
         order = dict(order)
         order["client_phone"] = ""
         order["client_phone2"] = ""
+    order = dict(order)
+    order["return_pending"] = await db.return_pending(order_id)   # «🔁 Возврат» без решения менеджера
     return {"ok": True, "order": order}
+
+
+# ══════════════════════════════════════
+#  «🔁 Возврат в мастерскую» + штраф за плохую работу (17.11.2026, владелец)
+# ══════════════════════════════════════
+@app.post("/api/staff/orders/{order_id}/return")
+async def order_return(order_id: int, body: dict = Body({}), staff=Depends(get_current_staff)):
+    """Клиент не принял (у двери — водитель) или пожаловался позже (менеджер/админ): выбранные вещи назад в мастерскую.
+    Заказ → «🔁 Возврат». Решение «плохая работа» и штраф — отдельно, только менеджер/админ (/api/staff/returns/{id}/decide)."""
+    role = staff.get("role", "")
+    is_mgr = staff.get("sub") == "admin" or role in ("admin", "manager")
+    order = await db.get_order_by_id(order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    st = order.get("status")
+    if is_mgr:
+        if st not in ("delivery", "delivered"):
+            raise HTTPException(status_code=400, detail="Возврат — только для заказа в доставке или доставленного")
+    elif _can_drive(staff):
+        if st != "delivery":
+            raise HTTPException(status_code=400, detail="Водитель оформляет возврат только при доставке")
+        mine = await db.pool.fetchval(
+            "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
+            "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1", order_id, staff.get("id"))
+        if not mine:
+            raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
+    else:
+        raise HTTPException(status_code=403, detail="Возврат оформляет водитель или менеджер")
+    reason = str(body.get("reason") or "bad_wash")
+    if reason not in ("bad_wash", "other"):
+        raise HTTPException(status_code=400, detail="Причина — «плохая мойка» или «другое»")
+    try:
+        item_ids = sorted({int(x) for x in (body.get("item_ids") or [])})
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Неверные позиции")
+    if not item_ids:
+        raise HTTPException(status_code=400, detail="Выберите вещи, которые вернулись")
+    name = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
+    try:
+        ret = await db.create_order_return(order_id, item_ids, reason, str(body.get("note") or "")[:500],
+                                           staff.get("id"), name, st)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    await db.add_order_activity(order_id, staff.get("id"), name, "order_returned",
+                                f"🔁 Возврат в мастерскую ({'плохая мойка' if reason == 'bad_wash' else 'другое'}), позиций: {len(item_ids)}"
+                                + (f" — {body.get('note')}" if body.get('note') else ""))
+    num = order.get("order_num") or f"#{order_id}"
+    title, text = f"🔁 Возврат: {num}", f"{name}: {'плохая мойка' if reason == 'bad_wash' else 'другое'}, позиций {len(item_ids)} — решите в заказе"
+    try:
+        asyncio.create_task(_app_push_roles(["manager", "admin"], title, text,
+                                            {"kind": "return", "order_id": order_id, "return_id": ret["id"]}))
+        async with db.pool.acquire() as _c:
+            mgrs = await _c.fetch("SELECT id FROM staff WHERE role IN ('manager','admin') AND active IS NOT FALSE")
+        for m_ in mgrs:
+            if m_["id"] != staff.get("id"):
+                asyncio.create_task(send_web_push(m_["id"], title, text, push_type="order_return", order_id=order_id))
+    except Exception as e:
+        logging.warning(f"order_return notify {order_id}: {e}")
+    try:
+        asyncio.create_task(_update_api_channel_stop(order_id))
+    except Exception:
+        pass
+    return {"ok": True, "return": ret}
+
+
+@app.get("/api/staff/orders/{order_id}/returns")
+async def order_returns_list(order_id: int, staff=Depends(get_current_staff)):
+    if not await db.get_order_by_id(order_id):
+        raise HTTPException(status_code=404, detail="Заказ не найден")
+    return {"ok": True, "returns": await db.get_order_returns(order_id)}
+
+
+@app.post("/api/staff/returns/{return_id}/decide")
+async def order_return_decide(return_id: int, body: dict = Body({}), staff=Depends(get_current_staff)):
+    """«Плохая работа?» — решает только менеджер/админ. Да (и причина «плохая мойка») → мойщику позиции штраф:
+    не получает за позицию (если уже засчитана — минус в этом месяце, перемывка им же — бесплатно) + фикс. сумма из
+    настроек (return_fine_amount, по умолчанию 0) за каждую позицию."""
+    if not (staff.get("sub") == "admin" or staff.get("role") in ("admin", "manager")):
+        raise HTTPException(status_code=403, detail="Решает менеджер или админ")
+    name = " ".join(filter(None, [staff.get("first_name"), staff.get("last_name")])) or staff.get("login", "")
+    try:
+        r = await db.decide_order_return(return_id, bool(body.get("bad_work")), name, staff.get("id"))
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Возврат не найден")
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    await db.add_order_activity(r["order_id"], staff.get("id"), name, "return_decided",
+                                ("⛔ Плохая работа — штраф мойщику" + (f" {int(r['fine_total']):,} сум".replace(",", " ") if r["fine_total"] else ""))
+                                if r["decision"] == "bad_work" else "✅ Возврат не из-за плохой работы — без штрафа")
+    return {"ok": True, "return": r}
 
 _ORDER_EDITABLE_STATUSES = {"new","confirmed","pickup","received","washing","drying","packing","ready"}
 
@@ -6555,6 +6652,8 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                 raise HTTPException(status_code=403, detail="Можно передать в мастерскую только заказ со статусом «Вывоз»")
         else:
             raise HTTPException(status_code=403, detail="Нет прав для смены статуса")
+    if status == "returned":   # 17.11.2026: только через «↩️ Возврат в мастерскую» (POST …/return) — с выбором вещей и причины
+        raise HTTPException(status_code=400, detail="Возврат в мастерскую оформляется кнопкой «↩️ Возврат в мастерскую»")
     if status not in ALL_ORDER_STATUSES:
         raise HTTPException(status_code=400, detail="Неизвестный статус")
 
@@ -6617,19 +6716,19 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
                     STATUS_EMOJI = {
                         "new":"🆕","confirmed":"✅","pickup":"🚗","received":"📦",
                         "washing":"🧼","drying":"💨","packing":"📦","ready":"✅",
-                        "delivery":"🚚","delivered":"✅","cancelled":"❌",
+                        "delivery":"🚚","delivered":"✅","cancelled":"❌","returned":"🔁",
                     }
                     STATUS_NAME_RU = {
                         "new":"Новый","confirmed":"Подтверждён","pickup":"Вывоз",
                         "received":"В мастерской","washing":"Мойка","drying":"Сушка",
                         "packing":"Упаковка","ready":"Готов","delivery":"Доставка",
-                        "delivered":"Доставлен","cancelled":"Отменён",
+                        "delivered":"Доставлен","cancelled":"Отменён","returned":"Повторная обработка",
                     }
                     STATUS_NAME_UZ = {
                         "new":"Yangi","confirmed":"Tasdiqlandi","pickup":"Olib ketish",
                         "received":"Ustaxonada","washing":"Yuvilmoqda","drying":"Quritilmoqda",
                         "packing":"Qadoqlanmoqda","ready":"Tayyor","delivery":"Yetkazilmoqda",
-                        "delivered":"Yetkazildi","cancelled":"Bekor qilindi",
+                        "delivered":"Yetkazildi","cancelled":"Bekor qilindi","returned":"Qayta ishlov",
                     }
                     text = raw.format(
                         order_num  = order.get("order_num", ""),
@@ -6706,7 +6805,7 @@ async def admin_change_order_status(order_id: int, staff=Depends(get_current_sta
             "new":"Новый","confirmed":"Подтверждён","pickup":"Вывоз",
             "received":"В мастерской","washing":"Мойка","drying":"Сушка",
             "packing":"Упаковка","ready":"Готов","delivery":"Доставка",
-            "delivered":"Доставлен","cancelled":"Отменён",
+            "delivered":"Доставлен","cancelled":"Отменён","returned":"🔁 Возврат",
         }
         actor_name = " ".join(p for p in [staff.get("first_name"), staff.get("last_name")] if p).strip() or staff.get("login", "")
         await _chat.broadcast_staff({
@@ -10890,7 +10989,7 @@ async def washer_work(staff=Depends(get_current_staff)):
     действия — существующие эндпоинты (…/items/{id}/washer, …/measure, …/media, …/status)."""
     if staff.get("role") != "washer":
         raise HTTPException(status_code=403, detail="Только для мойщика")
-    work = ["received", "washing", "drying", "packing"]
+    work = ["received", "returned", "washing", "drying", "packing"]
     stages = [s.strip() for s in (staff.get("order_stages") or "").split(",") if s.strip()]
     if stages:
         visible = set()
