@@ -5558,6 +5558,38 @@ async def admin_create_lead(req: LeadCreateRequest, _=Depends(_get_admin)):
 # АГЕНТЫ — регистрация и сброс пароля
 # ══════════════════════════════════════════════════════════════════════════════
 
+@app.get("/api/agent/me")
+async def agent_me(staff=Depends(get_current_staff)):
+    """Агент в приложении (17.11.2026): его заявки (сводка) и начисления — только просмотр, только свои."""
+    if staff.get("role") != "agent":
+        raise HTTPException(status_code=403, detail="Только для агента")
+    sid = staff["id"]
+    async with db.pool.acquire() as conn:
+        st = await conn.fetchrow("""
+            SELECT COUNT(*)::int AS total,
+                   COUNT(*) FILTER (WHERE status='new')::int AS new,
+                   COUNT(*) FILTER (WHERE status='converted')::int AS converted,
+                   COUNT(*) FILTER (WHERE status='lost')::int AS lost
+              FROM leads WHERE created_by=$1 OR volunteer_id=$1""", sid)
+        sums = await conn.fetchrow("""
+            SELECT COALESCE(SUM(amount) FILTER (WHERE status='paid'), 0) AS paid,
+                   COALESCE(SUM(amount) FILTER (WHERE status IS DISTINCT FROM 'paid'), 0) AS pending,
+                   COALESCE(SUM(amount) FILTER (WHERE created_at >= date_trunc('month', NOW() AT TIME ZONE 'Asia/Tashkent')
+                                                   AT TIME ZONE 'Asia/Tashkent'), 0) AS month
+              FROM staff_commissions WHERE staff_id=$1""", sid)
+        rows = await conn.fetch("""
+            SELECT order_num, amount, status, created_at, paid_at
+              FROM staff_commissions WHERE staff_id=$1 ORDER BY created_at DESC LIMIT 30""", sid)
+    total = int(st["total"] or 0)
+    return {"ok": True,
+            "leads": {"total": total, "new": st["new"], "converted": st["converted"], "lost": st["lost"],
+                      "pct": round(st["converted"] * 100 / total) if total else 0},
+            "earn": {"paid": float(sums["paid"]), "pending": float(sums["pending"]), "month": float(sums["month"])},
+            "commissions": [{"order_num": r["order_num"], "amount": float(r["amount"]), "status": r["status"],
+                             "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+                             "paid_at": r["paid_at"].isoformat() if r["paid_at"] else None} for r in rows]}
+
+
 @app.get("/api/agent/status")
 async def agent_status(user=Depends(get_current_user)):
     """Возвращает статус агента для текущего пользователя сайта."""
