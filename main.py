@@ -10637,10 +10637,11 @@ async def _own_stop_guard(order_id: int, staff: dict):
     доставленным или закрыть его в долг. Админ/менеджер — без ограничения."""
     if staff.get("sub") == "admin" or staff.get("role") in ("admin", "manager"):
         return
-    mine = await db.pool.fetchval(
-        "SELECT 1 FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
-        "WHERE ro.order_id=$1 AND r.driver_id=$2 AND r.date >= CURRENT_DATE - 3 LIMIT 1", order_id, staff.get("id"))
-    if not mine:
+    # последний маршрут заказа (если заказ перевели другому водителю — прежний уже не действует)
+    drv = await db.pool.fetchval(
+        "SELECT r.driver_id FROM route_orders ro JOIN routes r ON r.id = ro.route_id "
+        "WHERE ro.order_id=$1 AND r.date >= CURRENT_DATE - 3 ORDER BY r.date DESC, r.id DESC LIMIT 1", order_id)
+    if drv is None or drv != staff.get("id"):
         raise HTTPException(status_code=403, detail="Заказ не в вашем маршруте")
 
 
@@ -12495,7 +12496,8 @@ async def _chat_timeout_worker():
         await asyncio.sleep(60)
 
 def _gen_chat_code() -> str:
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+    # код чата — доступ клиента к переписке и вложениям: криптостойкий (17.11.2026, было random.choices)
+    return ''.join(secrets.choice(string.ascii_uppercase + string.digits) for _ in range(8))
 
 
 def _chat_clean_site_name(name: str) -> str:
@@ -12525,10 +12527,14 @@ def _chat_staff_name(s: dict) -> str:
     return f"📱 {name} · из приложения" if s.get('source') == 'app' else name
 
 
-def _msg_json(msg: dict) -> dict:
+def _msg_json(msg: dict, code: str | None = None) -> dict:
     m = dict(msg)
     if hasattr(m.get('created_at'), 'isoformat'):
         m['created_at'] = m['created_at'].isoformat()
+    # вложение: file_id Telegram наружу не отдаём — только ссылку на нашу отдачу файла (17.11.2026)
+    fid = m.pop('media_file_id', None)
+    if fid and m.get('media_kind') and code:
+        m['media_url'] = f"/api/chat/{code}/media/{m['id']}"
     return m
 
 
@@ -12666,11 +12672,125 @@ async def chat_staff_send(code: str, text: str = Body(..., embed=True), staff=De
     msg = await db.add_chat_message(session["id"], "staff", sname, text)
     if not msg:
         raise HTTPException(status_code=500, detail="Не удалось сохранить сообщение")
-    await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg)})
-    await _chat.broadcast_staff({"type": "message", "code": code, "msg": _msg_json(msg)}, exclude=staff["id"])
+    await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg, code)})
+    await _chat.broadcast_staff({"type": "message", "code": code, "msg": _msg_json(msg, code)}, exclude=staff["id"])
     if session.get("source") == "app":
         asyncio.create_task(_app_push_chat(session, sname, text))
-    return {"ok": True, "msg": _msg_json(msg)}
+    return {"ok": True, "msg": _msg_json(msg, code)}
+
+
+# ── Фото/видео в чате (17.11.2026, владелец: «нет отправки файлов — фото и видео») ─────────────────
+# Отправить: клиент — по коду своего чата (как WebSocket сайта/приложения); сотрудник — по staff-токену,
+# только CHAT_ROLES и только во взятый им чат (админ — в любой). Тип image/* | video/*, фото ≤ 10 МБ,
+# видео ≤ 50 МБ (предел Telegram для бота), не больше 20 файлов за 10 минут на чат. Хранение — медиа-канал
+# Telegram (file_id), наружу — только /api/chat/{code}/media/{id}: отдаёт сервер, без токена бота, с Range.
+CHAT_MEDIA_PHOTO_MAX = 10 * 1024 * 1024
+CHAT_MEDIA_VIDEO_MAX = 50 * 1024 * 1024
+CHAT_MEDIA_PER_10MIN = 20
+
+
+async def _chat_media_sender(code: str, authorization: str | None):
+    """(session, sender_type, sender_name, staff|None). Токен сотрудника — только CHAT_ROLES и взятый чат."""
+    session = await db.get_chat_session(code)
+    if not session:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+    if session["status"] == "closed":
+        raise HTTPException(status_code=409, detail="Чат закрыт")
+    if authorization and authorization.startswith("Bearer "):
+        try:
+            payload = jwt.decode(authorization[7:], JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        except Exception:
+            payload = {}
+        if payload.get("type") == "staff":
+            staff = await _staff_from_payload(payload)
+            if not staff or staff.get("role") not in CHAT_ROLES:
+                raise HTTPException(status_code=403, detail="Чат — для менеджера и колл-центра")
+            if session.get("claimed_by") != staff["id"] and staff.get("role") != "admin":
+                raise HTTPException(status_code=403, detail="Сначала возьмите чат")
+            sname = f"{staff.get('first_name','') or ''} {staff.get('last_name','') or ''}".strip() or "Менеджер"
+            return session, "staff", sname, staff
+    cname = session.get('client_name') or session.get('client_phone') or "Клиент"
+    return session, "client", cname, None
+
+
+@app.post("/api/chat/{code}/media")
+async def chat_send_media(code: str, file: UploadFile = File(...), caption: str = Form(""),
+                          authorization: str = Header(None)):
+    session, who, sname, staff = await _chat_media_sender(code, authorization)
+    ctype = (file.content_type or "").lower()
+    if ctype.startswith("image/"):
+        kind, limit = "photo", CHAT_MEDIA_PHOTO_MAX
+    elif ctype.startswith("video/"):
+        kind, limit = "video", CHAT_MEDIA_VIDEO_MAX
+    else:
+        raise HTTPException(status_code=400, detail="Можно отправить только фото или видео")
+    if await db.count_recent_chat_media(session["id"], 10) >= CHAT_MEDIA_PER_10MIN:
+        raise HTTPException(status_code=429, detail="Слишком много файлов — подождите несколько минут")
+    data = await file.read(limit + 1)
+    if not data:
+        raise HTTPException(status_code=400, detail="Пустой файл")
+    if len(data) > limit:
+        raise HTTPException(status_code=413, detail="Фото — до 10 МБ, видео — до 50 МБ")
+    caption = (caption or "").strip()[:CHAT_TEXT_MAX]
+    media_ch = await _get_media_channel()
+    if not BOT_TOKEN or not media_ch:
+        raise HTTPException(status_code=503, detail="Хранилище файлов не настроено")
+    # HEIC/HEIF и прочее, что Telegram не принимает как фото, — документом (file_id тот же путь отдачи)
+    as_doc = kind == "photo" and ctype not in ("image/jpeg", "image/jpg", "image/png", "image/webp")
+    method, field = ("sendDocument", "document") if as_doc else (("sendPhoto", "photo") if kind == "photo" else ("sendVideo", "video"))
+    form = aiohttp.FormData()
+    form.add_field("chat_id", str(media_ch))
+    form.add_field(field, data, filename=file.filename or ("chat.jpg" if kind == "photo" else "chat.mp4"), content_type=ctype)
+    form.add_field("caption", f"💬 Чат {code} · {'сотрудник' if who == 'staff' else 'клиент'}")
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"https://api.telegram.org/bot{BOT_TOKEN}/{method}", data=form,
+                              timeout=aiohttp.ClientTimeout(total=120)) as r:
+                res = await r.json()
+    except Exception:
+        raise HTTPException(status_code=502, detail="Не удалось сохранить файл — попробуйте ещё раз")
+    if not res.get("ok"):
+        raise HTTPException(status_code=502, detail="Не удалось сохранить файл — попробуйте ещё раз")
+    msg_tg = res["result"]
+    try:
+        file_id = msg_tg["photo"][-1]["file_id"] if field == "photo" else msg_tg[field]["file_id"]
+    except (KeyError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail="Не удалось сохранить файл")
+    msg = await db.add_chat_media_message(session["id"], who, sname, caption, kind, file_id)
+    if not msg:
+        raise HTTPException(status_code=500, detail="Не удалось сохранить сообщение")
+    label = "📷 Фото" if kind == "photo" else "🎬 Видео"
+    preview = f"{label}{(' — ' + caption) if caption else ''}"
+    payload = {"type": "message", "code": code, "msg": _msg_json(msg, code)}
+    if who == "staff":
+        await _chat.send_client(code, {"type": "message", "msg": _msg_json(msg, code)})
+        await _chat.broadcast_staff(payload, exclude=staff["id"])
+        if session.get("source") == "app":
+            asyncio.create_task(_app_push_chat(session, sname, preview))
+    else:
+        asyncio.create_task(db.touch_chat_client_activity(code))
+        await _chat.send_client(code, payload)
+        claimed = session.get('claimed_by')
+        if claimed:
+            await _chat.send_staff(claimed, payload)
+        else:
+            await _chat.broadcast_staff(payload)
+        asyncio.create_task(_app_push_roles(
+            list(CHAT_ROLES), f"💬 {_chat_staff_name(session)}", preview[:160],
+            {"kind": "chat_staff", "code": code}, only_id=claimed or None))
+    return {"ok": True, "msg": _msg_json(msg, code)}
+
+
+@app.get("/api/chat/{code}/media/{msg_id}")
+async def chat_get_media(code: str, msg_id: int, request: Request):
+    """Файл из чата — по коду чата (у клиента он есть, сотрудники видят код в чате), только вложение этого чата."""
+    session = await db.get_chat_session(code)
+    if not session:
+        raise HTTPException(status_code=404)
+    row = await db.get_chat_media(session["id"], msg_id)
+    if not row:
+        raise HTTPException(status_code=404)
+    return await _tg_file_response(row["media_file_id"], request)
 
 
 @app.get("/api/chat/sessions")
@@ -12681,7 +12801,8 @@ async def chat_sessions(staff=Depends(_chat_staff)):
         msgs = await db.get_chat_messages(s['id'])
         s2 = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in s.items()}
         s2['message_count'] = len(msgs)
-        s2['last_text'] = msgs[-1]['text'] if msgs else ''
+        last = msgs[-1] if msgs else None
+        s2['last_text'] = (last['text'] or ('📷 Фото' if last.get('media_kind') == 'photo' else '🎬 Видео' if last.get('media_kind') else '')) if last else ''
         s2['client_name'] = _chat_staff_name(s)
         result.append(s2)
     return result
@@ -12695,7 +12816,7 @@ async def chat_get_messages(code: str, staff=Depends(_chat_staff)):
     msgs = await db.get_chat_messages(session['id'])
     s = {k: (v.isoformat() if hasattr(v, 'isoformat') else v) for k, v in session.items()}
     s['client_name'] = _chat_staff_name(session)
-    return {"session": s, "messages": [_msg_json(m) for m in msgs]}
+    return {"session": s, "messages": [_msg_json(m, code) for m in msgs]}
 
 
 @app.post("/api/chat/{code}/claim")
@@ -12834,7 +12955,7 @@ async def ws_chat_client(websocket: WebSocket, code: str):
 
     await _chat.connect_client(code, websocket)  # accept() внутри
     msgs = await db.get_chat_messages(session['id'])
-    await websocket.send_json({"type": "history", "messages": [_msg_json(m) for m in msgs]})
+    await websocket.send_json({"type": "history", "messages": [_msg_json(m, code) for m in msgs]})
 
     try:
         while True:

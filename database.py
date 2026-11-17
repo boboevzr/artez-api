@@ -7846,6 +7846,9 @@ async def ensure_chat_tables():
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS lang VARCHAR(5) DEFAULT 'uz';
         -- откуда клиент пишет: 'site' (виджет сайта) | 'app' (приложение) — 16.11.2026
         ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS source VARCHAR(10) DEFAULT 'site';
+        -- вложение сообщения (17.11.2026): 'photo' | 'video' + file_id в медиа-канале Telegram (наружу не отдаём)
+        ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_kind VARCHAR(10);
+        ALTER TABLE chat_messages ADD COLUMN IF NOT EXISTS media_file_id TEXT;
         """)
 
 async def create_chat_session(code: str, client_phone: str = '', client_name: str = '', branch: str = '', lang: str = 'uz',
@@ -7944,6 +7947,32 @@ async def add_chat_message(session_id: int, sender_type: str, sender_name: str, 
             "INSERT INTO chat_messages (session_id, sender_type, sender_name, text) VALUES ($1,$2,$3,$4) RETURNING *",
             session_id, sender_type, sender_name, text
         )
+        return dict(row) if row else None
+
+async def add_chat_media_message(session_id: int, sender_type: str, sender_name: str, text: str,
+                                 media_kind: str, media_file_id: str) -> dict:
+    """Сообщение с фото/видео (17.11.2026). text — подпись (может быть пустой)."""
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "INSERT INTO chat_messages (session_id, sender_type, sender_name, text, media_kind, media_file_id) "
+            "VALUES ($1,$2,$3,$4,$5,$6) RETURNING *",
+            session_id, sender_type, sender_name, text or '', media_kind, media_file_id)
+        return dict(row) if row else None
+
+async def count_recent_chat_media(session_id: int, minutes: int = 10) -> int:
+    if not pool: return 0
+    async with pool.acquire() as conn:
+        return await conn.fetchval(
+            "SELECT COUNT(*) FROM chat_messages WHERE session_id=$1 AND media_kind IS NOT NULL "
+            "AND created_at > NOW() - make_interval(mins => $2)", session_id, minutes) or 0
+
+async def get_chat_media(session_id: int, msg_id: int) -> dict | None:
+    if not pool: return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, media_kind, media_file_id FROM chat_messages WHERE id=$1 AND session_id=$2 AND media_file_id IS NOT NULL",
+            msg_id, session_id)
         return dict(row) if row else None
 
 async def get_chat_messages(session_id: int) -> list:
