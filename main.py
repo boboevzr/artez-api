@@ -6522,7 +6522,7 @@ async def update_order_data(order_id: int, body: dict = Body(...), staff=Depends
         raise HTTPException(status_code=400, detail="Нельзя редактировать заказ в этом статусе")
     allowed = {"client_first_name","client_last_name","client_phone","client_phone2",
                "branch","address","short_address","delivery_address","delivery_short_address",
-               "location","location_address",
+               "location","location_address","delivery_location","delivery_location_address",   # точка доставки — приложение 18.11
                "region_id","house_number","apartment_number",
                "note","deadline","service_type",
                "pickup_type","self_pickup_discount","discount_sum","manual_discount","manual_discount_pct",
