@@ -10248,3 +10248,69 @@ async def archive_old_orders(days: int = 60) -> dict:
                 pass
 
         return {"ok": True, "archived": archived, "total_checked": len(rows)}
+
+
+# ══════════════════════════════════════
+#  «Сегодня» для админа в приложении (18.11.2026) — только чтение
+# ══════════════════════════════════════
+
+async def get_today_summary() -> dict:
+    """Сводка дня по Ташкенту: заказы (новые / в работе по этапам / готовы / в доставке / доставлены сегодня),
+    выручка сегодня по способам (кроме отклонённых оплат), расходы сегодня, долги и «к оплате» (как дашборд кассы),
+    кто на работе (отметки прихода сегодня)."""
+    if not pool: return {}
+    day = "(now() AT TIME ZONE 'Asia/Tashkent')::date"
+    async with pool.acquire() as conn:
+        o = await conn.fetchrow(f"""
+            SELECT
+              COUNT(*) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = {day} AND status <> 'cancelled') AS new_today,
+              COUNT(*) FILTER (WHERE status IN ('new','confirmed'))                         AS waiting,
+              COUNT(*) FILTER (WHERE status = 'pickup')                                     AS pickup,
+              COUNT(*) FILTER (WHERE status IN ('received','washing','drying','packing','returned')) AS workshop,
+              COUNT(*) FILTER (WHERE status = 'ready')                                      AS ready,
+              COUNT(*) FILTER (WHERE status = 'delivery')                                   AS delivery,
+              COUNT(*) FILTER (WHERE status = 'delivered'
+                               AND (COALESCE(delivered_at, updated_at) AT TIME ZONE 'Asia/Tashkent')::date = {day}) AS delivered_today
+            FROM orders
+        """)
+        pays = await conn.fetch(f"""
+            SELECT COALESCE(method,'cash') AS method, COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt
+            FROM order_payments
+            WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = {day}
+              AND NOT (confirmed = FALSE AND confirmed_at IS NOT NULL)
+            GROUP BY 1 ORDER BY 2 DESC
+        """)
+        exp = await conn.fetchrow(f"""
+            SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS cnt FROM expenses
+            WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = {day} AND status <> 'rejected'
+        """)
+        att = await conn.fetch(f"""
+            WITH ev AS (
+              SELECT staff_id, event_type, created_at,
+                     ROW_NUMBER() OVER (PARTITION BY staff_id ORDER BY created_at DESC, id DESC) AS rn,
+                     MIN(created_at) FILTER (WHERE event_type = 'in') OVER (PARTITION BY staff_id) AS first_in
+              FROM staff_attendance_events
+              WHERE (created_at AT TIME ZONE 'Asia/Tashkent')::date = {day}
+            )
+            SELECT s.id, s.first_name, s.last_name, s.role,
+                   to_char(ev.first_in AT TIME ZONE 'Asia/Tashkent', 'HH24:MI') AS came,
+                   (ev.event_type = 'in') AS here
+            FROM ev JOIN staff s ON s.id = ev.staff_id
+            WHERE ev.rn = 1 AND ev.first_in IS NOT NULL
+            ORDER BY (ev.event_type = 'in') DESC, ev.first_in
+        """)
+    cash = await get_cash_dashboard()
+    revenue = [{"method": r["method"], "total": float(r["total"]), "count": int(r["cnt"])} for r in pays]
+    return {
+        "orders": {k: int(o[k] or 0) for k in ("new_today", "waiting", "pickup", "workshop", "ready", "delivery", "delivered_today")},
+        "revenue_total": sum(r["total"] for r in revenue),
+        "revenue": revenue,
+        "expenses_total": float(exp["total"]),
+        "expenses_count": int(exp["cnt"]),
+        "debt_total": cash.get("debt_total", 0.0),
+        "debt_count": cash.get("debt_count", 0),
+        "debt_overdue_count": cash.get("debt_overdue_count", 0),
+        "pending_client_cash": cash.get("pending_client_cash", 0.0),
+        "staff_on_hand": cash.get("staff_on_hand", 0.0) + cash.get("manager_on_hand", 0.0),
+        "attendance": [dict(r) for r in att],
+    }

@@ -7772,7 +7772,7 @@ async def get_cashiers(_=Depends(get_current_staff)):
 
 
 @app.get("/api/admin/cash/balance")
-async def get_cash_balance(_=Depends(_get_admin)):
+async def get_cash_balance(_=Depends(_get_admin_any)):   # 18.11.2026: и админ из приложения (только чтение)
     rows = await db.get_cash_balance()
     return {"ok": True, "balances": rows}
 
@@ -9430,8 +9430,12 @@ async def cash_debug(staff=Depends(get_current_staff)):
 async def get_my_cash_payments(date_from: str = None, date_to: str = None, staff=Depends(get_current_staff)):
     """Наличные платежи где текущий сотрудник создал платёж или указан получателем."""
     if not db.pool: return {"ok": True, "payments": []}
-    my_id = staff["id"]
-    params = [my_id]
+    return {"ok": True, "payments": await _cash_payments_of(staff["id"], date_from, date_to)}
+
+
+async def _cash_payments_of(staff_id: int, date_from: str = None, date_to: str = None) -> list:
+    """Наличные платежи сотрудника (создал или указан получателем) — «Моя касса» и «Касса компании»."""
+    params = [staff_id]
     clause = db._date_bounds_clause('p.created_at', date_from, date_to, params)
     async with db.pool.acquire() as conn:
         rows = await conn.fetch(f"""
@@ -9446,7 +9450,25 @@ async def get_my_cash_payments(date_from: str = None, date_to: str = None, staff
               AND (p.created_by_staff_id=$1 OR p.handed_to_staff_id=$1){clause}
             ORDER BY p.created_at DESC LIMIT 100
         """, *params)
-        return {"ok": True, "payments": [dict(r) for r in rows]}
+        return [dict(r) for r in rows]
+
+
+@app.get("/api/staff/admin/cash/staff/{staff_id}")
+async def admin_cash_of_staff(staff_id: int, date_from: str = None, date_to: str = None, me=Depends(_get_admin_any)):
+    """«Касса компании» → сотрудник (приложение, только admin, 18.11.2026): на руках, принятые наличные,
+    передачи (сдал / ему сдали) за период. Только чтение."""
+    st = await db.get_staff_by_id(staff_id)
+    if not st:
+        raise HTTPException(status_code=404, detail="Сотрудник не найден")
+    def ser(rows):
+        return [{k: (v.isoformat() if hasattr(v, "isoformat") else v) for k, v in dict(r).items()} for r in rows]
+    return {"ok": True,
+            "staff": {"id": st["id"], "first_name": st.get("first_name"), "last_name": st.get("last_name"), "role": st.get("role")},
+            "balance": await db.get_my_cash_balance(staff_id),                       # на руках — за всё время
+            "period": await db.get_my_cash_balance(staff_id, date_from, date_to),    # принял/сдал за период
+            "payments": ser(await _cash_payments_of(staff_id, date_from, date_to)),
+            "sent": ser(await db.get_my_sent_handovers(staff_id, date_from, date_to)),
+            "received": ser(await db.get_my_received_handovers(staff_id, date_from, date_to))}
 
 
 @app.get("/api/admin/cash/my-handovers")
@@ -9560,6 +9582,14 @@ async def delete_shift(shift_id: int, me=Depends(get_current_staff)):
 async def current_shift(_=Depends(get_current_staff)):
     row = await db.get_current_shift()
     return {"ok": True, "shift": row if row else None}
+
+@app.get("/api/staff/today")
+async def staff_today_summary(staff=Depends(get_current_staff)):
+    """«Сегодня» для админа в приложении (18.11.2026): заказы, выручка, расходы, долги, кто на работе. Только чтение.
+    Раздел «Управление» в приложении — staff с ролью admin (решение владельца), второй вход не нужен."""
+    if staff.get("sub") != "admin" and staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для администратора")
+    return {"ok": True, **(await db.get_today_summary())}
 
 @app.get("/api/admin/cash/dashboard")
 async def cash_dashboard(_=Depends(get_current_staff)):
@@ -10399,7 +10429,7 @@ async def salary_ledger_add(body: dict = Body(...), me=Depends(get_current_staff
     return {"ok": True, "entry": row}
 
 @app.get("/api/admin/salary/daily")
-async def salary_daily_breakdown(staff_id: int, year: int, month: int, _=Depends(_get_admin)):
+async def salary_daily_breakdown(staff_id: int, year: int, month: int, _=Depends(_get_admin_any)):   # чтение — и из приложения
     data = await db.get_salary_daily_breakdown(staff_id, year, month)
     return {"ok": True, **data}
 
