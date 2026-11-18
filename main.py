@@ -3222,6 +3222,46 @@ async def _get_admin(authorization: str = Header(None)):
         raise HTTPException(status_code=401, detail="Недействительный токен")
     return True
 
+
+# ── «Управление» в приложении (18.11.2026, владелец): админ входит своим staff-входом (role=admin), второго входа
+# нет. _get_admin_any — мастер-токен (sub=admin) ИЛИ действующий сотрудник с role=admin (сессия не завершена).
+# Опасные действия (права, пароль, отключение сотрудника…) дополнительно требуют пароль администратора —
+# заголовок X-Admin-Password, проверка _need_admin_password(me). Мастер-токену пароль не нужен (он и есть пароль).
+_ADMIN_PW_FAILS: dict = {}   # staff_id → [время неудачных попыток] — от подбора пароля
+
+async def _get_admin_any(authorization: str = Header(None), x_admin_password: str = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Не авторизован")
+    try:
+        payload = jwt.decode(authorization.removeprefix("Bearer ").strip(), JWT_SECRET, algorithms=[JWT_ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Недействительный токен")
+    if payload.get("sub") == "admin":
+        return {"id": None, "sub": "admin", "role": "admin", "login": "admin", "first_name": "Админ", "_master": True}
+    staff = await _staff_from_payload(payload)
+    if not staff or staff.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Только для администратора")
+    staff["_admin_pw"] = x_admin_password or ""
+    return staff
+
+
+async def _need_admin_password(me: dict):
+    """Опасное действие: мастер-токен — сразу; сотрудник-админ — пароль администратора в X-Admin-Password.
+    5 неверных за 10 минут — пауза (429), чтобы с украденного телефона не подобрать пароль."""
+    if me.get("_master"):
+        return
+    import time as _t
+    now, sid = _t.time(), me.get("id")
+    fails = [x for x in _ADMIN_PW_FAILS.get(sid, []) if now - x < 600]
+    if len(fails) >= 5:
+        raise HTTPException(status_code=429, detail="Слишком много неверных паролей — подождите 10 минут")
+    apass = await get_admin_pass()
+    if not apass or not me.get("_admin_pw") or not secrets.compare_digest(str(me["_admin_pw"]), str(apass)):
+        fails.append(now)
+        _ADMIN_PW_FAILS[sid] = fails
+        raise HTTPException(status_code=403, detail="Нужен пароль администратора")
+    _ADMIN_PW_FAILS.pop(sid, None)
+
 async def _get_admin_or_staff_clients(authorization: str = Header(None)):
     """Принимает admin JWT или staff JWT с пермиссией clients."""
     if not authorization or not authorization.startswith("Bearer "):
