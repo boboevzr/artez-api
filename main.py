@@ -3276,7 +3276,9 @@ async def clients_map_points_ep(date_from: str = None, date_to: str = None,
 async def client_by_phone(phone: str, _=Depends(_get_admin_or_staff_clients)):
     phone = normalize_phone(phone)
     row = await db.get_crm_client_by_phone(phone)
-    return {"ok": True, "client": row}
+    # 18.11.2026: для окна «Клиент есть в базе» в приложении — точка последнего заказа и число заказов (только чтение)
+    last = await db.get_client_last_place(phone) if row else {}
+    return {"ok": True, "client": row, "last": last}
 
 
 @app.get("/api/clients/{client_id}")

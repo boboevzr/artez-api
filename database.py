@@ -5115,6 +5115,22 @@ async def get_crm_client_by_phone(phone: str) -> dict | None:
         return dict(row) if row else None
 
 
+async def get_client_last_place(phone: str) -> dict:
+    """Новый заказ в приложении (18.11.2026): последняя точка/адрес/филиал клиента из его заказов + число заказов (только чтение)."""
+    if not pool:
+        return {}
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            SELECT location, location_address, address, branch FROM orders
+            WHERE client_phone = $1 AND COALESCE(location, '') <> ''
+            ORDER BY created_at DESC LIMIT 1
+        """, phone)
+        n = await conn.fetchval("SELECT COUNT(*) FROM orders WHERE client_phone = $1", phone)
+        out = dict(row) if row else {}
+        out["orders_total"] = int(n or 0)
+        return out
+
+
 async def get_crm_client_by_id(client_id: int) -> dict | None:
     if not pool:
         return None
