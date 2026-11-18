@@ -8948,7 +8948,9 @@ async def _notify_driver_payment(row: dict, order_id: int, text: str):
 # ── Подтверждение оплат картой/переводом ──────────────────────────────────────
 
 @app.get("/api/admin/cash/unconfirmed-payments")
-async def get_unconfirmed_payments(_=Depends(get_current_staff)):
+async def get_unconfirmed_payments(staff=Depends(get_current_staff)):
+    if not _can_review_payments(staff):   # 18.11.2026: только кассир/админ
+        raise HTTPException(status_code=403, detail="Нет доступа")
     rows = await db.get_unconfirmed_payments()
     return {"ok": True, "payments": rows}
 
@@ -9576,7 +9578,7 @@ async def get_order_activity(order_id: int, staff=Depends(get_current_staff)):
 async def cash_summary(
     date_from: str = None,
     date_to:   str = None,
-    _=Depends(get_current_staff),
+    _=Depends(_get_admin_any),   # 18.11.2026: сводка кассы компании — только админ (раньше любой сотрудник)
 ):
     from datetime import date
     today = date.today().isoformat()
@@ -9623,7 +9625,9 @@ async def delete_shift(shift_id: int, me=Depends(get_current_staff)):
     return {"ok": True}
 
 @app.get("/api/admin/cash/current-shift")
-async def current_shift(_=Depends(get_current_staff)):
+async def current_shift(staff=Depends(get_current_staff)):
+    if not _can_review_payments(staff):   # 18.11.2026: смены кассы — кассир/админ
+        raise HTTPException(status_code=403, detail="Нет доступа")
     row = await db.get_current_shift()
     return {"ok": True, "shift": row if row else None}
 
@@ -9636,12 +9640,14 @@ async def staff_today_summary(staff=Depends(get_current_staff)):
     return {"ok": True, **(await db.get_today_summary())}
 
 @app.get("/api/admin/cash/dashboard")
-async def cash_dashboard(_=Depends(get_current_staff)):
+async def cash_dashboard(_=Depends(_get_admin_any)):   # 18.11.2026: только админ (раньше любой сотрудник)
     data = await db.get_cash_dashboard()
     return {"ok": True, **data}
 
 @app.get("/api/admin/cash/shifts")
-async def get_shifts(_=Depends(get_current_staff)):
+async def get_shifts(staff=Depends(get_current_staff)):
+    if not _can_review_payments(staff):   # 18.11.2026: смены кассы — кассир/админ
+        raise HTTPException(status_code=403, detail="Нет доступа")
     rows = await db.get_cash_shifts()
     return {"ok": True, "shifts": rows}
 
