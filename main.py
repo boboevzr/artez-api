@@ -3255,10 +3255,11 @@ async def _need_admin_password(me: dict):
     fails = [x for x in _ADMIN_PW_FAILS.get(sid, []) if now - x < 600]
     if len(fails) >= 5:
         raise HTTPException(status_code=429, detail="Слишком много неверных паролей — подождите 10 минут")
+    # попытку считаем ДО любого await (параллельные запросы не обойдут предел); успех — снимаем
+    fails.append(now)
+    _ADMIN_PW_FAILS[sid] = fails
     apass = await get_admin_pass()
     if not apass or not me.get("_admin_pw") or not secrets.compare_digest(str(me["_admin_pw"]), str(apass)):
-        fails.append(now)
-        _ADMIN_PW_FAILS[sid] = fails
         raise HTTPException(status_code=403, detail="Нужен пароль администратора")
     _ADMIN_PW_FAILS.pop(sid, None)
 
