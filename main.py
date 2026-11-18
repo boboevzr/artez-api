@@ -1508,12 +1508,13 @@ async def staff_me(staff=Depends(get_current_staff)):
     return {"ok": True, "staff": _staff_public(staff)}
 
 @app.get("/api/staff/list")
-async def staff_list(role: str = None, me=Depends(get_current_staff)):
+async def staff_list(role: str = None, me=Depends(get_current_staff), authorization: str = Header(None)):
     rows = await db.get_all_staff()
     staff = [_staff_public(dict(r)) for r in rows]
-    # Пароли открытым текстом (🔑 в admin.html → Сотрудники) — только админу. Раньше
-    # этот список с паролями ВСЕХ, включая админов, получал любой сотрудник (2026-10-17).
-    if me.get("role") != "admin":
+    # Пароли открытым текстом (🔑 в admin.html → Сотрудники) — только мастер-входу admin.html. Раньше
+    # этот список с паролями ВСЕХ, включая админов, получал любой сотрудник (2026-10-17); с 18.11.2026 —
+    # и сотрудник с ролью admin (приложение) паролей не получает.
+    if not _is_master_token(authorization):
         for s in staff:
             s.pop("plain_password", None)
     if role:
@@ -1521,7 +1522,9 @@ async def staff_list(role: str = None, me=Depends(get_current_staff)):
     return {"ok": True, "staff": staff}
 
 @app.post("/api/staff/create")
-async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))):
+async def staff_create(req: StaffCreateRequest, authorization: str = Header(None),
+                       x_admin_password: str = Header(None)):
+    await _staff_admin_confirm(authorization, x_admin_password)   # 18.11.2026: было require_perm("staff")
     from datetime import date as date_type
     import traceback
     hashed = pwd_context.hash(req.password[:72])
@@ -1546,11 +1549,18 @@ async def staff_create(req: StaffCreateRequest, _=Depends(require_perm("staff"))
     return {"ok": True, "id": sid}
 
 @app.patch("/api/staff/{staff_id}")
-async def staff_update(staff_id: int, body: dict, me=Depends(get_current_staff)):
+async def staff_update(staff_id: int, body: dict, me=Depends(get_current_staff),
+                       authorization: str = Header(None), x_admin_password: str = Header(None)):
     is_admin = me.get("role") == "admin"
     is_self  = me.get("id") == staff_id
     if not is_admin and not is_self:
         raise HTTPException(status_code=403, detail="Нет доступа")
+    # 18.11.2026: роль, вкл/выкл, уволить, логин, ЗП, Telegram (кнопки кассы, коды), право табеля чужого
+    # сотрудника — опасно → пароль администратора (ревью «Этап Э3»)
+    if is_admin and not is_self and any(k in body for k in ("role", "active", "is_active", "fired", "login",
+                                                             "salary_type", "salary_rate", "tg_id", "tg_username",
+                                                             "can_view_timesheet")):
+        await _staff_admin_confirm(authorization, x_admin_password)
     if is_admin:
         allowed = {"first_name","last_name","middle_name","phone","login","role","branch","position","active","is_active","fired","can_view_timesheet","note","hire_date","salary_type","salary_rate","tg_id","tg_username","gender","birth_date"}
     else:
@@ -2410,9 +2420,15 @@ async def send_route_to_delivery_group(route_id: int, me=Depends(get_current_sta
 
 
 @app.delete("/api/admin/staff/{staff_id}")
-async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
+async def delete_staff(staff_id: int, me=Depends(get_current_staff),
+                       authorization: str = Header(None), x_admin_password: str = Header(None)):
     if me.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Нет доступа")
+    # 18.11.2026 (ревью «Этап Э3»): сотрудник-админ с токеном приложения — только с паролем администратора;
+    # себя не удалить (мастер-вход admin.html — как раньше, без пароля)
+    await _staff_admin_confirm(authorization, x_admin_password)
+    if me.get("id") == staff_id and not _is_master_token(authorization):
+        raise HTTPException(status_code=400, detail="Нельзя удалить самого себя")
     if not db.pool:
         raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
@@ -2433,9 +2449,12 @@ async def delete_staff(staff_id: int, me=Depends(get_current_staff)):
     return {"ok": True}
 
 @app.put("/api/staff/{staff_id}/password")
-async def staff_change_password(staff_id: int, body: dict, me=Depends(get_current_staff)):
+async def staff_change_password(staff_id: int, body: dict, me=Depends(get_current_staff),
+                                authorization: str = Header(None), x_admin_password: str = Header(None)):
     if me["role"] != "admin" and me["id"] != staff_id:
         raise HTTPException(status_code=403, detail="Нет доступа")
+    if me.get("id") != staff_id:   # 18.11.2026: чужой пароль — с паролем администратора
+        await _staff_admin_confirm(authorization, x_admin_password)
     new_pw = body.get("password", "")
     if len(new_pw) < 6:
         raise HTTPException(status_code=400, detail=bi("Минимум 6 символов","Kamida 6 ta belgi"))
@@ -2468,15 +2487,21 @@ async def staff_sessions_list(staff_id: int, _=Depends(require_perm("staff"))):
 
 
 @app.delete("/api/admin/staff/{staff_id}/sessions/{sid}")
-async def staff_session_revoke(staff_id: int, sid: int, _=Depends(require_perm("staff"))):
+async def staff_session_revoke(staff_id: int, sid: int, me=Depends(require_perm("staff")),
+                               authorization: str = Header(None), x_admin_password: str = Header(None)):
+    if me.get("id") != staff_id:   # 18.11.2026
+        await _staff_admin_confirm(authorization, x_admin_password)
     if not await db.revoke_staff_sessions(staff_id, "revoked_by_admin", sid=sid):
         raise HTTPException(status_code=404, detail="Сессия не найдена или уже завершена")
     return {"ok": True}
 
 
 @app.post("/api/admin/staff/{staff_id}/sessions/revoke-all")
-async def staff_sessions_revoke_all(staff_id: int, me=Depends(require_perm("staff"))):
+async def staff_sessions_revoke_all(staff_id: int, me=Depends(require_perm("staff")),
+                                    authorization: str = Header(None), x_admin_password: str = Header(None)):
     """«Выйти на всех устройствах». Свою текущую сессию (если admin завершает себе) не трогаем."""
+    if me.get("id") != staff_id:   # 18.11.2026: чужие сессии — с паролем администратора
+        await _staff_admin_confirm(authorization, x_admin_password)
     keep = me.get("_sid") if me.get("id") == staff_id else None
     ended = await db.revoke_staff_sessions(staff_id, "revoked_by_admin", except_sid=keep)
     return {"ok": True, "sessions_ended": ended}
@@ -3262,6 +3287,24 @@ async def _need_admin_password(me: dict):
     if not apass or not me.get("_admin_pw") or not secrets.compare_digest(str(me["_admin_pw"]), str(apass)):
         raise HTTPException(status_code=403, detail="Нужен пароль администратора")
     _ADMIN_PW_FAILS.pop(sid, None)
+
+def _is_master_token(authorization: str | None) -> bool:
+    """Мастер-вход admin.html (sub=admin) — в отличие от сотрудника с ролью admin."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return False
+    try:
+        return jwt.decode(authorization.removeprefix("Bearer ").strip(), JWT_SECRET, algorithms=[JWT_ALGORITHM]).get("sub") == "admin"
+    except JWTError:
+        return False
+
+
+async def _staff_admin_confirm(authorization: str | None, x_admin_password: str | None):
+    """«Сотрудники» в приложении (18.11.2026): опасное действие сотрудника-админа — пароль администратора
+    в X-Admin-Password (_need_admin_password, 5 ошибок → 429). Мастер-токен admin.html — без пароля."""
+    me = await _get_admin_any(authorization, x_admin_password)
+    await _need_admin_password(me)
+    return me
+
 
 async def _get_admin_or_staff_clients(authorization: str = Header(None)):
     """Принимает admin JWT или staff JWT с пермиссией clients."""
@@ -10282,9 +10325,10 @@ def _can_give_discount(s: dict) -> bool:
 
 
 @app.patch("/api/admin/staff/{staff_id}/can-give-discount")
-async def admin_set_can_give_discount(staff_id: int, _staff=Depends(_get_admin),
+async def admin_set_can_give_discount(staff_id: int, _staff=Depends(_get_admin_any),
                                       value: bool = Body(..., embed=True)):
-    """Тогл «Может давать скидку» в карточке сотрудника (admin.html)."""
+    """Тогл «Может давать скидку» в карточке сотрудника (admin.html; приложение — с паролем администратора)."""
+    await _need_admin_password(_staff)
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow("UPDATE staff SET can_give_discount=$2 WHERE id=$1 RETURNING id, can_give_discount",
@@ -10295,8 +10339,9 @@ async def admin_set_can_give_discount(staff_id: int, _staff=Depends(_get_admin),
 
 
 @app.patch("/api/admin/staff/{staff_id}/can-edit-items")
-async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),
+async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin_any),
                                     can_edit_items: bool = Body(..., embed=True)):
+    await _need_admin_password(_staff)   # 18.11.2026: сотрудник-админ — с паролем администратора
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -10307,7 +10352,7 @@ async def admin_set_can_edit_items(staff_id: int, _staff=Depends(_get_admin),
     return {"ok": True, **dict(row)}
 
 @app.patch("/api/admin/staff/{staff_id}/permissions")
-async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
+async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin_any),
     can_edit_items:       bool = Body(True,  embed=True),
     can_measure:          bool = Body(False, embed=True),
     can_approve_measure:  bool = Body(False, embed=True),
@@ -10330,6 +10375,7 @@ async def admin_set_staff_permissions(staff_id: int, _staff=Depends(_get_admin),
     attendance_anywhere:  bool | None = Body(None, embed=True),
     # None — не прислали (старая админка) → оставить как есть
     notify_delivery_digest: bool | None = Body(None, embed=True)):
+    await _need_admin_password(_staff)   # 18.11.2026: права — мастер или сотрудник-админ с паролем
     if not db.pool: raise HTTPException(status_code=503, detail="DB unavailable")
     async with db.pool.acquire() as conn:
         row = await conn.fetchrow(
